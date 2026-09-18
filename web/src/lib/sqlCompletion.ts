@@ -181,7 +181,7 @@ function findContext(text: string, endOffset: number): { kind: 'keyword' | 'colu
 }
 
 let registered = false;
-let connIdRef: { current: string | null } = { current: null };
+const connIdRef: { current: string | null } = { current: null };
 
 /** 由 QueryWorkspace 在挂载/切连接时设置当前 connId；provider 是全局注册的，用此 ref 保持最新。 */
 export function setSqlCompletionConnId(connId: string | null) {

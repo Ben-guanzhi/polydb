@@ -5,10 +5,10 @@
 polydb 是一个前端与数据库后端严格解耦的通用数据库客户端：
 同一套契约（`spec/`）驱动 Rust 与 Go 双后端，Web / TUI / GUI 三类前端共用。
 
-- **前端**：Web（React + Monaco）、TUI（bubbletea）、GUI（GPUI）
+- **前端**：Web（React + Monaco，主力）、TUI（bubbletea）、GUI（GPUI，**原型沉淀**）；GUI/TUI 共用 Go 后端逻辑，GUI 目前仅做技术验证
 - **数据库**：SQLite、PostgreSQL、MySQL、SQL Server、Oracle、Redis
 - **语言**：Rust（桌面 / 本地开发）+ Go（服务端 / TUI / CLI）
-- **契约**：`spec/openapi.yaml`（REST 控制面）、`spec/asyncapi.yaml`（WebSocket 查询流）、`spec/schemas/*.json`（JSON Schema）、`spec/arrow/`（结果集）
+- **契约**：`spec/openapi.yaml`（REST 控制面）、`spec/asyncapi.yaml`（WebSocket 查询流）、`spec/schemas/*.json`（JSON Schema）、`spec/arrow/`（结果集，预留）
 
 ## 铁律
 
@@ -55,6 +55,10 @@ cd web && npm install && npm run dev
 # TUI
 cd go && go run ./cmd/polydb-tui
 
+# CLI（本地 SQLite 最小查询器，非交互）
+cd go && go run ./cmd/polydb-cli -db test.db -e "SELECT 1 AS x"
+printf 'SELECT 42 AS answer' | go run ./cmd/polydb-cli -db :memory:
+
 # 契约测试
 cd test/contract && go test -count=1 ./...
 # Rust 后端需要先 `cargo build -p polydb-server`
@@ -65,7 +69,7 @@ cd test/contract && go test -count=1 ./...
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
 | M0 | 定义 spec/，生成 Rust/Go/TS 协议代码 | ✓ |
-| M1 | Rust app-core + LocalTransport + GPUI 跑通 | ✓ |
+| M1 | Rust app-core + LocalTransport + GPUI 跑通（GUI 作为原型沉淀，功能重心在 Web） | ✓ |
 | M2 | Go app-core + HTTP server，契约测试通过 | ✓ |
 | M3 | Web 前端接 Go 后端 | ✓ |
 | M4 | Go TUI（bubbletea） | ✓ |
@@ -97,9 +101,9 @@ CI 定义在 `.github/workflows/ci.yml`（Rust / Go / Web / contract 四 job，P
 
 ## 关键设计
 
-- **能力分层驱动抽象**（AGENTS.md §4）：`DatabaseDriver` 基础层 + `SqlDriver` / `KvDriver` 特化层，动态分派用 enum 包装避免 dyn 关联类型痛点。
-- **编码格式**（[spec/encoding.md](./spec/encoding.md)）：控制面/元数据/WS 全部 MessagePack；JSON 仅作调试与握手 fallback；Arrow 用于大结果集流式传输（预留扩展）。
-- **存储层**：本地 SQLite + WAL；密码只存 `password_ref`，实际值经 keyring（Rust 加密文件后端 / Go OS keyring + 加密文件兜底）。
+- **能力分层驱动抽象**（AGENTS.md §4）：`DatabaseDriver` 基础层 + `SqlDriver` / `KvDriver` 特化层；Rust 用 `Arc<dyn SqlDriver>` / `Arc<dyn KvDriver>`（trait object）动态分派。
+- **编码格式**（[spec/encoding.md](./spec/encoding.md)）：控制面/元数据/WS 全部 MessagePack；JSON 仅作调试与握手 fallback；Arrow 用于大结果集流式传输（**预留扩展，未实现**，当前数据面一律 MessagePack）。
+- **存储层**：本地 SQLite + WAL，当前单表 `connections`（`password_ref` + `ssh_tunnel` JSON 列）；密码只存 `password_ref`，实际值经 keyring —— Rust 与 Go 默认都是本地加密文件后端，Go 额外支持全系统凭据管理器。
 - **数据面/控制面分离**：控制面走 HTTP REST（`/api/...`），查询走 HTTP（同步）或 WebSocket（`/ws`，流式与取消）。
 - **错误结构统一**：`{code, message, detail, retryable, cause}`，错误码 `POLYDB_ERR_*`。
 

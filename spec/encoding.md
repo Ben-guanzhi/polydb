@@ -11,12 +11,14 @@
 | spec/ 契约定义 | OpenAPI + JSON Schema | — |
 | 契约测试 fixture | JSON | `application/json` |
 | REST 控制面 | MessagePack | `application/msgpack` |
-| REST 数据面（查询结果） | Arrow IPC stream | `application/vnd.apache.arrow.stream` |
+| REST 数据面（查询结果） | MessagePack（当前实现） | `application/msgpack` |
 | WebSocket 控制消息 | MessagePack | `application/msgpack` |
-| WebSocket 大结果流 | Arrow IPC stream | `application/vnd.apache.arrow.stream` |
+| WebSocket 大结果流 | MessagePack（当前实现） | `application/msgpack` |
 | 进程内（GUI/TUI ↔ app-core） | 零序列化（直接传结构体） | — |
 | 错误响应 | JSON | `application/json` |
 | 调试 / 握手 | JSON | `application/json` |
+
+> **状态说明**：Arrow IPC（`application/vnd.apache.arrow.stream`）与大数据体旁路（§3、§5）均为**预留设计，当前未实现**——REST 与 WebSocket 数据面的实际格式一律 MessagePack。实现 Arrow 后按本文件约定回填。
 
 ---
 
@@ -36,7 +38,9 @@
 
 ---
 
-## 3. Arrow IPC 约定
+## 3. Arrow IPC 约定（预留，未实现）
+
+> 本节为预留设计。当前 REST / WS 数据面一律 MessagePack（见 §1 状态说明）。以下约定在启用 Arrow 时生效。
 
 - 使用 **Arrow IPC streaming** 格式（非 file 格式）
 - 每个查询结果为一个或多个 RecordBatch
@@ -70,7 +74,9 @@ JSON 仅用于：
 
 ---
 
-## 5. 大字段旁路
+## 5. 大字段旁路（预留，未实现）
+
+> 本节为预留设计。当前大字段（BLOB/大 TEXT）直接在结果集内联，未做旁路引用。以下约定在实现旁路时生效。
 
 大字段（BLOB / 大 TEXT，阈值 1MB）**不内联**到结果集中。
 
@@ -89,7 +95,7 @@ JSON 仅用于：
 
 | 场景 | 压缩 | 库（Rust） | 库（Go） |
 |------|------|-----------|---------|
-| Arrow IPC（可选） | zstd | `zstd` | `github.com/klauspost/compress/zstd` |
+| Arrow IPC（预留） | zstd | `zstd` | `github.com/klauspost/compress/zstd` |
 | HTTP 响应 | gzip（标准 HTTP） | Axum tower-http | net/http stdlib |
 | 存储（SQLite） | 无（WAL 模式） | — | — |
 

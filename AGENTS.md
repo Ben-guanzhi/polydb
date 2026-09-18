@@ -58,26 +58,24 @@ polydb/
 │ │ ├── core/ # 领域模型、错误、DTO（无 IO）
 │ │ ├── db-core/ # DatabaseDriver / SqlDriver / KvDriver
 │ │ ├── db-sqlite/ db-mysql/ db-postgres/ db-mssql/ db-oracle/ db-redis/
-│ │ ├── storage/ # sqlx + SQLite
+│ │ ├── storage/ # sqlx + SQLite + 本地文件 keyring
 │ │ ├── app-core/ # use case 编排
 │ │ ├── transport/ # LocalTransport / HttpTransport
-│ │ ├── ui-gui/ # GPUI
-│ │ ├── ui-tui/ # ratatui
-│ │ └── server/ # Axum
+│ │ ├── server/ # Axum（HTTP 服务端，二进制在 crate 内）
+│ │ └── ui-gui/ # GPUI（仅 GUI；TUI 只做 Go，无 Rust ui-tui）
 │ └── apps/
-│ ├── polydb-gui/
-│ ├── polydb-tui/
-│ └── polydb-server/
+│   └── polydb-gui/
 ├── go/
 │ ├── go.mod # module github.com/<org>/polydb
 │ ├── cmd/
 │ │ ├── polydb-server/ # HTTP+WS
 │ │ ├── polydb-tui/ # bubbletea
-│ │ └── polydb-cli/
+│ │ └── polydb-cli/ # 本地 SQLite 最小查询器（非交互）
 │ ├── pkg/
 │ │ ├── protocol/ # 由 spec 生成
-│ │ ├── core/ dbcore/ appcore/ storage/ transport/
-│ │ └── dbsqlite/ dbmysql/ dbpostgres/ dbmssql/ dboracle/ dbredis/
+│ │ ├── appcore/ dbcore/ server/ storage/ sshtunnel/ keyring/
+│ │ ├── dbsqlite/ dbmysql/ dbpostgres/ dbmssql/ dboracle/ dbredis/
+│ │ └── core/ transport/ # 预留空目录
 │ └── internal/tui/
 ├── web/ # 前端只写一次（React/Vue + Monaco）
 │ └── src/api/ # 由 spec 生成 TS 类型（@polydb/api）
@@ -127,25 +125,23 @@ pub trait KvDriver: DatabaseDriver {
     async fn set_value(&self, key: &str, value: RedisValue) -> Result<()>;
     async fn exec_command(&self, args: &[String]) -> Result<RedisReply>;
 }
-动态调度：用 enum 包装各驱动类型，方法通过 match 分派，避免 dyn 关联类型痛点。
+动态调度：统一用 `Arc<dyn SqlDriver>` / `Arc<dyn KvDriver>`（trait object）持有驱动，`DatabaseDriver` 提供 `as_sql()` / `as_kv()` 做能力降级判断。
 
 rust
-pub enum SqlConnection {
-    Sqlite(SqliteConn),
-    MySql(MySqlConn),
-    Postgres(PgConn),
-    Mssql(MssqlConn),
-    Oracle(OracleConn),
+// Connection 只持有一个 trait object 引用
+pub struct Connection { driver: Arc<dyn DatabaseDriver> }
+
+impl Connection {
+    pub fn new(driver: Arc<dyn DatabaseDriver>) -> Self;   // kind 由驱动自身决定
+    pub fn as_sql(&self) -> Option<&dyn SqlDriver>;
+    pub fn sql_driver_arc(&self) -> Option<Arc<dyn SqlDriver>>; // → SqlConnection::new(conn) 包装
 }
 
-pub enum KvConnection {
-    Redis(RedisConn),
-}
+pub struct SqlConnection { conn: Arc<dyn SqlDriver> }
+pub struct KvConnection { conn: Arc<dyn KvDriver> }
+```
 
-pub enum Connection {
-    Sql(SqlConnection),
-    Kv(KvConnection),
-}
+连接类型（SQLite/MySQL/Postgres/MSSQL/Oracle 的 `Conn`、Redis 的 `RedisConn`）各自实现 `DatabaseDriver` 并返回 `clone_sql_driver_arc() / clone_kv_driver_arc()` 供上层无差异使用，避免在 driver 层做 match 分派。
 4.2 Go
 go
 type Driver interface {
@@ -181,12 +177,12 @@ type KVDriver interface {
 spec/ 契约定义	OpenAPI + JSON Schema
 契约测试 fixture	JSON（可读、可 diff）
 REST 控制面（连接/元数据/DDL）	MessagePack
-REST 数据面（查询结果）	Arrow IPC + 分页
+REST 数据面（查询结果）	MessagePack（当前实现；Arrow IPC 为预留，未实现）
 WebSocket 事件	MessagePack
-WebSocket 大结果流	Arrow IPC stream
-大字段（BLOB/大 TEXT）	旁路 + Range 请求，不内联
+WebSocket 大结果流	MessagePack（当前实现；Arrow IPC stream 为预留，未实现）
+大字段（BLOB/大 TEXT）	预留（旁路 + Range 请求，未实现；当前直接在结果集内联）
 进程内（GUI/TUI↔app-core）	零序列化，直接传结构体
-Content-Type：application/msgpack、application/vnd.apache.arrow.stream。
+Content-Type：application/msgpack（预留：application/vnd.apache.arrow.stream）。
 
 JSON 仅作为调试/握手 fallback，可保留 application/json。
 
@@ -196,16 +192,16 @@ JSON 仅作为调试/握手 fallback，可保留 application/json。
 用途	Rust	Go
 MessagePack	rmp-serde	vmihailenco/msgpack
 CBOR	ciborium	fxamacker/cbor
-Arrow	arrow-rs	apache/arrow-go
+Arrow	预留（未引入）	—
 压缩	flate2 / zstd	klauspost/compress
 6. 存储层（storage）
 本地 SQLite，sqlx（Rust）/ modernc.org/sqlite（Go，纯 Go 免 cgo）。
 
 WAL 模式。
 
-表：connections、query_history、ssh_tunnels。
+表结构：当前仅有单表 `connections`（含 `password_ref` 与 `ssh_tunnel` JSON 列）；`query_history`（M12 在 Web/浏览器侧本地存，不入 DB）、`ssh_tunnels` 尚未落库。
 
-密码不落库：用 keyring（OS 凭据管理器）或本地加密文件 + 主密码，DB 里只存 password_ref。
+密码不落库：明文一律进 keyring，DB 只存 `password_ref`。两端默认用本地加密文件 `keyring.bin`（AES-256-GCM，scrypt 主密码派生）；Go 额外支持 `POLYDB_KEYRING=os` 走系统凭据管理器（zalando/go-keyring），Rust 目前仅有文件后端。
 
 Repository 模式；Rust 用 OnceCell 单例。
 
@@ -398,9 +394,9 @@ make gen-protocol   # spec/ → rust/crates/protocol, go/pkg/protocol, web/src/a
 项目名	polydb
 Rust workspace	polydb
 Rust crate 前缀	polydb-
-Rust 二进制	polydb-gui / polydb-tui / polydb-server
+Rust 二进制	polydb-gui（仅 GUI；TUI/Server 另一套走 Go）
 Go module	github.com/<org>/polydb
-Go 二进制	polydb-server / polydb-tui / polydb-cli
+Go 二进制	polydb-server / polydb-tui / polydb-cli（本地 SQLite 查询器）
 Web 包名	@polydb/api / @polydb/web
 环境变量前缀	POLYDB_
 配置目录	~/.config/polydb/

@@ -15,7 +15,7 @@ interface Snapshot {
 }
 
 const listeners = new Set<(s: Snapshot) => void>();
-let registry: Map<string, CommandItem> = new Map();
+const registry: Map<string, CommandItem> = new Map();
 let version = 0;
 
 function emit() {

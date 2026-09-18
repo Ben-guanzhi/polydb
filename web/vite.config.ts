@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
@@ -5,6 +6,12 @@ import react from '@vitejs/plugin-react';
 // 避免浏览器跨域；控制面 body 是 msgpack 二进制，http-proxy 原样透传。
 export default defineConfig({
   plugins: [react()],
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    setupFiles: ['./src/test/setup.ts'],
+    include: ['src/**/*.{test,spec}.{ts,tsx}'],
+  },
   server: {
     port: 5173,
     proxy: {

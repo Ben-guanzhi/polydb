@@ -559,7 +559,7 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
     pendingTxRef.current = null;
     api.rollbackTransaction(p.txId).catch(() => {});
     setPendingTx(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [connId]);
 
   // Load persisted tab state per connection. Runs once on mount and on connId change.
@@ -580,7 +580,7 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
     setLastQuerySql(null);
     setSql(t.sql);
     setParams(t.params);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [connId]);
 
   useEffect(() => {

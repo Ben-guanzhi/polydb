@@ -1583,7 +1583,7 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
       .catch((e: unknown) => { if (!cancelled) setError(toMsg(e)); })
       .finally(() => { if (!cancelled) setColsLoading(false); });
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [step, selSchema, selTable, connId, pendingQualitySuggestions]);
 
   // presetSnapshotsRefresh 仅作 bump counter，用于 savePreset/restoreSnapshot 后触发 re-render
