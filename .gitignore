@@ -6,6 +6,7 @@
 # Web
 /web/node_modules/
 /web/dist/
+*.tsbuildinfo
 # Go
 /go/bin/
 
