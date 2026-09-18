@@ -154,7 +154,7 @@ function EditableTemplate({
         <input type="checkbox" checked={!!value.requiresTable} onChange={(e) => onChange({ ...value, requiresTable: e.target.checked })} />
         <span>需要选中表（否则禁用）</span>
         <span style={{ marginLeft: 'auto', fontFamily: 'ui-monospace, monospace' }}>
-          占位符：<code>{'\${table}'}</code> <code>{'\${schema}'}</code> <code>{'\${column}'}</code> <code>{'\${kind}'}</code>
+          占位符：<code>{'${table}'}</code> <code>{'${schema}'}</code> <code>{'${column}'}</code> <code>{'${kind}'}</code>
         </span>
       </label>
       <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
@@ -226,7 +226,7 @@ export default function CustomTemplatesModal({ items, onChange, onClose }: Custo
             style={{ padding: '4px 8px', fontSize: 11, border: '1px solid var(--border)', borderRadius: 4, background: 'transparent', color: 'var(--fg)', cursor: 'pointer' }}>恢复示例</button>
         </div>
         <div style={{ fontSize: 11, color: 'var(--muted)', fontFamily: 'ui-monospace, monospace' }}>
-          占位符：<code>{'\${table}'}</code> <code>{'\${schema}'}</code> <code>{'\${column}'}</code> <code>{'\${kind}'}</code>
+          占位符：<code>{'${table}'}</code> <code>{'${schema}'}</code> <code>{'${column}'}</code> <code>{'${kind}'}</code>
         </div>
         {editingId === null && (
           <button onClick={startNew} className="primary" style={{ padding: '6px 12px', fontSize: 12, borderRadius: 4 }}>＋ 新建模板</button>

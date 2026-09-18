@@ -43,14 +43,6 @@ function nowExpr(kind: SqlKind | null): string {
   }
 }
 
-function limitClause(kind: SqlKind | null, n: number): string {
-  switch (kind) {
-    case 'mssql': return `OFFSET 0 ROWS FETCH NEXT ${n} ROWS ONLY`;
-    case 'oracle': return `FETCH FIRST ${n} ROWS ONLY`;
-    default: return `LIMIT ${n}`;
-  }
-}
-
 export const TEMPLATES: SqlTemplate[] = [
   // ── 查询 ─────────────────────────────────────────
   {
@@ -284,7 +276,6 @@ export const TEMPLATES: SqlTemplate[] = [
       const raw = c.rawSql?.trim();
       if (!raw) return null;
       const stripped = raw.replace(/;/g, '').trim();
-      const withoutExplain = stripped.replace(/^(explain\b[\s\S]*)/i, '$1');
       if (/^explain\b/i.test(stripped)) return `${stripped};`;
       switch (c.kind) {
         case 'sqlite': return `EXPLAIN QUERY PLAN ${stripped};`;

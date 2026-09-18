@@ -43,7 +43,6 @@ import {
   applyPresetsBackup,
   buildPreset,
   clearAuditCache,
-  deleteAuditCacheEntry,
   deletePreset,
   diffPreset,
   exportPresetsBackup,
@@ -62,7 +61,6 @@ import {
   saveAuditCache,
   savePreset,
   type BackupPreviewItem,
-  type DeletedPresetEntry,
   type ImportPreset,
   type PresetAuditStatus,
   type PresetBackup,
@@ -72,7 +70,6 @@ import {
   type BackupApplySnapshot,
   diffUndoImpact,
   type UndoImpactDetail,
-  type UndoImpact,
 } from '../lib/importPresets';
 import { addHistory, clearHistory, deleteHistory, listHistory, type ImportHistoryEntry } from '../lib/importHistory';
 import { publishEditorStatus, clearEditorStatus } from '../lib/statusBus';
@@ -181,6 +178,7 @@ const DIFF_GROUP_COLOR: Record<string, string> = {
 // changed = 其他（值替换）
 type DiffItemKind = 'added' | 'removed' | 'changed';
 const DIFF_EMPTY_MARKS = new Set(['∅', '空', 'null（默认）']);
+const FIX_STACK_MAX_BYTES = 512 * 1024;
 const classifyDiffItem = (it: { before: string; after: string }): DiffItemKind => {
   const isBeforeEmpty = it.before === '' || DIFF_EMPTY_MARKS.has(it.before);
   const isAfterEmpty = it.after === '' || DIFF_EMPTY_MARKS.has(it.after);
@@ -1025,10 +1023,10 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
       return 'all';
     },
   );
-  const persistMappingFilter = (v: MappingFilter) => {
+  const persistMappingFilter = useCallback((v: MappingFilter) => {
     setMappingFilter(v);
     try { localStorage.setItem('polydb.mappingFilter.v1', v); } catch { /* ignore */ }
-  };
+  }, []);
   // M30.81 映射行排序（仅影响视觉顺序，不改数据索引）
   type MappingSort = 'index' | 'health-asc' | 'empty-desc' | 'target-asc' | 'csv-asc';
   const [mappingSort, setMappingSort] = useState<MappingSort>(() => {
@@ -1038,10 +1036,10 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
     } catch { /* ignore */ }
     return 'index';
   });
-  const persistMappingSort = (v: MappingSort) => {
+  const persistMappingSort = useCallback((v: MappingSort) => {
     setMappingSort(v);
     try { localStorage.setItem('polydb.mappingSort.v1', v); } catch { /* ignore */ }
-  };
+  }, []);
   const [mappingSearch, setMappingSearch] = useState('');
   // M30.76 搜索历史：localStorage 持久化 + ↑/↓ 循环 + Enter 选中 + Esc 关闭下拉
   const [mappingSearchHistory, setMappingSearchHistory] = useState<string[]>(() => {
@@ -1140,7 +1138,6 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
   // 惰性恢复：解析失败/类型不符/size>512KB 时静默丢弃；QuotaExceededError 时上报一次
   const fixStackWarnRef = useRef(false);
   const MAX_FIX_HISTORY = 20;
-  const FIX_STACK_MAX_BYTES = 512 * 1024;
   const isFixEntry = (x: unknown): x is FixEntry => {
     if (!x || typeof x !== 'object') return false;
     const o = x as Record<string, unknown>;
@@ -1774,7 +1771,7 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
     };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
-  }, [step, flashJump]);
+  }, [step, flashJump, parse, mappings, persistMappingFilter, persistMappingSort]);
 
   // M30.94 Ctrl+Alt+1..4 键盘切向导步：与 M30.51 徽章点击同 canNav 前置数据守卫；双修饰键区分结构导航（Ctrl+Alt=步）与视图操作（Alt=过滤器/排序/搜索）；单 Alt+1..4 已被 M30.80 过滤器快捷键占用
   useEffect(() => {
@@ -2007,7 +2004,7 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
     ? buildInsertStatement(selSchema, selTable, targetColNames, targetColNames.map(() => '?').join(', '))
     : '');
 
-  const validations = opts.validations ?? {};
+  const validations = useMemo(() => opts.validations ?? {}, [opts.validations]);
   const validationResult = useMemo(() => {
     if (!parse || !hasAnyValidation(Object.values(validations)[0])) {
       return null;
@@ -2938,15 +2935,6 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
     }
   };
 
-  const undoFix = () => {
-    if (undoStack.length === 0) return;
-    const [top, ...rest] = undoStack;
-    setUndoStack(rest);
-    setRedoStack((r) => [top, ...r].slice(0, MAX_FIX_HISTORY));
-    setOpts(top.snapshot);
-    publishEditorStatus({ message: `↩️ 已撤销「${top.label}」修复：${top.msg}`, messageAt: Date.now() });
-  };
-
   // 导出所有已撤销修复的完整时间线到 Markdown 文件
   // 语义：redoStack[i].snapshot 是"应用 fix[i] 前"的状态，redoStack[i+1].snapshot 是"应用 fix[i] 后"的状态
   // 所以 buildUndoDiff(redoStack[i].snapshot, redoStack[i+1].snapshot) 得到该 fix 的字段变化
@@ -3079,20 +3067,6 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 1000);
     publishEditorStatus({ message: `📄 已导出修复时间线（${format.toUpperCase()}，${entries.length} 条，${text.length} 字符）`, messageAt: Date.now() });
-  };
-
-  const redoFix = () => {
-    if (redoStack.length === 0) return;
-    const [top, ...rest] = redoStack;
-    setRedoStack(rest);
-    // 重做：把当前 opts 作为新的撤销快照压入 undoStack，然后把 top.snapshot 应用为当前 opts
-    const currentSnap = JSON.parse(JSON.stringify(opts)) as ImportOptions;
-    setUndoStack((u) => [
-      { ...top, snapshot: currentSnap, at: Date.now() },
-      ...u,
-    ].slice(0, MAX_FIX_HISTORY));
-    setOpts(top.snapshot);
-    publishEditorStatus({ message: `↪️ 已重做「${top.label}」修复：${top.msg}`, messageAt: Date.now() });
   };
 
   // 批量撤销 N 步：一次性移动 N 项到 redoStack，最终 opts = 第 N 项的 snapshot
@@ -3707,7 +3681,7 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [undoStack.length, redoStack.length, batchStepN, opts, collapsedGroups.size, diffCursor, diffSearch, diffHitCursor, diffSearchCaseSensitive, diffSearchScope]);
 
-  const buildFailureSummary = (): { key: string; label: string; count: number; rows: number[]; hint: string }[] => {
+  const buildFailureSummary = useCallback((): { key: string; label: string; count: number; rows: number[]; hint: string }[] => {
     if (failedRows.length === 0) return [];
     const groups = new Map<string, { label: string; hint: string; rows: number[] }>();
     for (const fr of failedRows) {
@@ -3719,9 +3693,9 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
     return Array.from(groups.entries()).map(([k, v]) => ({
       key: k, label: v.label, hint: v.hint, count: v.rows.length, rows: v.rows,
     })).sort((a, b) => b.count - a.count);
-  };
+  }, [failedRows]);
 
-  const failureSummary = useMemo(() => buildFailureSummary(), [failedRows]);
+  const failureSummary = useMemo(() => buildFailureSummary(), [buildFailureSummary]);
 
   const filteredFailedRows = useMemo(() => {
     if (!failCategoryFilter) return failedRows;
@@ -4459,7 +4433,7 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
         if (inInput) return;
         ev.preventDefault();
         void (async () => {
-          let text = '';
+          let text: string;
           try { text = await navigator.clipboard.readText(); }
           catch { setPresetManagerMsg({ kind: 'err', text: '❌ 读取剪贴板失败（浏览器权限）' }); return; }
           try {
@@ -4687,7 +4661,7 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
               : '尚未开始';
         // 前置数据守卫：跳步必须满足前置
         let canNav = false;
-        let navTitle = '';
+        let navTitle: string;
         if (s === 'done') {
           canNav = false;
           navTitle = '完成步只可通过执行导入进入';
@@ -7380,7 +7354,7 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
                           type="button"
                           onClick={async () => {
                             // M30.158 C 粘贴 filter 状态：从剪贴板读 JSON 恢复到当前视图
-                            let text = '';
+                            let text: string;
                             try { text = await navigator.clipboard.readText(); }
                             catch {
                               setPresetManagerMsg({ kind: 'err', text: '❌ 读取剪贴板失败（浏览器权限）' });
@@ -10921,11 +10895,9 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
                   const qc = qualityReport?.columns[i];
                   const nonNull = p ? p.total - p.nullCount : 0;
                   const suspiciousCount = qc?.suspiciousCount ?? 0;
-                  const typePurity = qc?.typePurity ?? 1;
                   const hasTransform = !!opts.transforms?.[i] && opts.transforms[i] !== 'none';
                   const dupIdxs = m.targetColumn ? dupTargets.get(m.targetColumn) : undefined;
                   const isDupShadowed = !!dupIdxs && i !== dupIdxs[dupIdxs.length - 1];
-                  const dupFirstIdx = dupIdxs ? dupIdxs[0] : -1;
                   const dupLastIdx = dupIdxs ? dupIdxs[dupIdxs.length - 1] : -1;
                   const impactItems: Array<{ key: string; text: string; color: string; title: string }> = [];
                   if (isDupShadowed) {

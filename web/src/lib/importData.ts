@@ -262,7 +262,7 @@ export interface MappingSuggestion {
 }
 
 function normalize(s: string): string {
-  return s.toLowerCase().replace(/[\s\-]+/g, '').replace(/_/g, '');
+  return s.toLowerCase().replace(/[\s-]+/g, '').replace(/_/g, '');
 }
 
 function levenshtein(a: string, b: string): number {
@@ -765,7 +765,6 @@ export function validateAllRows(
 
 export function detectEncoding(buf: ArrayBuffer): { encoding: InputEncoding; text: string } {
   const b = new Uint8Array(buf);
-  const first = (n: number) => Array.from(b.slice(0, n));
   if (b.length >= 2 && b[0] === 0xff && b[1] === 0xfe) {
     return { encoding: 'utf-16le', text: new TextDecoder('utf-16le').decode(b.slice(2)) };
   }

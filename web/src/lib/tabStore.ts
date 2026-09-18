@@ -1,5 +1,3 @@
-import type { DatabaseKind } from '../api';
-
 export type ParamType = 'string' | 'number' | 'bool' | 'null';
 export interface ParamItem {
   type: ParamType;
@@ -33,16 +31,6 @@ const DEFAULT_SQL = "-- 示例：\nSELECT 1 AS id, 'hello' AS greeting;";
 
 export function genId(): string {
   return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
-}
-
-function defaultTab(n: number): EditorTab {
-  return {
-    id: genId(),
-    title: `查询 ${n}`,
-    sql: DEFAULT_SQL,
-    params: [],
-    context: null,
-  };
 }
 
 export function loadTabState(connId: string): TabState {

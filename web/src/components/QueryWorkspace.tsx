@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import Editor, { type OnMount } from '@monaco-editor/react';
 import * as monacoNS from 'monaco-editor';
 import { KeyCode, KeyMod, Range } from 'monaco-editor';
@@ -19,7 +19,7 @@ import { TEMPLATES, filterTemplates, renderTemplate, type SqlTemplate, type Temp
 import { loadCustomTemplates, saveCustomTemplates, toSqlTemplate, type CustomTemplate, default as CustomTemplatesModal } from '../lib/customTemplates';
 import ImportModal from './ImportModal';
 import type { ParamItem, ParamType } from '../lib/tabStore';
-import { genId, loadTabState, nextTabTitle, saveTabState, type EditorTab, type TabState } from '../lib/tabStore';
+import { genId, loadTabState, nextTabTitle, saveTabState, type EditorTab } from '../lib/tabStore';
 import CollapsiblePane from './CollapsiblePane';
 import ContextMenu, { type ContextMenuEntry } from './ContextMenu';
 import TabStrip from './TabStrip';
@@ -127,11 +127,6 @@ function sqlLiteral(v: unknown): string {
   const s = String(v).replace(/'/g, "''");
   return `'${s}'`;
 }
-function quoteIdent(name: string): string {
-  if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return name;
-  return `"${name.replace(/"/g, '""')}"`;
-}
-
 function bytesToHex(s: string, chunk = 16): string {
   const bytes: number[] = [];
   for (let i = 0; i < s.length; i++) {
@@ -395,7 +390,7 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
   const templatesRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => { saveCustomTemplates(customTemplates); }, [customTemplates]);
-  const [lintResult, setLintResult] = useState<LintResult>({ diagnostics: [], errorCount: 0, warningCount: 0, infoCount: 0 });
+  const [, setLintResult] = useState<LintResult>({ diagnostics: [], errorCount: 0, warningCount: 0, infoCount: 0 });
   const lintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const runFormatRef = useRef<() => void>(() => {});
   const [transport, setTransport] = useState<Transport>(() => (loadSettings().defaultTransport === 'ws' ? 'ws' : 'http'));
@@ -1036,7 +1031,7 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
   };
 
   // 用当前 context (schema/table/column) + conn kind + 编辑器当前 SQL 构建模板上下文
-  const buildTemplateCtx = (opts?: { extraTable?: string; extraColumn?: string; rawSql?: string }): TemplateContext => {
+  const buildTemplateCtx = useCallback((opts?: { extraTable?: string; extraColumn?: string; rawSql?: string }): TemplateContext => {
     const model = editorRef.current?.getModel();
     const rawSql = opts?.rawSql ?? model?.getValue() ?? sqlRef.current;
     const sel = editorRef.current?.getSelection();
@@ -1051,7 +1046,7 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
       column: opts?.extraColumn ?? columnGuess,
       rawSql,
     };
-  };
+  }, [contextSchema, contextTable]);
 
   // 在 Monaco 光标位置插入模板 SQL；executeEdits 自动把光标停在插入文本末尾
   const insertTemplateSql = (sql: string) => {
@@ -1834,7 +1829,6 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
   };
 
   const editEnabled = pkCols.length > 0 && !!contextTable && !!contextSchema && result?.statement_type === 'select';
-  const editableCursor = { cursor: 'text' };
 
   const visibleColumns = columns.filter((_, j) => !hiddenCols.has(j));
   const visibleRows = displayRows.map((entry) => ({ origIdx: entry.origIdx, cells: entry.row.filter((_, j) => !hiddenCols.has(j)) }));
@@ -1994,7 +1988,7 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
   );
   const filteredTemplates = useMemo(
     () => filterTemplates(templatesQuery, buildTemplateCtx(), allTemplates),
-    [templatesQuery, contextSchema, contextTable, sqlRef.current, connKindRef.current, allTemplates],
+    [templatesQuery, allTemplates, buildTemplateCtx],
   );
   const flatTemplates = useMemo(
     () => filteredTemplates.filter((t) => !t.requiresTable || !!contextTable),
@@ -2016,7 +2010,7 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
     const t = flatTemplates[clampedIdx];
     if (!t) return null;
     return renderTemplate(t, buildTemplateCtx());
-  }, [flatTemplates, clampedIdx, contextSchema, contextTable, sqlRef.current, connKindRef.current]);
+  }, [flatTemplates, clampedIdx, buildTemplateCtx]);
 
   const moveTemplatesFocus = (delta: number) => {
     const n = flatTemplates.length;
@@ -3460,7 +3454,6 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
                                       const by = Math.min(py, yZero);
                                       const bh = Math.abs(py - yZero);
                                       if (bh < 0.5) return null;
-                                      const groupW = bw * nSeries;
                                       const offset = (si - (nSeries - 1) / 2) * bw;
                                       const bx = xCenter(i) + offset - bw / 2;
                                       return (
@@ -3682,7 +3675,7 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
                   <thead>
                     <tr>
                       <th style={{ width: 40 }}>#</th>
-                      {visibleColumns.map((c, vj) => {
+                      {visibleColumns.map((c, _vj) => {
                         const j = columns.indexOf(c);
                         const isPk = pkCols.includes(c.name);
                         return (

@@ -693,7 +693,6 @@ export function applyPreset(preset: ImportPreset, cols: ColumnInfo[]): PresetApp
   const colMap = new Map(cols.map((c) => [c.name, c]));
   const targetSet = new Set(colMap.keys());
   const mappings: Mapping[] = preset.mappings.map((m) => {
-    const removed = m.targetColumn && !targetSet.has(m.targetColumn);
     return {
       ...m,
       targetColumn: m.targetColumn && targetSet.has(m.targetColumn) ? m.targetColumn : null,

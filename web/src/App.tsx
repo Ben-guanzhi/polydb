@@ -19,7 +19,6 @@ import type { ConnectionInfo } from './api';
 import * as api from './lib/api';
 import { loadStats, saveStats } from './lib/runStats';
 import type { RunStat } from './lib/runStats';
-import { DbIcon } from './components/Icons';
 
 self.MonacoEnvironment = {
   getWorker: () => new editorWorker(),
@@ -64,7 +63,6 @@ export default function App() {
   const [connections, setConnections] = useState<ConnectionInfo[]>([]);
   const [context, setContext] = useState<{ sql: string; label: string; schema: string; table: string } | null>(null);
   const [autoRunToken, setAutoRunToken] = useState(0);
-  const [logPanelKey, setLogPanelKey] = useState(0);
   const [stats, setStats] = useState<RunStat[]>(() => loadStats());
   const [cmdOpen, setCmdOpen] = useState(false);
   const [shortcutOpen, setShortcutOpen] = useState(false);

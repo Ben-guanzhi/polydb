@@ -36,16 +36,6 @@ function lineColAt(sql: string, offset: number): { line: number; col: number } {
   return { line, col: clamped - lastNl };
 }
 
-function skipWsForward(sql: string, offset: number): number {
-  let i = offset;
-  while (i < sql.length && /\s/.test(sql[i])) i++;
-  return i;
-}
-
-function stmtStartPos(sql: string, st: { start: number }): { line: number; col: number } {
-  return lineColAt(sql, skipWsForward(sql, st.start));
-}
-
 export function lintSql(sql: string, kind: DatabaseKind | null): LintResult {
   const diagnostics: SqlDiagnostic[] = [];
   const stmts = splitSql(sql);

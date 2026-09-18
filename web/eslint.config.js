@@ -23,9 +23,19 @@ export default tseslint.config(
     plugins: { 'react-hooks': reactHooks, 'react-refresh': reactRefresh },
     rules: {
       ...reactHooks.configs.recommended.rules,
+      // react-hooks v7 的编译器型新规则对历史代码过于激进，先关闭；
+      // 保留稳定且高价值的 rules-of-hooks / exhaustive-deps（warn）
+      'react-hooks/purity': 'off',
+      'react-hooks/set-state-in-effect': 'off',
+      'react-hooks/refs': 'off',
+      'react-hooks/static-components': 'off',
+      'react-hooks/immutability': 'off',
+      'react-hooks/preserve-manual-memoization': 'off',
       '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
       '@typescript-eslint/no-explicit-any': 'off',
       '@typescript-eslint/no-require-imports': 'off',
+      // if-else 链 + 末尾统一消费的模式（如键盘 handler 里 let x=null → 分支赋值 → 末尾 if(x)）被误报，关掉
+      'no-useless-assignment': 'off',
       'react-refresh/only-export-components': 'off',
     },
   },

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import type { DatabaseKind } from '../api';
 import type { RunStat } from '../lib/runStats';
 import { hashSql, summarize } from '../lib/runStats';
@@ -50,10 +50,10 @@ export default function QueryLogPanel({ stats, connections, onPick, onClear }: P
   const [maxMs, setMaxMs] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('ts');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
-  const [limit, setLimit] = useState(100);
+  const [limit] = useState(100);
 
-  const connName = (id: string) => connections.find((c) => c.id === id)?.name ?? id.slice(0, 6) + '…';
-  const connKind = (id: string) => connections.find((c) => c.id === id)?.kind ?? 'sqlite';
+  const connName = useCallback((id: string) => connections.find((c) => c.id === id)?.name ?? id.slice(0, 6) + '…', [connections]);
+  const connKind = useCallback((id: string) => connections.find((c) => c.id === id)?.kind ?? 'sqlite', [connections]);
 
   const baseFiltered = useMemo(() => {
     let out = stats.slice();
@@ -144,7 +144,7 @@ export default function QueryLogPanel({ stats, connections, onPick, onClear }: P
     }
     rows.sort((a, b) => b.count - a.count);
     return rows;
-  }, [baseFiltered, connections]);
+  }, [baseFiltered, connName, connKind]);
 
   const visibleList = view === 'detail' ? detail : view === 'sql' ? sqlAgg : connAgg;
 
