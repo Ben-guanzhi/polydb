@@ -13,6 +13,14 @@ import {
   type Step,
 } from './ImportModalParts';
 import { STEP_ORDER } from './ImportModalParts';
+import {
+  boolLabel,
+  classifyFailReason,
+  failCategoryMeta,
+  fmtCacheAgeForAudit,
+  previewParams,
+  sqlLiteral,
+} from '../lib/importDisplay';
 import * as api from '../lib/api';
 import { detectDelimiter, parseCsv, type Delimiter, type CsvParseResult } from '../lib/csvParser';
 import {
@@ -806,14 +814,6 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
   // M30.136 diff chip 可复制（点击复制 chip 文本到剪贴板，1.2s 视觉确认）
   const [copiedChipText, setCopiedChipText] = useState<string | null>(null);
   // M30.126 confirm 面板内嵌审计徽章：需要跨 IIFE 访问的缓存时长格式化器
-  const fmtCacheAgeForAudit = (t: number): string => {
-    const diff = Date.now() - t;
-    const day = 24 * 60 * 60 * 1000;
-    if (diff < 60 * 1000) return '刚刚';
-    if (diff < 60 * 60 * 1000) return `${Math.floor(diff / (60 * 1000))} 分钟前`;
-    if (diff < day) return `${Math.floor(diff / (60 * 60 * 1000))} 小时前`;
-    return `${Math.floor(diff / day)} 天前`;
-  };
   // M30.129 单预设重审：复用 M30.117 runAudit 的单 preset 分支逻辑（listColumns + mappings 检查）
   // M30.130 复用 presetAuditBusy 防与「审计全部」race，也供 AuditBadge busy 态显示 ⏳
   const reAuditOne = useCallback(async (schema: string, table: string) => {
@@ -2633,30 +2633,6 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
       triggerDownload(blob, `import_history_${ts}.csv`);
     }
   };
-
-  const classifyFailReason = (reason: string): { key: string; label: string; hint: string } => {
-    const r = reason.toLowerCase();
-    if (r.includes('not null') || r.includes('constraint.*notnull')) return { key: 'not-null', label: 'NOT NULL 违反', hint: '对应目标列不允许为空，可改用 nullPolicy=use-default 或 skip-row' };
-    if (r.includes('foreign key') || r.includes('fk ') || r.includes('foreign key constraint') || r.includes('references')) return { key: 'fk', label: '外键违反', hint: '引用值在父表不存在，需先导入父表或修正引用' };
-    if (r.includes('duplicate') || r.includes('unique') || r.includes('primary key')) return { key: 'dup', label: '主键/唯一冲突', hint: '目标表已有相同 PK/UK 行，改用 upsert 或先删除重复行' };
-    if (r.includes('type') || r.includes('cast') || r.includes('out of range') || r.includes('numeric') || r.includes('cannot be cast') || r.includes('syntax error')) return { key: 'type', label: '类型/值域错误', hint: 'CSV 值无法转为目标 dtype，考虑加 trim / date-parse / scale 转换' };
-    if (r.includes('validation') || r.includes('必填') || r.includes('regex') || r.includes('enum') || r.includes('最小') || r.includes('最大')) return { key: 'validation', label: '校验失败', hint: '自定义校验未通过，可放宽正则或调整 enum 列表' };
-    if (r.includes('affected_rows=0')) return { key: 'no-affected', label: '未影响行', hint: 'UPDATE/Upsert 无匹配行，检查 PK 条件是否正确' };
-    return { key: 'other', label: '其他错误', hint: '查看原始错误详情排查' };
-  };
-
-  const failCategoryMeta = (key: string): { icon: string; color: string; label: string } => {
-    switch (key) {
-      case 'not-null': return { icon: '🚫', color: '#dc2626', label: 'NOT NULL 违反' };
-      case 'fk': return { icon: '🔗', color: '#7c3aed', label: '外键违反' };
-      case 'dup': return { icon: '⚠️', color: '#d97706', label: '主键/唯一冲突' };
-      case 'type': return { icon: '🔧', color: '#2563eb', label: '类型/值域错误' };
-      case 'validation': return { icon: '📐', color: '#db2777', label: '校验失败' };
-      case 'no-affected': return { icon: '🕳️', color: '#0891b2', label: '未影响行' };
-      default: return { icon: '❓', color: '#6b7280', label: '其他错误' };
-    }
-  };
-
   const pushFix = (entry: FixEntry) => {
     setUndoStack((s) => {
       const next = [entry, ...s];
@@ -2706,8 +2682,6 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
         return { ok: false, msg: '未知类别，请展开详情查看原始错误 message' };
     }
   };
-
-  const boolLabel = (v: boolean) => v ? '✅ 是' : '❌ 否';
   const colLabel = (idx: number): string => {
     const m = mappings[idx];
     const csvCol = m?.csvName ?? `#${idx}`;
@@ -3774,30 +3748,6 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
     setQueuePos(0);
     publishEditorStatus({ message: `已取消导入队列${busy ? '（当前正在执行的批次也取消）' : ''}，剩余 ${skipped} 个文件已跳过`, messageAt: Date.now() });
   };
-
-  const previewParams = (params: Value[]): string => {
-    const s = params.map((p) => {
-      if (p === null) return 'NULL';
-      if (typeof p === 'string') return p.length > 20 ? `${p.slice(0, 20)}…` : p;
-      if (typeof p === 'number' || typeof p === 'boolean') return String(p);
-      return String(p);
-    }).join(', ');
-    return s;
-  };
-
-  // 把 Value 渲染成 SQL 字面量（用于复制 INSERT 语句；null→NULL，bool→0/1，number 原样，string 用单引号包裹并转义）
-  const sqlLiteral = (v: Value): string => {
-    if (v === null) return 'NULL';
-    if (typeof v === 'number') {
-      if (!Number.isFinite(v)) return 'NULL';
-      return String(v);
-    }
-    if (typeof v === 'boolean') return v ? '1' : '0';
-    if (typeof v === 'string') return `'${v.replace(/'/g, "''")}'`;
-    // 嵌套数组/对象：JSON 字符串兜底
-    try { return `'${JSON.stringify(v).replace(/'/g, "''")}'`; } catch { return 'NULL'; }
-  };
-
   // 批量复制失败行为 INSERT SQL：CSV 模式下把 params 内联为字面量；SQL 模式直接用原语句
   const copyFailedRowsAsInsertSql = async () => {
     if (failedRows.length === 0) return;
