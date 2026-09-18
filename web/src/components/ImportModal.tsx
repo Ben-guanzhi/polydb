@@ -6,7 +6,9 @@ import {
   formatValue,
   historyStatusBadge,
   qualityScoreColor,
+  Step2Table,
   StepBar,
+  StepDone,
   styles,
   toMsg,
   typeBadgeColor,
@@ -47,7 +49,6 @@ import {
   type ColumnTransform,
   type ColumnValidation,
   type ImportFormat,
-  type ImportMode,
   type ImportOptions,
   type InputEncoding,
   type Mapping,
@@ -9791,115 +9792,17 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
           )}
 
           {step === 'table' && (
-            <div style={styles.col}>
-              <div style={styles.row2col}>
-                <label style={styles.field}>
-                  <div style={styles.label}>Schema</div>
-                  <select
-                    value={selSchema}
-                    onChange={(e) => { setSelSchema(e.target.value); setSelTable(''); setCols([]); setMappings([]); }}
-                    style={styles.select}
-                    disabled={schemaLoading}
-                  >
-                    {schemas.length === 0 && <option value="">（加载中…）</option>}
-                    {schemas.map((s) => <option key={s.name} value={s.name}>{s.name}</option>)}
-                  </select>
-                </label>
-                <label style={styles.field}>
-                  <div style={styles.label}>表（选中自动加载列）</div>
-                  <select
-                    value={selTable}
-                    onChange={(e) => { setSelTable(e.target.value); setCols([]); setMappings([]); }}
-                    style={styles.select}
-                    disabled={tablesLoading || !selSchema}
-                  >
-                    {tables.length === 0 && <option value="">（{selSchema ? '加载中…' : '请先选 schema'}）</option>}
-                    {tables.map((t) => <option key={t.name} value={t.name}>{t.name}</option>)}
-                  </select>
-                </label>
-                <label style={styles.field}>
-                  <div style={styles.label}>导入模式</div>
-                  <select
-                    value={opts.mode}
-                    onChange={(e) => setOpts({ ...opts, mode: e.target.value as ImportMode })}
-                    style={styles.select}
-                  >
-                    <option value="insert">Insert（插入新行）</option>
-                    <option value="upsert">Upsert（存在则更新）</option>
-                    <option value="update">Update（仅更新已有 PK 行）</option>
-                  </select>
-                </label>
-              </div>
-              {(() => {
-                const presets = listPresets(connId);
-                if (presets.length === 0) return null;
-                const sorted = presets.slice().sort((a, b) => b.updatedAt - a.updatedAt);
-                const same = selSchema ? sorted.filter((p) => p.schema === selSchema) : [];
-                const pool = (same.length >= 3 ? same : sorted).slice(0, 3);
-                if (pool.length === 0) return null;
-                return (
-                  <div style={{ marginBottom: 6 }}>
-                    <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 4 }}>🔥 最近使用的目标表</div>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                      {pool.map((p) => (
-                        <button
-                          key={p.key}
-                          onClick={() => {
-                            setSelSchema(p.schema);
-                            setSelTable(p.table);
-                            setCols([]);
-                            setMappings([]);
-                          }}
-                          style={{
-                            padding: '4px 10px',
-                            background: 'rgba(255,255,255,0.03)',
-                            border: '1px solid var(--border)',
-                            borderRadius: 3,
-                            color: 'var(--text)',
-                            cursor: 'pointer',
-                            fontSize: 12,
-                            textAlign: 'left',
-                          }}
-                        >
-                          <span style={{ color: 'var(--muted)' }} title="schema">{p.schema}</span>
-                          <span style={{ color: 'var(--muted)' }}>.</span>
-                          <strong>{p.table}</strong>
-                          <span style={{ color: 'var(--muted)', marginLeft: 4 }} title={new Date(p.updatedAt).toLocaleString()}>
-                            · {p.mode.toUpperCase()} · {p.mappings.length} 列
-                          </span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                );
-              })()}
-              {parse && (
-                <div style={styles.mutedBox}>
-                  已解析 <strong>{parse.rows.length}</strong> 行 × <strong>{parse.columns.length}</strong> 列
-                  {parse.truncated && <span style={{ color: 'var(--warn, #d97706)' }}> · 已截断至 20 万行</span>}
-                </div>
-              )}
-              {(opts.mode === 'update' || opts.mode === 'upsert') && (
-                <div style={{ ...styles.mutedBox, marginTop: 4 }}>
-                  {(() => {
-                    const pkCols = cols.filter((c) => c.is_primary_key).map((c) => c.name);
-                    if (cols.length === 0) return '目标表加载后自动检测主键。';
-                    if (pkCols.length === 0) {
-                      if (opts.mode === 'update') return <span style={{ color: 'var(--warn, #d97706)' }}>⚠ 目标表无主键，Update 模式不可用（将生成 0 条语句）</span>;
-                      return <span style={{ color: 'var(--warn, #d97706)' }}>⚠ 目标表无主键，Upsert 将退化为 Insert</span>;
-                    }
-                    return <>主键列：{pkCols.map(quoteIdent).join(', ')}{opts.kind === 'mysql' ? ' · MySQL 用 ON DUPLICATE KEY UPDATE' : opts.kind === 'mssql' ? ' · MSSQL 用 MERGE' : opts.kind === 'oracle' ? ' · Oracle 用 MERGE' : opts.kind === 'postgres' || opts.kind === 'sqlite' ? ' · ON CONFLICT DO UPDATE' : ''}</>;
-                  })()}
-                </div>
-              )}
-              <div style={styles.footer}>
-                <button onClick={() => setStep('input')} style={styles.btnGhost}>← 上一步</button>
-                <span style={styles.spacer} />
-                <span style={styles.muted}>
-                  {colsLoading ? '加载表结构中…' : (selTable ? '选择表后自动进入下一步' : '请选择目标表')}
-                </span>
-              </div>
-            </div>
+            <Step2Table
+              connId={connId}
+              selSchema={selSchema} setSelSchema={setSelSchema}
+              selTable={selTable} setSelTable={setSelTable}
+              setCols={setCols} setMappings={setMappings}
+              opts={opts} setOpts={setOpts}
+              schemaLoading={schemaLoading} tablesLoading={tablesLoading} colsLoading={colsLoading}
+              schemas={schemas} tables={tables} cols={cols}
+              parse={parse}
+              setStep={setStep}
+            />
           )}
 
           {step === 'map' && (
@@ -14895,176 +14798,24 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
           )}
 
           {step === 'done' && (
-            <div style={styles.col}>
-              <div style={styles.doneIcon}>✓</div>
-              <div style={styles.doneText}>
-                {inputFormat === 'sql'
-                  ? <>已执行 <strong>{statements.length}</strong> 条 SQL</>
-                  : <>已导入 <strong>{insertedCount}</strong> 行</>}
-              </div>
-              {failedRows.length > 0 && (
-                <div style={{ ...styles.mutedCenter, color: 'var(--warn, #d97706)' }}>
-                  跳过 {failedRows.length} {inputFormat === 'sql' ? '条' : '行'}失败（可返回上一步查看详情）
-                </div>
-              )}
-              {failureSummary.length > 0 && (
-                <div style={{ ...styles.mutedBox, marginTop: 8, borderLeft: '3px solid var(--warn, #d97706)', display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                    <span style={{ fontSize: 12, fontWeight: 600 }}>🔧 失败原因分类</span>
-                    <span style={styles.muted}>（点击分类筛选下方行表）</span>
-                    {failCategoryFilter && (
-                      <button
-                        onClick={() => setFailCategoryFilter(null)}
-                        style={{ ...styles.btnSm, padding: '1px 6px', marginLeft: 'auto', fontSize: 10 }}
-                        title="清除筛选，显示全部失败行"
-                      >✕ 清除筛选</button>
-                    )}
-                  </div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-                    {failureSummary.slice(0, 5).map((s) => {
-                      const active = failCategoryFilter === s.key;
-                      const meta = failCategoryMeta(s.key);
-                      return (
-                        <div
-                          key={s.key}
-                          onClick={() => {
-                            setFailCategoryFilter(active ? null : s.key);
-                            if (!active) setStep('preview');
-                          }}
-                          style={{
-                            display: 'grid', gridTemplateColumns: 'auto 1fr auto', gap: 8,
-                            alignItems: 'baseline', fontSize: 11,
-                            padding: '3px 6px', borderRadius: 3, cursor: 'pointer',
-                            border: '1px solid ' + (active ? meta.color : 'var(--border)'),
-                            background: active ? 'var(--accent-dim, rgba(59,130,246,0.12))' : 'var(--panel)',
-                          }}
-                          title="点击筛选 Step 4 失败行表；再次点击取消筛选"
-                        >
-                          <span style={{ fontFamily: 'monospace', color: meta.color, fontWeight: 600 }}>
-                            {meta.icon} {s.count} 行
-                          </span>
-                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }} title={s.hint}>
-                            <strong>{s.label}</strong> · <span style={styles.muted}>{s.hint}</span>
-                          </span>
-                          <span style={styles.muted} title="受影响行号">
-                            L{s.rows.slice(0, 3).join(',L')}{s.rows.length > 3 ? `…+${s.rows.length - 3}` : ''}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-              {progress && (
-                <div style={styles.mutedCenter}>
-                  总耗时 {progress.ms} ms · {(progress.ms / Math.max(1, insertedCount || statements.length)).toFixed(2)} ms/{inputFormat === 'sql' ? '条' : '行'}
-                </div>
-              )}
-              {progress && progress.batchMs && progress.batchMs.length >= 2 && (() => {
-                const ms = progress.batchMs;
-                const sorted = [...ms].sort((a, b) => a - b);
-                const min = sorted[0];
-                const max = sorted[sorted.length - 1];
-                const sum = ms.reduce((a, b) => a + b, 0);
-                const avg = sum / ms.length;
-                const p50 = sorted[Math.floor((sorted.length - 1) / 2)];
-                return (
-                  <div style={{ ...styles.muted, fontSize: 11, marginTop: 2, display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center' }} title={`共 ${ms.length} 批（每批约 ${progress.batchSize} 行）· min/avg/p50/max 单批耗时`}>
-                    <span>📊 {ms.length} 批</span>
-                    <span title="最小单批耗时">min <b style={{ color: 'var(--text)' }}>{min}</b>ms</span>
-                    <span title="平均单批耗时">avg <b style={{ color: 'var(--text)' }}>{avg.toFixed(0)}</b>ms</span>
-                    <span title="中位数单批耗时">p50 <b style={{ color: 'var(--text)' }}>{p50}</b>ms</span>
-                    <span title="最大单批耗时">max <b style={{ color: 'var(--text)' }}>{max}</b>ms</span>
-                    {min > 0 && max / min >= 3 && (
-                      <span title="最大批耗时是最小批的 3 倍以上，可能存在慢查询或后端抖动" style={{ color: 'var(--warn, #d97706)' }}>
-                        ⚠ {(max / min).toFixed(1)}× 抖动
-                      </span>
-                    )}
-                  </div>
-                );
-              })()}
-              {inputFormat !== 'sql' && selTable && (
-                <div style={{ ...styles.mutedBox, marginTop: 8, color: 'var(--ok)', borderColor: 'var(--ok)' }}>
-                  💾 已保存导入预设到 <code>{selSchema}.{selTable}</code>，下次导入同表自动应用
-                </div>
-              )}
-              {inputFormat !== 'sql' && selTable && (
-                <div style={{ ...styles.mutedBox, marginTop: 8, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                  <label style={{ ...styles.check, fontSize: 12 }}>
-                    <input
-                      type="checkbox"
-                      checked={autoPreviewOnSuccess}
-                      onChange={(e) => setAutoPreviewOnSuccess(e.target.checked)}
-                    />
-                    <span>下次导入成功后自动跑 SELECT 预览尾行</span>
-                  </label>
-                  {autoPreviewOnSuccess && (
-                    <>
-                      <span style={styles.muted} title="自动预览时只取最近 N 行；有 PK 时按 PK IN(...) 精准匹配，无 PK 时降级到 LIMIT N">N =</span>
-                      <input
-                        type="number"
-                        min={1}
-                        max={10000}
-                        value={autoPreviewRows}
-                        onChange={(e) => {
-                          const v = parseInt(e.target.value, 10);
-                          if (Number.isFinite(v) && v >= 1) setAutoPreviewRows(Math.min(v, 10000));
-                        }}
-                        style={{ width: 70, padding: '2px 6px', background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)', borderRadius: 4, color: 'var(--text)', fontSize: 11, fontFamily: 'inherit' }}
-                        title="自动预览最近 N 行（1–10000）"
-                      />
-                      <span style={{ display: 'inline-flex', gap: 3, marginLeft: 2 }}>
-                        {[10, 50, 100, 500, 1000].map((n) => (
-                          <button
-                            key={n}
-                            onClick={() => setAutoPreviewRows(n)}
-                            style={{ ...styles.btnSm, padding: '1px 5px', fontSize: 10, opacity: autoPreviewRows === n ? 1 : 0.6, color: autoPreviewRows === n ? 'var(--accent, #3b82f6)' : undefined, borderColor: autoPreviewRows === n ? 'var(--accent, #3b82f6)' : 'var(--border)' }}
-                            title={`快捷设为 N=${n}`}
-                          >{n}</button>
-                        ))}
-                      </span>
-                      <span style={styles.muted}>行（有 PK 时按 PK IN(...) 精准匹配，无 PK 时降级到 LIMIT N）</span>
-                    </>
-                  )}
-                  <span style={styles.muted}>({autoPreviewOnSuccess ? '已开启' : '已关闭'})</span>
-                </div>
-              )}
-              {fileQueue.length > 0 && queuePos < fileQueue.length && (
-                <div style={{ ...styles.mutedBox, marginTop: 8, color: 'var(--accent, #3b82f6)' }}>
-                  📚 队列还有 {fileQueue.length - queuePos} 个文件等待处理（点"下一个"继续）
-                </div>
-              )}
-              <div style={{ ...styles.row2col, justifyContent: 'center', padding: '8px 0', gap: 8 }}>
-                {inputFormat !== 'sql' && selTable && (
-                  <button onClick={() => previewImported()} style={styles.btn} title="生成 SELECT 语句并在编辑器中执行，验证导入结果">
-                    🔍 预览导入的数据（LIMIT 100）
-                  </button>
-                )}
-                <button onClick={() => downloadReport('csv')} style={styles.btn} title={failCategoryFilter ? `下载当前筛选「${failCategoryFilter}」的失败行为 CSV` : '下载全部失败行为 CSV（含分类/修复提示列）'}>
-                  📄 下载 CSV 报告
-                </button>
-                <button onClick={() => downloadReport('json')} style={styles.btn} title={failCategoryFilter ? `下载当前筛选「${failCategoryFilter}」的失败行为 JSON（含分类元数据）` : '下载全部失败行为 JSON（含分类元数据）'}>
-                  📄 下载 JSON 报告
-                </button>
-                <button onClick={() => void copyReportSummary()} style={styles.btn} title="复制导入摘要到剪贴板（表名/模式/行数/耗时/失败原因 Top-3），便于贴到工单或 PR">
-                  📋 复制报告摘要
-                </button>
-                {fileQueue.length > 0 && queuePos < fileQueue.length && (
-                  <button
-                    onClick={() => {
-                      void loadQueueNext();
-                      setStep('input');
-                    }}
-                    style={styles.btn}
-                    title="加载队列中的下一个文件"
-                  >▶ 加载下一个文件</button>
-                )}
-              </div>
-              <div style={styles.footer}>
-                <span style={styles.spacer} />
-                <button onClick={finishAndClose} style={styles.btnPrimary}>关闭</button>
-              </div>
-            </div>
+            <StepDone
+              inputFormat={inputFormat}
+              statements={statements}
+              insertedCount={insertedCount}
+              failedRows={failedRows}
+              failureSummary={failureSummary}
+              failCategoryFilter={failCategoryFilter} setFailCategoryFilter={setFailCategoryFilter}
+              progress={progress}
+              autoPreviewOnSuccess={autoPreviewOnSuccess} setAutoPreviewOnSuccess={setAutoPreviewOnSuccess}
+              autoPreviewRows={autoPreviewRows} setAutoPreviewRows={setAutoPreviewRows}
+              fileQueue={fileQueue} queuePos={queuePos} loadQueueNext={loadQueueNext}
+              selTable={selTable}
+              previewImported={previewImported}
+              downloadReport={downloadReport}
+              copyReportSummary={copyReportSummary}
+              finishAndClose={finishAndClose}
+              setStep={setStep}
+            />
           )}
         </div>
       </div>

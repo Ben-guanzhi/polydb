@@ -10,6 +10,8 @@ import {
   historyStatusBadge,
   AuditBadge,
   StepBar,
+  Step2Table,
+  StepDone,
   STEP_LABEL,
   type Step,
 } from './ImportModalParts';
@@ -136,5 +138,114 @@ describe('StepBar', () => {
     render(<StepBar step="map" {...base} setStep={setStep} />);
     fireEvent.click(screen.getByText(STEP_LABEL['preview']));
     expect(setStep).toHaveBeenCalledWith('preview');
+  });
+});
+
+describe('Step2Table', () => {
+  const base = {
+    connId: 'c1',
+    selSchema: '',
+    setSelSchema: vi.fn(),
+    selTable: '',
+    setSelTable: vi.fn(),
+    setCols: vi.fn(),
+    setMappings: vi.fn(),
+    opts: { mode: 'insert', kind: 'sqlite' } as never,
+    setOpts: vi.fn(),
+    schemaLoading: false,
+    tablesLoading: false,
+    colsLoading: false,
+    schemas: [],
+    tables: [],
+    cols: [],
+    parse: null,
+    setStep: vi.fn(),
+  };
+
+  it('renders schema/table/mode selects and back button', () => {
+    render(<Step2Table {...base} />);
+    expect(screen.getByText('Schema')).toBeTruthy();
+    expect(screen.getByText('表（选中自动加载列）')).toBeTruthy();
+    expect(screen.getByText('导入模式')).toBeTruthy();
+    expect(screen.getByText('← 上一步')).toBeTruthy();
+  });
+
+  it('shows parsed row count when parse is set', () => {
+    const { container } = render(<Step2Table {...base} parse={{ rows: new Array(3), columns: ['a', 'b'] }} />);
+    expect(container.textContent).toMatch(/已解析\s*3\s*行/);
+  });
+
+  it('navigates back on 上一步', () => {
+    const setStep = vi.fn();
+    render(<Step2Table {...base} setStep={setStep} />);
+    fireEvent.click(screen.getByText('← 上一步'));
+    expect(setStep).toHaveBeenCalledWith('input');
+  });
+});
+
+describe('StepDone', () => {
+  const base = {
+    inputFormat: 'csv' as const,
+    statements: [{ sql: 'INSERT 1' }],
+    insertedCount: 10,
+    failedRows: [],
+    failureSummary: [],
+    failCategoryFilter: null,
+    setFailCategoryFilter: vi.fn(),
+    progress: null,
+    autoPreviewOnSuccess: false,
+    setAutoPreviewOnSuccess: vi.fn(),
+    autoPreviewRows: 50,
+    setAutoPreviewRows: vi.fn(),
+    fileQueue: [],
+    queuePos: 0,
+    loadQueueNext: vi.fn(),
+    selTable: 't',
+    previewImported: vi.fn(),
+    downloadReport: vi.fn(),
+    copyReportSummary: vi.fn(),
+    finishAndClose: vi.fn(),
+    setStep: vi.fn(),
+  };
+
+  it('renders success summary and action buttons', () => {
+    const { container } = render(<StepDone {...base} />);
+    expect(container.textContent).toMatch(/已导入\s*10\s*行/);
+    expect(screen.getByText('📄 下载 CSV 报告')).toBeTruthy();
+    expect(screen.getByText('📋 复制报告摘要')).toBeTruthy();
+    expect(screen.getByText('关闭')).toBeTruthy();
+  });
+
+  it('lists failure category summary rows when present', () => {
+    render(<StepDone
+      {...base}
+      failedRows={[{ csvRow: 1 }]}
+      failureSummary={[{ key: 'dup', label: '主键/唯一冲突', count: 1, rows: [1], hint: '改用 upsert' }]}
+    />);
+    expect(screen.getByText(/跳过\s*1\s*行失败/)).toBeTruthy();
+    expect(screen.getByText(/主键\/唯一冲突/)).toBeTruthy();
+  });
+
+  it('filters by category and jumps to preview on click', () => {
+    const setFailCategoryFilter = vi.fn();
+    const setStep = vi.fn();
+    render(<StepDone
+      {...base}
+      failedRows={[{ csvRow: 1 }]}
+      failureSummary={[{ key: 'dup', label: '主键/唯一冲突', count: 1, rows: [1], hint: '改用 upsert' }]}
+      setFailCategoryFilter={setFailCategoryFilter}
+      setStep={setStep}
+    />);
+    const row = screen.getByText(/主键\/唯一冲突/);
+    fireEvent.click(row);
+    expect(setFailCategoryFilter).toHaveBeenCalledWith('dup');
+    expect(setStep).toHaveBeenCalledWith('preview');
+  });
+
+  it('closes via 关闭 button', () => {
+    const finishAndClose = vi.fn();
+    render(<StepDone {...base} finishAndClose={finishAndClose} />);
+    fireEvent.click(screen.getByText('关闭'));
+    expect(finishAndClose).toHaveBeenCalled();
   });
 });
