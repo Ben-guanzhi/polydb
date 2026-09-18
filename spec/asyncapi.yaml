@@ -1,0 +1,294 @@
+asyncapi: 3.0.0
+info:
+  title: PolyDB WebSocket API
+  version: 0.1.0
+  description: |
+    PolyDB WebSocket 事件协议。用于实时查询执行、结果流推送和查询取消。
+
+    ## 编码
+    - 控制消息与结果使用 **MessagePack** (`application/msgpack`)
+    - 大结果集使用 **Arrow IPC stream**（预留，需显式协商后启用）
+    - JSON 仅用于调试
+
+    ## 连接流程
+    1. 客户端连接 `ws://host:port/ws`
+    2. 发送 `hello` 消息（包含 connection_id）
+    3. 服务端回复 `hello_ack`（包含 server_version）
+    4. 客户端发送 `query` 消息
+    5. 服务端推送 `query_started` → `query_progress`* → `query_result` 或 `query_error`
+    6. 客户端可随时发送 `query_cancel`
+
+    ## 变更记录
+    - 0.1.0 (M9)：**non-breaking**。本文件描述的传输层此前从未实现，M9 在 Rust / Go 双后端落地。
+      `query_result` 明确为 msgpack 对象形态（原先的 Arrow `oneOf` 分支从未实现，已移除，改为预留扩展说明）。
+
+servers:
+  development:
+    host: localhost:9527
+    protocol: ws
+    description: 本地开发 WebSocket
+
+channels:
+  query:
+    address: /ws
+    messages:
+      # ─── 客户端 → 服务端 ───────────────────────────────
+      hello:
+        $ref: "#/components/messages/Hello"
+      query:
+        $ref: "#/components/messages/Query"
+      queryCancel:
+        $ref: "#/components/messages/QueryCancel"
+
+      # ─── 服务端 → 客户端 ───────────────────────────────
+      helloAck:
+        $ref: "#/components/messages/HelloAck"
+      queryStarted:
+        $ref: "#/components/messages/QueryStarted"
+      queryProgress:
+        $ref: "#/components/messages/QueryProgress"
+      queryResult:
+        $ref: "#/components/messages/QueryResult"
+      queryError:
+        $ref: "#/components/messages/QueryError"
+      queryCancelled:
+        $ref: "#/components/messages/QueryCancelled"
+
+operations:
+  sendHello:
+    action: send
+    channel:
+      $ref: "#/channels/query"
+    messages:
+      - $ref: "#/channels/query/messages/hello"
+
+  sendQuery:
+    action: send
+    channel:
+      $ref: "#/channels/query"
+    messages:
+      - $ref: "#/channels/query/messages/query"
+
+  sendQueryCancel:
+    action: send
+    channel:
+      $ref: "#/channels/query"
+    messages:
+      - $ref: "#/channels/query/messages/queryCancel"
+
+  onHelloAck:
+    action: receive
+    channel:
+      $ref: "#/channels/query"
+    messages:
+      - $ref: "#/channels/query/messages/helloAck"
+
+  onQueryStarted:
+    action: receive
+    channel:
+      $ref: "#/channels/query"
+    messages:
+      - $ref: "#/channels/query/messages/queryStarted"
+
+  onQueryProgress:
+    action: receive
+    channel:
+      $ref: "#/channels/query"
+    messages:
+      - $ref: "#/channels/query/messages/queryProgress"
+
+  onQueryResult:
+    action: receive
+    channel:
+      $ref: "#/channels/query"
+    messages:
+      - $ref: "#/channels/query/messages/queryResult"
+
+  onQueryError:
+    action: receive
+    channel:
+      $ref: "#/channels/query"
+    messages:
+      - $ref: "#/channels/query/messages/queryError"
+
+  onQueryCancelled:
+    action: receive
+    channel:
+      $ref: "#/channels/query"
+    messages:
+      - $ref: "#/channels/query/messages/queryCancelled"
+
+components:
+  messages:
+    # ─── 客户端消息 ───────────────────────────────────────
+    Hello:
+      name: Hello
+      summary: 客户端握手，绑定数据库连接
+      payload:
+        type: object
+        required: [type, connection_id]
+        properties:
+          type:
+            type: string
+            const: hello
+          connection_id:
+            $ref: "schemas/common.json#/definitions/ConnectionId"
+          client_version:
+            type: string
+            description: 客户端版本号
+
+    Query:
+      name: Query
+      summary: 提交 SQL 查询
+      payload:
+        type: object
+        required: [type, query_id, sql]
+        properties:
+          type:
+            type: string
+            const: query
+          # 双端实现（Go 拍平 struct / Rust flatten QueryRequest）均允许在 query 消息上
+          # 携带 connection_id；为与实现对齐在此显式声明（non-breaking，2026-09 补录）。
+          connection_id:
+            $ref: "schemas/common.json#/definitions/ConnectionId"
+          query_id:
+            type: string
+            format: uuid
+            description: 客户端生成的查询 ID，用于跟踪和取消
+          sql:
+            type: string
+          params:
+            type: array
+            items:
+              $ref: "schemas/common.json#/definitions/Value"
+          schema:
+            type: string
+          pagination:
+            $ref: "schemas/common.json#/definitions/PaginationParams"
+          timeout_ms:
+            type: integer
+            minimum: 0
+            description: 查询超时毫秒数（0 = 不超时）
+          max_rows:
+            type: integer
+            minimum: 0
+            description: 最大返回行数（0 = 用服务端默认值）
+
+    QueryCancel:
+      name: QueryCancel
+      summary: 取消正在执行的查询
+      payload:
+        type: object
+        required: [type, query_id]
+        properties:
+          type:
+            type: string
+            const: query_cancel
+          query_id:
+            type: string
+            format: uuid
+
+    # ─── 服务端消息 ───────────────────────────────────────
+    HelloAck:
+      name: HelloAck
+      summary: 握手确认
+      payload:
+        type: object
+        required: [type, server_version]
+        properties:
+          type:
+            type: string
+            const: hello_ack
+          server_version:
+            type: string
+          db_version:
+            type: string
+            description: 已连接数据库的版本号
+
+    QueryStarted:
+      name: QueryStarted
+      summary: 查询开始执行
+      payload:
+        type: object
+        required: [type, query_id]
+        properties:
+          type:
+            type: string
+            const: query_started
+          query_id:
+            type: string
+            format: uuid
+
+    QueryProgress:
+      name: QueryProgress
+      summary: 查询进度通知（可选）
+      payload:
+        type: object
+        required: [type, query_id]
+        properties:
+          type:
+            type: string
+            const: query_progress
+          query_id:
+            type: string
+            format: uuid
+          rows_fetched:
+            type: integer
+            description: 已获取行数
+          message:
+            type: string
+            description: 进度描述
+
+    QueryResult:
+      name: QueryResult
+      summary: 查询结果
+      description: |
+        当前仅定义 msgpack 对象形态（两端实现一致）。
+
+        大结果集的 Arrow IPC stream 形态为预留扩展，需显式协商后启用
+        （见 encoding.md §3 与后续里程碑），当前服务端不会推送二进制形态。
+      payload:
+        type: object
+        required: [type, query_id, result]
+        properties:
+          type:
+            type: string
+            const: query_result
+          query_id:
+            type: string
+            format: uuid
+          result:
+            $ref: "schemas/query.json#/definitions/QueryResult"
+
+    QueryError:
+      name: QueryError
+      summary: 查询执行错误
+      payload:
+        type: object
+        required: [type, query_id, error]
+        properties:
+          type:
+            type: string
+            const: query_error
+          query_id:
+            type: string
+            format: uuid
+          error:
+            $ref: "schemas/error.json#/definitions/PolyDBError"
+
+    QueryCancelled:
+      name: QueryCancelled
+      summary: 查询已取消确认
+      payload:
+        type: object
+        required: [type, query_id]
+        properties:
+          type:
+            type: string
+            const: query_cancelled
+          query_id:
+            type: string
+            format: uuid
+          rows_returned:
+            type: integer
+            description: 取消前已返回的行数

@@ -1,0 +1,14 @@
+[package]
+name = "polydb-db-redis"
+version.workspace = true
+edition.workspace = true
+description = "PolyDB redis driver"
+
+[dependencies]
+polydb-core = { workspace = true }
+polydb-protocol = { workspace = true }
+polydb-db-core = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+redis = { workspace = true }
+parking_lot = { workspace = true }

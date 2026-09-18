@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://polydb.dev/schemas/common.json",
+  "title": "PolyDB Common Types",
+  "description": "Shared types used across all PolyDB schemas",
+  "definitions": {
+    "DatabaseKind": {
+      "type": "string",
+      "enum": ["sqlite", "mysql", "postgres", "mssql", "oracle", "redis"],
+      "description": "Supported database types"
+    },
+    "ConnectionId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique connection identifier"
+    },
+    "Value": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        { "type": "array", "items": { "$ref": "#/definitions/Value" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/definitions/Value" } }
+      ],
+      "description": "SQL value: null, bool, number, string, array, or object"
+    },
+    "SshTunnelConfig": {
+      "type": "object",
+      "required": ["host", "port", "username"],
+      "properties": {
+        "host": { "type": "string" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "username": { "type": "string" },
+        "password_ref": { "type": "string", "description": "Reference to password in keyring/encrypted store" },
+        "password": {
+          "type": "string",
+          "description": "One-time plaintext SSH password, only accepted on create/update; server writes it to the keyring and never stores or returns it"
+        },
+        "private_key_path": { "type": "string" },
+        "private_key_passphrase_ref": { "type": "string" },
+        "private_key_passphrase": {
+          "type": "string",
+          "description": "One-time plaintext passphrase for the private key, only accepted on create/update; server writes it to the keyring and never stores or returns it"
+        }
+      }
+    },
+    "PaginationParams": {
+      "type": "object",
+      "properties": {
+        "offset": { "type": "integer", "minimum": 0, "default": 0 },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 100 }
+      }
+    },
+    "SortOrder": {
+      "type": "string",
+      "enum": ["asc", "desc"]
+    }
+  }
+}

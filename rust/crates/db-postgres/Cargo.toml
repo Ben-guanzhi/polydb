@@ -1,0 +1,15 @@
+[package]
+name = "polydb-db-postgres"
+version.workspace = true
+edition.workspace = true
+description = "PolyDB postgres driver"
+
+[dependencies]
+polydb-core = { workspace = true }
+polydb-protocol = { workspace = true }
+polydb-db-core = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+sqlx = { workspace = true }
+chrono = { workspace = true }
+bigdecimal = { version = "0.4", default-features = false }

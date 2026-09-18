@@ -1,0 +1,12 @@
+[package]
+name = "polydb-core"
+version.workspace = true
+edition.workspace = true
+description = "PolyDB domain model, errors, DTOs (no IO)"
+
+[dependencies]
+polydb-protocol = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }

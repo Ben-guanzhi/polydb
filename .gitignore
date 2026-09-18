@@ -1,0 +1,28 @@
+# ─── Build artifacts ───────────────────────────────────────
+# Rust
+/rust/target/
+# root target/ 是历史日志残留（target/logs），全部排除
+/target/
+# Web
+/web/node_modules/
+/web/dist/
+# Go
+/go/bin/
+
+# ─── Vendored local tools（Windows 专属二进制，不入库）─────
+/.tools/
+
+# ─── Logs & scratch ────────────────────────────────────────
+*.log
+_agt_tmp.md
+agents_full.txt
+
+# ─── Data & secrets（红线：绝不入库）───────────────────────
+*.db
+*.db-wal
+*.db-shm
+keyring.bin
+
+# ─── OS ────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db

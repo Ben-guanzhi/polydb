@@ -1,0 +1,15 @@
+[package]
+name = "polydb-gui"
+version.workspace = true
+edition.workspace = true
+description = "PolyDB desktop GUI application"
+
+[dependencies]
+polydb-core = { workspace = true }
+polydb-protocol = { workspace = true }
+polydb-app-core = { workspace = true }
+polydb-transport = { workspace = true }
+polydb-ui-gui = { workspace = true }
+polydb-storage = { workspace = true }
+gpui = { workspace = true }
+dirs = "5"

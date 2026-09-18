@@ -1,0 +1,11 @@
+[package]
+name = "polydb-ui-gui"
+version.workspace = true
+edition.workspace = true
+description = "PolyDB GPUI components"
+
+[dependencies]
+polydb-core = { workspace = true }
+polydb-protocol = { workspace = true }
+polydb-transport = { workspace = true }
+gpui = { workspace = true }

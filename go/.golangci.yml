@@ -1,0 +1,16 @@
+# golangci-lint 配置（v2 格式）。defer 中的 Close / 响应写入是有意忽略的错误，
+# 用官方 exclude-functions 白名单，其余规则保持默认严格。
+version: "2"
+
+linters:
+  settings:
+    errcheck:
+      exclude-functions:
+        - "(*database/sql.Rows).Close"
+        - "(*database/sql.DB).Close"
+        - "(*github.com/polydb/polydb/pkg/dbcore.Driver).Close"
+        - "(*github.com/redis/go-redis/v9.Client).Close"
+        - "(*github.com/redis/go-redis/v9.Conn).Close"
+        - "(*github.com/sijms/go-ora/v2).Connection.Close"
+        - "(net/http.ResponseWriter).Write"
+        - "(*encoding/json.Encoder).Encode"

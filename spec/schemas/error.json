@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://polydb.dev/schemas/error.json",
+  "title": "PolyDB Error",
+  "description": "Unified error response format",
+  "definitions": {
+    "PolyDBError": {
+      "type": "object",
+      "required": ["code", "message"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^POLYDB_ERR_[A-Z_]+$",
+          "description": "Machine-readable error code (e.g., POLYDB_ERR_CONNECTION_FAILED)"
+        },
+        "message": {
+          "type": "string",
+          "description": "Human-readable error message"
+        },
+        "detail": {
+          "type": "object",
+          "description": "Additional structured error context"
+        },
+        "retryable": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether the operation can be retried"
+        },
+        "cause": {
+          "type": "string",
+          "description": "Underlying driver error message (for debugging)"
+        }
+      }
+    },
+    "ErrorCodes": {
+      "description": "Enumeration of all error codes (documentation only, not a wire type)",
+      "type": "string",
+      "enum": [
+        "POLYDB_ERR_UNKNOWN",
+        "POLYDB_ERR_CONNECTION_FAILED",
+        "POLYDB_ERR_CONNECTION_NOT_FOUND",
+        "POLYDB_ERR_CONNECTION_EXISTS",
+        "POLYDB_ERR_AUTH_FAILED",
+        "POLYDB_ERR_TIMEOUT",
+        "POLYDB_ERR_QUERY_FAILED",
+        "POLYDB_ERR_SYNTAX_ERROR",
+        "POLYDB_ERR_PERMISSION_DENIED",
+        "POLYDB_ERR_SCHEMA_NOT_FOUND",
+        "POLYDB_ERR_TABLE_NOT_FOUND",
+        "POLYDB_ERR_COLUMN_NOT_FOUND",
+        "POLYDB_ERR_DUPLICATE_KEY",
+        "POLYDB_ERR_CONSTRAINT_VIOLATION",
+        "POLYDB_ERR_DEADLOCK",
+        "POLYDB_ERR_TRANSACTION_FAILED",
+        "POLYDB_ERR_TRANSACTION_NOT_FOUND",
+        "POLYDB_ERR_QUERY_NOT_FOUND",
+        "POLYDB_ERR_INVALID_PARAM",
+        "POLYDB_ERR_NOT_SUPPORTED",
+        "POLYDB_ERR_DRIVER_NOT_AVAILABLE",
+        "POLYDB_ERR_SSH_TUNNEL_FAILED",
+        "POLYDB_ERR_STORAGE_FAILED",
+        "POLYDB_ERR_KEYRING_FAILED",
+        "POLYDB_ERR_CANCELLED"
+      ]
+    }
+  }
+}

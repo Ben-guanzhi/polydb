@@ -1,0 +1,15 @@
+[package]
+name = "polydb-db-oracle"
+version.workspace = true
+edition.workspace = true
+description = "PolyDB oracle driver"
+
+[dependencies]
+polydb-core = { workspace = true }
+polydb-protocol = { workspace = true }
+polydb-db-core = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+oracle = { workspace = true }
+chrono = { workspace = true }
+parking_lot = { workspace = true }

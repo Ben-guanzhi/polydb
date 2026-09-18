@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://polydb.dev/schemas/redis.json",
+  "title": "PolyDB Redis Types",
+  "description": "Redis KV driver DTOs",
+  "definitions": {
+    "RedisKeyType": {
+      "type": "string",
+      "enum": ["string", "list", "set", "zset", "hash", "stream", "none"],
+      "description": "Redis key types"
+    },
+    "RedisValue": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["type", "value"],
+          "properties": {
+            "type": { "const": "string" },
+            "value": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "value"],
+          "properties": {
+            "type": { "const": "list" },
+            "value": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "value"],
+          "properties": {
+            "type": { "const": "set" },
+            "value": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "value"],
+          "properties": {
+            "type": { "const": "zset" },
+            "value": {
+              "type": "array",
+              "items": { "$ref": "#/definitions/RedisZSetMember" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "value"],
+          "properties": {
+            "type": { "const": "hash" },
+            "value": { "type": "object", "additionalProperties": { "type": "string" } }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["type", "value"],
+          "properties": {
+            "type": { "const": "stream" },
+            "value": { "type": "string", "description": "Stream ID or serialized form" }
+          }
+        }
+      ]
+    },
+    "RedisZSetMember": {
+      "type": "object",
+      "required": ["member", "score"],
+      "properties": {
+        "member": { "type": "string" },
+        "score": { "type": "number" }
+      }
+    },
+    "RedisScanPage": {
+      "type": "object",
+      "required": ["cursor", "keys"],
+      "properties": {
+        "cursor": { "type": "integer", "description": "Cursor for next scan iteration (0 = done)" },
+        "keys": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["key", "type"],
+            "properties": {
+              "key": { "type": "string" },
+              "type": { "$ref": "#/definitions/RedisKeyType" },
+              "ttl": { "type": ["integer", "null"], "description": "TTL in seconds (-1 = no expiry, -2 = expired)" }
+            }
+          }
+        }
+      }
+    },
+    "RedisReply": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["simple_string", "error", "integer", "bulk_string", "array", "null"]
+        },
+        "value": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string" },
+            { "type": "integer" },
+            { "type": "array", "items": { "$ref": "#/definitions/RedisReply" } }
+          ]
+        }
+      }
+    },
+    "RedisSelectDbRequest": {
+      "type": "object",
+      "required": ["index"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "RedisScanRequest": {
+      "type": "object",
+      "properties": {
+        "cursor": { "type": "integer", "minimum": 0, "default": 0 },
+        "pattern": { "type": "string", "default": "*" },
+        "count": { "type": "integer", "minimum": 1, "maximum": 10000, "default": 100 }
+      }
+    },
+    "RedisSetRequest": {
+      "type": "object",
+      "required": ["key", "value"],
+      "properties": {
+        "key": { "type": "string" },
+        "value": { "$ref": "#/definitions/RedisValue" },
+        "ttl": { "type": "integer", "minimum": 0, "description": "TTL in seconds (0 = no expiry)" }
+      }
+    },
+    "RedisExecCommandRequest": {
+      "type": "object",
+      "required": ["args"],
+      "properties": {
+        "args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Command and arguments (e.g., ['GET', 'mykey'])"
+        }
+      }
+    }
+  }
+}

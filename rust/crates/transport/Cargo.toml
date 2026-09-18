@@ -1,0 +1,12 @@
+[package]
+name = "polydb-transport"
+version.workspace = true
+edition.workspace = true
+description = "PolyDB transport layer (local / HTTP)"
+
+[dependencies]
+polydb-core = { workspace = true }
+polydb-protocol = { workspace = true }
+polydb-app-core = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }

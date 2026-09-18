@@ -1,0 +1,12 @@
+[package]
+name = "polydb-protocol"
+version.workspace = true
+edition.workspace = true
+description = "PolyDB protocol types — generated from spec/schemas"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+rmp-serde = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }

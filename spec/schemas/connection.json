@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://polydb.dev/schemas/connection.json",
+  "title": "PolyDB Connection",
+  "description": "Connection creation and management DTOs",
+  "$ref": "#/definitions/ConnectionInfo",
+  "definitions": {
+    "CreateConnectionRequest": {
+      "type": "object",
+      "required": ["name", "kind"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "description": "User-friendly connection name"
+        },
+        "kind": { "$ref": "common.json#/definitions/DatabaseKind" },
+        "host": { "type": "string", "description": "Database host (not needed for sqlite)" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "Database port" },
+        "database": { "type": "string", "description": "Database name or file path (sqlite)" },
+        "username": { "type": "string" },
+        "password_ref": {
+          "type": "string",
+          "description": "Reference to password in keyring/encrypted store. Never send plaintext password."
+        },
+        "password": {
+          "type": "string",
+          "description": "One-time plaintext password, only accepted on create; server writes it to the keyring (under a generated ref) and never stores or returns it"
+        },
+        "options": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Driver-specific options (e.g., sslmode, charset)"
+        },
+        "ssh_tunnel": { "$ref": "common.json#/definitions/SshTunnelConfig" },
+        "default_schema": { "type": "string", "description": "Default schema to use (e.g., 'public' for postgres)" }
+      }
+    },
+    "UpdateConnectionRequest": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "host": { "type": "string" },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "database": { "type": "string" },
+        "username": { "type": "string" },
+        "password_ref": { "type": "string" },
+        "password": {
+          "type": "string",
+          "description": "One-time plaintext password; empty string or omitted means keep the existing password. Server writes it to the keyring and never stores or returns it"
+        },
+        "options": { "type": "object", "additionalProperties": { "type": "string" } },
+        "ssh_tunnel": { "$ref": "common.json#/definitions/SshTunnelConfig" },
+        "default_schema": { "type": "string" }
+      }
+    },
+    "ConnectionInfo": {
+      "type": "object",
+      "required": ["id", "name", "kind", "created_at", "updated_at"],
+      "properties": {
+        "id": { "$ref": "common.json#/definitions/ConnectionId" },
+        "name": { "type": "string" },
+        "kind": { "$ref": "common.json#/definitions/DatabaseKind" },
+        "host": { "type": "string" },
+        "port": { "type": "integer" },
+        "database": { "type": "string" },
+        "username": { "type": "string" },
+        "options": { "type": "object", "additionalProperties": { "type": "string" } },
+        "ssh_tunnel": { "$ref": "common.json#/definitions/SshTunnelConfig" },
+        "default_schema": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" }
+      },
+      "description": "Connection metadata. Never includes password."
+    },
+    "ConnectionStatus": {
+      "type": "object",
+      "required": ["id", "connected"],
+      "properties": {
+        "id": { "$ref": "common.json#/definitions/ConnectionId" },
+        "connected": { "type": "boolean" },
+        "server_version": { "type": "string", "description": "Database server version string" },
+        "latency_ms": { "type": "number", "description": "Round-trip latency in milliseconds" },
+        "error": { "type": "string", "description": "Error message if not connected" }
+      }
+    }
+  }
+}

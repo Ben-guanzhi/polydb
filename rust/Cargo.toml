@@ -1,0 +1,85 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/protocol",
+    "crates/core",
+    "crates/db-core",
+    "crates/storage",
+    "crates/app-core",
+    "crates/transport",
+    "crates/db-sqlite",
+    "crates/db-mysql",
+    "crates/db-postgres",
+    "crates/db-mssql",
+    "crates/db-oracle",
+    "crates/db-redis",
+    "crates/ui-gui",
+    "crates/server",
+    "apps/polydb-gui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/polydb/polydb"
+
+[workspace.dependencies]
+# Internal crates
+polydb-protocol = { path = "crates/protocol" }
+polydb-core = { path = "crates/core" }
+polydb-db-core = { path = "crates/db-core" }
+polydb-storage = { path = "crates/storage" }
+polydb-app-core = { path = "crates/app-core" }
+polydb-transport = { path = "crates/transport" }
+polydb-ui-gui = { path = "crates/ui-gui" }
+polydb-server = { path = "crates/server" }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rmp-serde = "1"
+bytes = "1"
+
+# Async
+async-trait = "0.1"
+smol = "2"
+async-lock = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+axum = "0.8"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# UUID
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Arrow
+arrow = { version = "54" }
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "mysql", "postgres", "chrono", "bigdecimal"] }
+tiberius = { version = "0.12", default-features = false, features = ["tds73", "tokio", "chrono", "rustls", "rust_decimal"] }
+oracle = { version = "0.6" }
+redis = { version = "0.29", default-features = false, features = ["tokio-comp"] }
+
+# Concurrency
+parking_lot = "0.12"
+
+# Keyring (M8)
+aes-gcm = "0.10"
+scrypt = "0.11"
+rand = "0.8"
+russh = { version = "0.55", default-features = false, features = ["ring"] }
+
+# GUI
+gpui = "0.2"

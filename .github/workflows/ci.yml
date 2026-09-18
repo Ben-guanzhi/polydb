@@ -1,0 +1,170 @@
+# CI：Rust / Go / Web 三端门禁 + 契约测试对拍（M7）。
+# 契约 job 起 postgres / redis / mysql / mssql / oracle 服务容器，让网络数据库场景真跑。
+# MSSQL 用 mcr.microsoft.com/mssql/server:2022，Oracle 用 gvenzl/oracle-free:23-slim。
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust (fmt / clippy / test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: fmt
+        working-directory: rust
+        run: cargo fmt --all --check
+      - name: clippy
+        working-directory: rust
+        run: cargo clippy --workspace -- -D warnings
+      - name: test
+        working-directory: rust
+        run: cargo test --workspace
+
+  go:
+    name: Go (fmt / lint / vet / test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: go/go.sum
+      - name: gofmt
+        working-directory: go
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed for: $unformatted"
+            exit 1
+          fi
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.13.2
+          working-directory: go
+      - name: vet
+        working-directory: go
+        run: go vet ./...
+      - name: test
+        working-directory: go
+        run: go test ./...
+
+  web:
+    name: Web (tsc / build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: install
+        working-directory: web
+        run: npm ci
+      - name: typecheck
+        working-directory: web
+        run: npm run check
+      - name: build
+        working-directory: web
+        run: npm run build
+
+  contract:
+    name: Contract (dual-backend 对拍)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+          MYSQL_DATABASE: mysql
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost -uroot"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: "PolyDb_Test_2026"
+        ports:
+          - 1433:1433
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P $${MSSQL_SA_PASSWORD} -Q 'SELECT 1' -b -o /dev/null"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 20
+          --health-start-period 40s
+      oracle:
+        image: gvenzl/oracle-free:23-slim
+        env:
+          ORACLE_PASSWORD: oracle
+          ORACLE_DATABASE: ORCL
+        ports:
+          - 1521:1521
+        options: >-
+          --health-cmd healthcheck.sh
+          --health-interval 10s
+          --health-timeout 10s
+          --health-retries 30
+          --health-start-period 5m
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: test/contract/go.sum
+      - name: build rust server
+        working-directory: rust
+        run: cargo build -p polydb-server
+      - name: contract tests
+        working-directory: test/contract
+        env:
+          POLYDB_TEST_PG: postgres://postgres@localhost:5432/postgres?sslmode=disable
+          POLYDB_TEST_MYSQL: mysql://root@localhost:3306/mysql
+          POLYDB_TEST_REDIS: localhost:6379
+          POLYDB_TEST_MSSQL: mssql://sa:PolyDb_Test_2026@localhost:1433/master
+          POLYDB_TEST_ORACLE: oracle://system:oracle@localhost:1521/ORCL
+        run: go test -count=1 -v ./...

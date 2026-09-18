@@ -1,0 +1,60 @@
+{
+  "$comment": "Arrow IPC schema for PolyDB query result sets",
+  "description": |
+    PolyDB 查询结果使用 Apache Arrow IPC 格式传输。
+    每个结果集对应一个 Arrow RecordBatch，schema 定义如下。
+
+    ## 列映射规则
+    QueryResult 的 columns[] 描述每列的元数据（名称、类型），
+    Arrow schema 中的每个字段对应一列数据。
+
+    ## 类型映射
+    | generic_type    | Arrow type           |
+    |-----------------|----------------------|
+    | boolean         | Boolean              |
+    | smallint        | Int16                |
+    | integer         | Int32                |
+    | bigint          | Int64                |
+    | float           | Float32              |
+    | double          | Float64              |
+    | decimal         | Decimal128(p, s)     |
+    | numeric         | Decimal128(p, s)     |
+    | char            | Utf8                 |
+    | varchar         | Utf8                 |
+    | text            | LargeUtf8            |
+    | binary          | Binary               |
+    | varbinary       | Binary               |
+    | blob            | LargeBinary          |
+    | date            | Date32               |
+    | time            | Time64(Microsecond)  |
+    | datetime        | Timestamp(Microsecond, null) |
+    | timestamp       | Timestamp(Microsecond, "UTC") |
+    | interval        | Duration(Microsecond)|
+    | json            | Utf8                 |
+    | jsonb           | Utf8                 |
+    | xml             | Utf8                 |
+    | uuid            | Utf8                 |
+    | array           | Utf8 (JSON-encoded)  |
+    | enum            | Utf8                 |
+    | other           | Utf8                 |
+
+    ## NULL 处理
+    所有列默认 nullable。NULL 值在 Arrow 中通过 validity bitmap 表示。
+
+    ## 分页
+    大结果集按 batch 分块发送（每批最多 10000 行），
+    使用 Arrow IPC streaming 格式（非 file 格式）。
+    每个 batch 之间可插入 progress 消息。
+    最后一个 batch 后发送 end-of-stream 标记。
+  "recordBatch": {
+    "columns": [
+      {
+        "name": "_polydb_row_index",
+        "type": "Int64",
+        "nullable": false,
+        "comment": "可选：全局行号，用于分页定位"
+      }
+    ],
+    "comment": "实际列由查询结果动态决定，此处仅描述约定"
+  }
+}

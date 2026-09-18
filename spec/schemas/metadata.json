@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://polydb.dev/schemas/metadata.json",
+  "title": "PolyDB Metadata",
+  "description": "Database schema introspection DTOs",
+  "definitions": {
+    "SchemaInfo": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "description": "Schema name" }
+      }
+    },
+    "TableInfo": {
+      "type": "object",
+      "required": ["name", "schema", "type"],
+      "properties": {
+        "name": { "type": "string", "description": "Table name" },
+        "schema": { "type": "string", "description": "Schema this table belongs to" },
+        "type": {
+          "type": "string",
+          "enum": ["table", "view", "materialized_view"],
+          "description": "Object type"
+        },
+        "row_count": { "type": "integer", "description": "Estimated row count (may be stale)" },
+        "comment": { "type": "string", "description": "Table comment/description" }
+      }
+    },
+    "ColumnInfo": {
+      "type": "object",
+      "required": ["name", "data_type", "nullable", "ordinal_position"],
+      "properties": {
+        "name": { "type": "string" },
+        "data_type": { "type": "string", "description": "Database-specific type name (e.g., 'varchar', 'int4')" },
+        "generic_type": {
+          "type": "string",
+          "enum": [
+            "boolean", "smallint", "integer", "bigint",
+            "float", "double", "decimal", "numeric",
+            "char", "varchar", "text", "binary", "varbinary", "blob",
+            "date", "time", "datetime", "timestamp", "interval",
+            "json", "jsonb", "xml", "uuid", "array", "enum", "other"
+          ],
+          "description": "Normalized type category for cross-database comparison"
+        },
+        "nullable": { "type": "boolean" },
+        "default_value": { "type": ["string", "null"], "description": "Column default expression" },
+        "max_length": { "type": ["integer", "null"], "description": "Max length for char/varchar types" },
+        "precision": { "type": ["integer", "null"], "description": "Precision for numeric types" },
+        "scale": { "type": ["integer", "null"], "description": "Scale for numeric types" },
+        "is_primary_key": { "type": "boolean" },
+        "is_auto_increment": { "type": "boolean" },
+        "comment": { "type": "string" },
+        "ordinal_position": { "type": "integer", "description": "Column position (1-based)" }
+      }
+    },
+    "IndexInfo": {
+      "type": "object",
+      "required": ["name", "unique", "columns"],
+      "properties": {
+        "name": { "type": "string" },
+        "unique": { "type": "boolean" },
+        "primary": { "type": "boolean", "description": "Whether this is the primary key index" },
+        "type": {
+          "type": "string",
+          "enum": ["btree", "hash", "gin", "gist", "fulltext", "spatial", "other"],
+          "description": "Index type"
+        },
+        "columns": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/IndexColumn" },
+          "description": "Columns in index order"
+        },
+        "comment": { "type": "string" }
+      }
+    },
+    "IndexColumn": {
+      "type": "object",
+      "required": ["name", "position"],
+      "properties": {
+        "name": { "type": "string", "description": "Column name" },
+        "position": { "type": "integer", "description": "Position in index (1-based)" },
+        "order": { "$ref": "common.json#/definitions/SortOrder" },
+        "prefix_length": { "type": ["integer", "null"], "description": "Prefix index length if applicable" }
+      }
+    },
+    "ForeignKeyInfo": {
+      "type": "object",
+      "required": ["name", "columns", "referenced_schema", "referenced_table", "referenced_columns"],
+      "properties": {
+        "name": { "type": "string" },
+        "columns": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Local column names"
+        },
+        "referenced_schema": { "type": "string" },
+        "referenced_table": { "type": "string" },
+        "referenced_columns": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Referenced column names"
+        },
+        "on_update": { "$ref": "#/definitions/ForeignKeyAction" },
+        "on_delete": { "$ref": "#/definitions/ForeignKeyAction" }
+      }
+    },
+    "ForeignKeyAction": {
+      "type": "string",
+      "enum": ["cascade", "set_null", "set_default", "restrict", "no_action"]
+    }
+  }
+}

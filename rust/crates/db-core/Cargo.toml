@@ -1,0 +1,11 @@
+[package]
+name = "polydb-db-core"
+version.workspace = true
+edition.workspace = true
+description = "PolyDB database driver abstractions"
+
+[dependencies]
+polydb-core = { workspace = true }
+polydb-protocol = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }

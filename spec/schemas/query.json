@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://polydb.dev/schemas/query.json",
+  "title": "PolyDB Query",
+  "description": "Query execution request and result DTOs",
+  "definitions": {
+    "QueryRequest": {
+      "type": "object",
+      "required": ["sql"],
+      "properties": {
+        "sql": { "type": "string", "description": "SQL statement to execute" },
+        "params": {
+          "type": "array",
+          "items": { "$ref": "common.json#/definitions/Value" },
+          "description": "Positional bind parameters"
+        },
+        "connection_id": { "$ref": "common.json#/definitions/ConnectionId" },
+        "query_id": {
+          "type": "string",
+          "description": "Optional client-provided query identifier (uuid). Server echoes it in the X-Query-ID response header. When omitted the server generates one. Use POST /api/queries/{query_id}/cancel to cancel an in-flight HTTP query."
+        },
+        "schema": { "type": "string", "description": "Schema context for the query" },
+        "pagination": { "$ref": "common.json#/definitions/PaginationParams" },
+        "timeout_ms": { "type": "integer", "minimum": 0, "description": "Query timeout in milliseconds (0 = no timeout)" },
+        "max_rows": { "type": "integer", "minimum": 0, "description": "Maximum rows to return (0 = use server default)" }
+      }
+    },
+    "QueryResult": {
+      "type": "object",
+      "required": ["columns", "rows", "affected_rows", "execution_time_ms"],
+      "properties": {
+        "columns": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/ResultColumn" },
+          "description": "Column metadata for the result set"
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": { "$ref": "common.json#/definitions/Value" }
+          },
+          "description": "Row data as arrays of values"
+        },
+        "affected_rows": { "type": "integer", "description": "Number of rows affected (for DML)" },
+        "execution_time_ms": { "type": "number", "description": "Server-side execution time" },
+        "truncated": { "type": "boolean", "description": "True if results were truncated due to max_rows" },
+        "total_rows": { "type": ["integer", "null"], "description": "Total rows available (if known, for pagination)" },
+        "has_more": { "type": "boolean", "description": "Whether more rows are available" },
+        "statement_type": {
+          "type": "string",
+          "enum": ["select", "insert", "update", "delete", "ddl", "other"],
+          "description": "Type of SQL statement executed"
+        }
+      }
+    },
+    "ResultColumn": {
+      "type": "object",
+      "required": ["name", "type"],
+      "properties": {
+        "name": { "type": "string", "description": "Column name or alias" },
+        "table": { "type": ["string", "null"], "description": "Source table name if applicable" },
+        "type": { "type": "string", "description": "Database-specific type name" },
+        "generic_type": {
+          "type": "string",
+          "enum": [
+            "boolean", "smallint", "integer", "bigint",
+            "float", "double", "decimal", "numeric",
+            "char", "varchar", "text", "binary", "varbinary", "blob",
+            "date", "time", "datetime", "timestamp", "interval",
+            "json", "jsonb", "xml", "uuid", "array", "enum", "other"
+          ]
+        },
+        "nullable": { "type": ["boolean", "null"] }
+      }
+    },
+    "BatchQueryRequest": {
+      "type": "object",
+      "required": ["statements", "stop_on_error"],
+      "properties": {
+        "statements": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/QueryRequest" },
+          "description": "Multiple SQL statements to execute in order"
+        },
+        "connection_id": { "$ref": "common.json#/definitions/ConnectionId" },
+        "stop_on_error": { "type": "boolean", "default": true, "description": "Stop execution on first error" }
+      }
+    },
+    "BatchQueryResult": {
+      "type": "object",
+      "required": ["results", "total_execution_time_ms"],
+      "properties": {
+        "results": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "$ref": "#/definitions/QueryResult" },
+              { "$ref": "error.json#/definitions/PolyDBError" }
+            ]
+          },
+          "description": "Results in same order as statements; errors if stop_on_error=false"
+        },
+        "total_execution_time_ms": { "type": "number" }
+      }
+    }
+  }
+}

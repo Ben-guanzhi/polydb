@@ -1,0 +1,669 @@
+openapi: 3.1.0
+info:
+  title: PolyDB API
+  version: 0.1.0
+  description: |
+    PolyDB REST API — 多数据库客户端的控制面接口。
+
+    ## 编码约定
+    - 控制面（连接管理、元数据、DDL）使用 **MessagePack** (`application/msgpack`)
+    - 数据面（查询结果）使用 **Arrow IPC** (`application/vnd.apache.arrow.stream`)
+    - JSON (`application/json`) 仅作为调试/握手 fallback
+    - 错误统一使用 `application/json` 格式
+
+    ## 认证
+    当前版本无认证（单机部署）。未来版本可能添加 Bearer Token。
+
+servers:
+  - url: http://localhost:9527
+    description: 本地开发服务器
+
+paths:
+  /api/health:
+    get:
+      operationId: healthCheck
+      summary: 健康检查
+      tags: [system]
+      responses:
+        "200":
+          description: 服务正常
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, version]
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+                  version:
+                    type: string
+
+  # ─── 连接管理 ───────────────────────────────────────────
+  /api/connections:
+    get:
+      operationId: listConnections
+      summary: 列出所有连接
+      tags: [connections]
+      responses:
+        "200":
+          description: 连接列表
+          content:
+            application/msgpack:
+              schema:
+                type: array
+                items:
+                  $ref: "schemas/connection.json#/definitions/ConnectionInfo"
+        default:
+          $ref: "#/components/responses/Error"
+
+    post:
+      operationId: createConnection
+      summary: 创建新连接
+      tags: [connections]
+      requestBody:
+        required: true
+        content:
+          application/msgpack:
+            schema:
+              $ref: "schemas/connection.json#/definitions/CreateConnectionRequest"
+      responses:
+        "201":
+          description: 连接已创建
+          content:
+            application/msgpack:
+              schema:
+                $ref: "schemas/connection.json#/definitions/ConnectionInfo"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /api/connections/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          $ref: "schemas/common.json#/definitions/ConnectionId"
+    get:
+      operationId: getConnection
+      summary: 获取连接详情
+      tags: [connections]
+      responses:
+        "200":
+          description: 连接信息
+          content:
+            application/msgpack:
+              schema:
+                $ref: "schemas/connection.json#/definitions/ConnectionInfo"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      operationId: updateConnection
+      summary: 更新连接
+      tags: [connections]
+      requestBody:
+        required: true
+        content:
+          application/msgpack:
+            schema:
+              $ref: "schemas/connection.json#/definitions/UpdateConnectionRequest"
+      responses:
+        "200":
+          description: 连接已更新
+          content:
+            application/msgpack:
+              schema:
+                $ref: "schemas/connection.json#/definitions/ConnectionInfo"
+        default:
+          $ref: "#/components/responses/Error"
+    delete:
+      operationId: deleteConnection
+      summary: 删除连接
+      tags: [connections]
+      responses:
+        "204":
+          description: 连接已删除
+        default:
+          $ref: "#/components/responses/Error"
+
+  /api/connections/{id}/test:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          $ref: "schemas/common.json#/definitions/ConnectionId"
+    post:
+      operationId: testConnection
+      summary: 测试连接连通性
+      tags: [connections]
+      responses:
+        "200":
+          description: 连接状态
+          content:
+            application/msgpack:
+              schema:
+                $ref: "schemas/connection.json#/definitions/ConnectionStatus"
+        default:
+          $ref: "#/components/responses/Error"
+
+  # ─── 元数据 ─────────────────────────────────────────────
+  /api/connections/{id}/schemas:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          $ref: "schemas/common.json#/definitions/ConnectionId"
+    get:
+      operationId: listSchemas
+      summary: 列出数据库模式
+      tags: [metadata]
+      responses:
+        "200":
+          description: 模式列表
+          content:
+            application/msgpack:
+              schema:
+                type: array
+                items:
+                  $ref: "schemas/metadata.json#/definitions/SchemaInfo"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /api/connections/{id}/schemas/{schema}/tables:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          $ref: "schemas/common.json#/definitions/ConnectionId"
+      - name: schema
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: listTables
+      summary: 列出模式下的表
+      tags: [metadata]
+      responses:
+        "200":
+          description: 表列表
+          content:
+            application/msgpack:
+              schema:
+                type: array
+                items:
+                  $ref: "schemas/metadata.json#/definitions/TableInfo"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /api/connections/{id}/schemas/{schema}/tables/{table}/columns:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          $ref: "schemas/common.json#/definitions/ConnectionId"
+      - name: schema
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: table
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: listColumns
+      summary: 列出表的列信息
+      tags: [metadata]
+      responses:
+        "200":
+          description: 列列表
+          content:
+            application/msgpack:
+              schema:
+                type: array
+                items:
+                  $ref: "schemas/metadata.json#/definitions/ColumnInfo"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /api/connections/{id}/schemas/{schema}/tables/{table}/indexes:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          $ref: "schemas/common.json#/definitions/ConnectionId"
+      - name: schema
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: table
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: listIndexes
+      summary: 列出表的索引
+      tags: [metadata]
+      responses:
+        "200":
+          description: 索引列表
+          content:
+            application/msgpack:
+              schema:
+                type: array
+                items:
+                  $ref: "schemas/metadata.json#/definitions/IndexInfo"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /api/connections/{id}/schemas/{schema}/tables/{table}/foreign-keys:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          $ref: "schemas/common.json#/definitions/ConnectionId"
+      - name: schema
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: table
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: listForeignKeys
+      summary: 列出表的外键
+      tags: [metadata]
+      responses:
+        "200":
+          description: 外键列表
+          content:
+            application/msgpack:
+              schema:
+                type: array
+                items:
+                  $ref: "schemas/metadata.json#/definitions/ForeignKeyInfo"
+        default:
+          $ref: "#/components/responses/Error"
+
+  # ─── 查询 ───────────────────────────────────────────────
+  /api/connections/{id}/query:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          $ref: "schemas/common.json#/definitions/ConnectionId"
+    post:
+      operationId: executeQuery
+      summary: 执行 SQL 查询
+      description: |
+        执行 SQL 查询并返回结果。
+        响应使用 Arrow IPC 格式（大数据集高效传输）。
+        JSON 格式可用于调试（Content-Type: application/json）。
+        若 body 携带 query_id，服务端在响应头 X-Query-ID 回显，可用于 POST /api/queries/{query_id}/cancel 取消。
+      tags: [query]
+      requestBody:
+        required: true
+        content:
+          application/msgpack:
+            schema:
+              $ref: "schemas/query.json#/definitions/QueryRequest"
+          application/json:
+            schema:
+              $ref: "schemas/query.json#/definitions/QueryRequest"
+      responses:
+        "200":
+          description: 查询结果
+          headers:
+            X-Query-ID:
+              description: 服务端生成或客户端传入的查询 id
+              schema:
+                type: string
+          content:
+            application/vnd.apache.arrow.stream:
+              schema:
+                type: string
+                format: binary
+                description: Arrow IPC stream
+            application/msgpack:
+              schema:
+                $ref: "schemas/query.json#/definitions/QueryResult"
+            application/json:
+              schema:
+                $ref: "schemas/query.json#/definitions/QueryResult"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /api/queries/{query_id}/cancel:
+    parameters:
+      - name: query_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: cancelQuery
+      summary: 取消正在执行的 HTTP 查询
+      description: |
+        Best-effort 取消。成功返回 204；未知/已完成的 query_id 返回 404 POLYDB_ERR_QUERY_NOT_FOUND。
+        见 spec/behavior.md §2.1。
+      tags: [query]
+      responses:
+        "204":
+          description: 已取消
+        "404":
+          description: 查询 id 未知或已完成
+          content:
+            application/msgpack:
+              schema:
+                $ref: "schemas/error.json#/definitions/PolyDBError"
+            application/json:
+              schema:
+                $ref: "schemas/error.json#/definitions/PolyDBError"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /api/connections/{id}/query/batch:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          $ref: "schemas/common.json#/definitions/ConnectionId"
+    post:
+      operationId: executeBatchQuery
+      summary: 批量执行 SQL 查询
+      tags: [query]
+      requestBody:
+        required: true
+        content:
+          application/msgpack:
+            schema:
+              $ref: "schemas/query.json#/definitions/BatchQueryRequest"
+      responses:
+        "200":
+          description: 批量查询结果
+          content:
+            application/msgpack:
+              schema:
+                $ref: "schemas/query.json#/definitions/BatchQueryResult"
+        default:
+          $ref: "#/components/responses/Error"
+
+  # ─── DDL ────────────────────────────────────────────────
+  /api/connections/{id}/schemas/{schema}/tables/{table}/ddl:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          $ref: "schemas/common.json#/definitions/ConnectionId"
+      - name: schema
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: table
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getCreateTableDDL
+      summary: 获取建表 DDL 语句
+      tags: [ddl]
+      responses:
+        "200":
+          description: DDL 语句
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sql]
+                properties:
+                  sql:
+                    type: string
+                    description: CREATE TABLE 语句
+        default:
+          $ref: "#/components/responses/Error"
+
+  # ─── 事务 ───────────────────────────────────────────────
+  /api/connections/{id}/transactions:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          $ref: "schemas/common.json#/definitions/ConnectionId"
+    post:
+      operationId: beginTransaction
+      summary: 开启事务
+      tags: [transactions]
+      requestBody:
+        content:
+          application/msgpack:
+            schema:
+              $ref: "schemas/transaction.json#/definitions/BeginTransactionRequest"
+      responses:
+        "201":
+          description: 事务已开启
+          content:
+            application/msgpack:
+              schema:
+                $ref: "schemas/transaction.json#/definitions/TransactionInfo"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /api/transactions/{txn_id}/commit:
+    parameters:
+      - name: txn_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: commitTransaction
+      summary: 提交事务
+      tags: [transactions]
+      responses:
+        "200":
+          description: 事务已提交
+          content:
+            application/msgpack:
+              schema:
+                $ref: "schemas/transaction.json#/definitions/TransactionInfo"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /api/transactions/{txn_id}/rollback:
+    parameters:
+      - name: txn_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: rollbackTransaction
+      summary: 回滚事务
+      tags: [transactions]
+      responses:
+        "200":
+          description: 事务已回滚
+          content:
+            application/msgpack:
+              schema:
+                $ref: "schemas/transaction.json#/definitions/TransactionInfo"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /api/transactions/{txn_id}/execute:
+    parameters:
+      - name: txn_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      operationId: executeInTransaction
+      summary: 在事务中执行查询
+      tags: [transactions]
+      requestBody:
+        required: true
+        content:
+          application/msgpack:
+            schema:
+              $ref: "schemas/query.json#/definitions/QueryRequest"
+      responses:
+        "200":
+          description: 执行结果
+          content:
+            application/msgpack:
+              schema:
+                $ref: "schemas/query.json#/definitions/QueryResult"
+        default:
+          $ref: "#/components/responses/Error"
+
+  # ─── Redis KV ───────────────────────────────────────────
+  /api/connections/{id}/kv/select:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          $ref: "schemas/common.json#/definitions/ConnectionId"
+    post:
+      operationId: redisSelectDb
+      summary: 选择 Redis 数据库
+      tags: [kv]
+      requestBody:
+        required: true
+        content:
+          application/msgpack:
+            schema:
+              $ref: "schemas/redis.json#/definitions/RedisSelectDbRequest"
+      responses:
+        "204":
+          description: 已切换
+        default:
+          $ref: "#/components/responses/Error"
+
+  /api/connections/{id}/kv/scan:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          $ref: "schemas/common.json#/definitions/ConnectionId"
+    post:
+      operationId: redisScanKeys
+      summary: 扫描 Redis 键
+      tags: [kv]
+      requestBody:
+        required: true
+        content:
+          application/msgpack:
+            schema:
+              $ref: "schemas/redis.json#/definitions/RedisScanRequest"
+      responses:
+        "200":
+          description: 扫描结果
+          content:
+            application/msgpack:
+              schema:
+                $ref: "schemas/redis.json#/definitions/RedisScanPage"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /api/connections/{id}/kv/keys/{key}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          $ref: "schemas/common.json#/definitions/ConnectionId"
+      - name: key
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: redisGetValue
+      summary: 获取 Redis 键值
+      tags: [kv]
+      responses:
+        "200":
+          description: 键值
+          content:
+            application/msgpack:
+              schema:
+                $ref: "schemas/redis.json#/definitions/RedisValue"
+        default:
+          $ref: "#/components/responses/Error"
+    put:
+      operationId: redisSetValue
+      summary: 设置 Redis 键值
+      tags: [kv]
+      requestBody:
+        required: true
+        content:
+          application/msgpack:
+            schema:
+              $ref: "schemas/redis.json#/definitions/RedisSetRequest"
+      responses:
+        "204":
+          description: 已设置
+        default:
+          $ref: "#/components/responses/Error"
+
+  /api/connections/{id}/kv/exec:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          $ref: "schemas/common.json#/definitions/ConnectionId"
+    post:
+      operationId: redisExecCommand
+      summary: 执行 Redis 命令
+      tags: [kv]
+      requestBody:
+        required: true
+        content:
+          application/msgpack:
+            schema:
+              $ref: "schemas/redis.json#/definitions/RedisExecCommandRequest"
+      responses:
+        "200":
+          description: 命令结果
+          content:
+            application/msgpack:
+              schema:
+                $ref: "schemas/redis.json#/definitions/RedisReply"
+        default:
+          $ref: "#/components/responses/Error"
+
+components:
+  responses:
+    Error:
+      description: 错误响应
+      content:
+        application/json:
+          schema:
+            $ref: "schemas/error.json#/definitions/PolyDBError"

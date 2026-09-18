@@ -1,0 +1,29 @@
+[package]
+name = "polydb-app-core"
+version.workspace = true
+edition.workspace = true
+description = "PolyDB use case orchestration"
+
+[dependencies]
+polydb-core = { workspace = true }
+polydb-protocol = { workspace = true }
+polydb-db-core = { workspace = true }
+polydb-db-sqlite = { path = "../db-sqlite" }
+polydb-db-mysql = { path = "../db-mysql" }
+polydb-db-postgres = { path = "../db-postgres" }
+polydb-db-mssql = { path = "../db-mssql" }
+polydb-db-oracle = { path = "../db-oracle" }
+polydb-db-redis = { path = "../db-redis" }
+polydb-storage = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+russh = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+smol = { workspace = true }
+uuid = { workspace = true }

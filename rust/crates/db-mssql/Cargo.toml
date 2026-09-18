@@ -1,0 +1,18 @@
+[package]
+name = "polydb-db-mssql"
+version.workspace = true
+edition.workspace = true
+description = "PolyDB mssql driver"
+
+[dependencies]
+polydb-core = { workspace = true }
+polydb-protocol = { workspace = true }
+polydb-db-core = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tiberius = { workspace = true }
+tokio = { workspace = true }
+tokio-util = "0.7"
+chrono = { workspace = true }
+parking_lot = { workspace = true }
+smol = { workspace = true }

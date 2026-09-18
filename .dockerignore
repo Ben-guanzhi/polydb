@@ -1,0 +1,10 @@
+.git
+rust/target
+web/node_modules
+web/dist
+.tools
+**/__pycache__
+*.log
+Dockerfile
+.dockerignore
+docker-compose.yml
