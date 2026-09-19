@@ -48,6 +48,8 @@ export interface CreateConnectionRequest {
   ssh_tunnel?: SshTunnelConfig;
   /** Default schema to use (e.g., 'public' for postgres) */
   default_schema?: string;
+  /** When true, the server rejects write statements (INSERT/UPDATE/DELETE/DDL) and KV writes on this connection with POLYDB_ERR_READ_ONLY (behavior.md §12) */
+  read_only?: boolean;
 }
 
 export interface UpdateConnectionRequest {
@@ -62,6 +64,7 @@ export interface UpdateConnectionRequest {
   options?: Record<string, string>;
   ssh_tunnel?: SshTunnelConfig;
   default_schema?: string;
+  read_only?: boolean;
 }
 
 export interface ConnectionInfo {
@@ -75,6 +78,7 @@ export interface ConnectionInfo {
   options?: Record<string, string>;
   ssh_tunnel?: SshTunnelConfig;
   default_schema?: string;
+  read_only?: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -320,10 +324,15 @@ export interface BeginTransactionRequest {
 
 export type IsolationLevel = 'read_committed' | 'read_uncommitted' | 'repeatable_read' | 'serializable';
 
+export interface WsAuth {
+  /** Bearer token; required when the server is started with POLYDB_SERVER_TOKEN, ignored otherwise (behavior.md §12.2) */
+  token?: string;
+}
+
 // ─── WebSocket ────────────────────────────────────────────
 
 export type ClientMessage =
-  { type: 'hello'; client_version?: string; connection_id: ConnectionId }
+  { type: 'hello'; auth?: WsAuth; client_version?: string; connection_id: ConnectionId }
   | { type: 'query'; query_id: string } & QueryRequest
   | { type: 'query_cancel'; query_id: string };
 

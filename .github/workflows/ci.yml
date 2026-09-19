@@ -43,6 +43,11 @@ jobs:
         with:
           go-version: "1.25"
           cache-dependency-path: go/go.sum
+      - name: protocol drift check (spec ↔ rust ↔ go ↔ ts)
+        working-directory: tools/genprotocol
+        run: |
+          go run . ts --check
+          go run . check
       - name: gofmt
         working-directory: go
         run: |

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use polydb_app_core::AppCore;
-use polydb_server::router;
+use polydb_server::router_with_token;
 use polydb_storage::Storage;
 
 #[tokio::main]
@@ -12,6 +12,9 @@ async fn main() {
     tracing_subscriber::fmt::init();
 
     let addr = std::env::var("POLYDB_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into());
+    let token = std::env::var("POLYDB_SERVER_TOKEN")
+        .ok()
+        .filter(|t| !t.is_empty());
     let data_dir = data_dir();
     let db_path = data_dir.join("polydb.db");
 
@@ -36,8 +39,13 @@ async fn main() {
         }
     };
 
-    tracing::info!(addr = %addr, data_dir = %data_dir.display(), "polydb-server listening");
-    if let Err(e) = axum::serve(listener, router(app)).await {
+    tracing::info!(
+        addr = %addr,
+        data_dir = %data_dir.display(),
+        auth = token.is_some(),
+        "polydb-server listening"
+    );
+    if let Err(e) = axum::serve(listener, router_with_token(app, token)).await {
         tracing::error!(error = %e, "server stopped");
         std::process::exit(1);
     }

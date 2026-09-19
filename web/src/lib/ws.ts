@@ -1,5 +1,6 @@
 import { decode, encode } from '@msgpack/msgpack';
 import type { ClientMessage, PolyDBError, QueryRequest, QueryResult, ServerMessage } from '../api';
+import { getServerToken } from './api';
 
 type QueryHandler = {
   onStarted?: (queryId: string) => void;
@@ -93,7 +94,14 @@ async function connect(connId: string): Promise<Client> {
   next.connId = connId;
   try {
     await next.ready;
-    send(next, { type: 'hello', connection_id: connId, client_version: '0.1.0' });
+    // 服务端启用 POLYDB_SERVER_TOKEN 时 hello 必须携带 auth.token（behavior.md §12.2）。
+    const token = getServerToken();
+    send(next, {
+      type: 'hello',
+      connection_id: connId,
+      client_version: '0.1.0',
+      ...(token ? { auth: { token } } : {}),
+    });
   } catch (e) {
     if (prev) client = prev;
     throw e;

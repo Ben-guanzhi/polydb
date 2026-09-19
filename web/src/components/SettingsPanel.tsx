@@ -1,5 +1,6 @@
 import { useEffect, useState, type CSSProperties } from 'react';
 import { DEFAULT_SETTINGS, loadSettings, updateSettings, type Settings } from '../lib/settings';
+import { getServerToken, setServerToken } from '../lib/api';
 
 const THEME_OPTIONS: { value: Settings['theme']; label: string }[] = [
   { value: 'vs', label: '亮色 (vs)' },
@@ -71,6 +72,7 @@ function CheckRow({ label, desc, checked, onChange }: { label: string; desc?: st
 
 export default function SettingsPanel({ open, onClose }: Props) {
   const [s, setS] = useState<Settings>(() => loadSettings());
+  const [token, setToken] = useState<string>(() => getServerToken());
 
   useEffect(() => {
     if (!open) return;
@@ -152,6 +154,15 @@ export default function SettingsPanel({ open, onClose }: Props) {
             options={[{ value: 'http', label: 'HTTP msgpack' }, { value: 'ws', label: 'WebSocket' }]}
             onChange={(v) => patch({ defaultTransport: v })} width={140} />
           <CheckRow label="表格换行" desc="结果表格单元格内容自动折行" checked={s.gridWrap} onChange={(v) => patch({ gridWrap: v })} />
+          <Row label="服务端 Token" desc="服务端启用 POLYDB_SERVER_TOKEN 时的 Bearer 凭据；留空表示服务端未开鉴权">
+            <input
+              type="password"
+              value={token}
+              placeholder="留空 = 不鉴权"
+              onChange={(e) => { setToken(e.target.value); setServerToken(e.target.value.trim()); }}
+              style={{ width: 220, fontFamily: 'monospace', fontSize: 12, background: 'var(--bg)', color: 'var(--fg)', border: '1px solid var(--border)', borderRadius: 3, padding: '3px 6px' }}
+            />
+          </Row>
 
           <div style={{ display: 'flex', gap: 8, padding: '12px 0' }}>
             <button

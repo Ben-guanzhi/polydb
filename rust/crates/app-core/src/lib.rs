@@ -59,6 +59,8 @@ pub struct AppCore {
     connections: RwLock<HashMap<ConnectionId, Connection>>,
     tunnels: RwLock<HashMap<ConnectionId, Arc<Tunnel>>>,
     txs: Mutex<HashMap<String, TxEntry>>,
+    // 已打开连接的只读标志快照（behavior.md §12.3）；disconnect 时移除。
+    read_only: RwLock<std::collections::HashSet<ConnectionId>>,
 }
 
 impl AppCore {
@@ -87,6 +89,7 @@ impl AppCore {
             connections: RwLock::new(HashMap::new()),
             tunnels: RwLock::new(HashMap::new()),
             txs: Mutex::new(HashMap::new()),
+            read_only: RwLock::new(std::collections::HashSet::new()),
         }
     }
 
@@ -182,8 +185,53 @@ impl AppCore {
         };
 
         self.connections.write().insert(id, Connection::new(driver));
+        if info.read_only == Some(true) {
+            self.read_only.write().insert(id);
+        } else {
+            self.read_only.write().remove(&id);
+        }
         if let Some(t) = tunnel {
             self.tunnels.write().insert(id, t);
+        }
+        Ok(())
+    }
+
+    /// 只读判定（behavior.md §12.3）：优先取已打开连接的快照；
+    /// 未连接时回读存储配置，保证懒连接路径也能被拦截。
+    fn is_read_only(&self, id: &ConnectionId) -> bool {
+        if self.read_only.read().contains(id) {
+            return true;
+        }
+        if self.connections.read().contains_key(id) {
+            return false;
+        }
+        self.storage
+            .connections()
+            .get(*id)
+            .ok()
+            .flatten()
+            .and_then(|info| info.read_only)
+            .unwrap_or(false)
+    }
+
+    /// 只读连接上的写语句拦截：insert/update/delete/ddl 返回 POLYDB_ERR_READ_ONLY。
+    fn reject_write_on_read_only(&self, id: &ConnectionId, sql: &str) -> CoreResult<()> {
+        use polydb_db_core::detect_statement_type;
+        use polydb_protocol::StatementType;
+        if self.is_read_only(id)
+            && matches!(
+                detect_statement_type(sql),
+                StatementType::Insert
+                    | StatementType::Update
+                    | StatementType::Delete
+                    | StatementType::Ddl
+            )
+        {
+            return Err(polydb_protocol::PolyDBError::new(
+                polydb_protocol::error::codes::READ_ONLY,
+                "connection is read-only: write statements are rejected",
+            )
+            .into());
         }
         Ok(())
     }
@@ -250,6 +298,7 @@ impl AppCore {
             self.txs.lock().remove(&tid);
         }
         self.connections.write().remove(&id);
+        self.read_only.write().remove(&id);
         if let Some(t) = self.tunnels.write().remove(&id) {
             t.close();
         }
@@ -284,6 +333,7 @@ impl AppCore {
         sql: &str,
         params: &[Value],
     ) -> CoreResult<QueryResult> {
+        self.reject_write_on_read_only(&id, sql)?;
         self.ensure_connected(&id)?;
         let conn = self.get_conn(id)?;
         conn.as_sql()?.execute(sql, params).await
@@ -383,12 +433,26 @@ impl AppCore {
         key: &str,
         value: RedisValue,
     ) -> CoreResult<()> {
+        if self.is_read_only(&id) {
+            return Err(polydb_protocol::PolyDBError::new(
+                polydb_protocol::error::codes::READ_ONLY,
+                "connection is read-only: KV writes are rejected",
+            )
+            .into());
+        }
         self.ensure_connected(&id)?;
         let conn = self.get_conn(id)?;
         conn.as_kv()?.set_value(key, value).await
     }
 
     pub async fn exec_command(&self, id: ConnectionId, args: &[String]) -> CoreResult<RedisReply> {
+        if self.is_read_only(&id) {
+            return Err(polydb_protocol::PolyDBError::new(
+                polydb_protocol::error::codes::READ_ONLY,
+                "connection is read-only: KV commands are rejected",
+            )
+            .into());
+        }
         self.ensure_connected(&id)?;
         let conn = self.get_conn(id)?;
         conn.as_kv()?.exec_command(args).await
@@ -432,6 +496,11 @@ impl AppCore {
             txs.remove(txn_id)
                 .ok_or_else(|| CoreError::TransactionNotFound(txn_id.to_string()))?
         };
+        // 只读拦截（behavior.md §12.3）：按事务所属连接判定。
+        if let Err(e) = self.reject_write_on_read_only(&entry.connection_id, sql) {
+            self.txs.lock().insert(txn_id.to_string(), entry);
+            return Err(e);
+        }
         let result = match entry.handle.as_mut() {
             Some(handle) => entry.driver.execute_in_tx(handle, sql, params).await,
             None => Err(CoreError::Internal("tx already committed".into())),

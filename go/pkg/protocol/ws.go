@@ -8,6 +8,12 @@ const (
 	ClientMsgQueryCancel ClientMessageType = "query_cancel"
 )
 
+// WsAuth 承载 hello 阶段的服务端鉴权凭据（behavior.md §12.2）。
+// 服务端未启用 POLYDB_SERVER_TOKEN 时忽略该字段。
+type WsAuth struct {
+	Token string `json:"token,omitempty" msgpack:"token,omitempty"`
+}
+
 type ClientMessage struct {
 	Type          ClientMessageType `json:"type" msgpack:"type"`
 	ConnectionID  string            `json:"connection_id,omitempty" msgpack:"connection_id,omitempty"`
@@ -19,6 +25,7 @@ type ClientMessage struct {
 	Pagination    *PaginationParams `json:"pagination,omitempty" msgpack:"pagination,omitempty"`
 	TimeoutMs     *int64            `json:"timeout_ms,omitempty" msgpack:"timeout_ms,omitempty"`
 	MaxRows       *int64            `json:"max_rows,omitempty" msgpack:"max_rows,omitempty"`
+	Auth          *WsAuth           `json:"auth,omitempty" msgpack:"auth,omitempty"`
 }
 
 type ServerMessageType string

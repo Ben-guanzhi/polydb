@@ -33,6 +33,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	sess := &wsSession{
 		conn:     conn,
 		app:      s.app,
+		token:    s.token,
 		inFlight: make(map[string]chan struct{}),
 		writeCh:  make(chan []byte, 32),
 		shutdown: make(chan struct{}),
@@ -50,6 +51,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 type wsSession struct {
 	conn     *websocket.Conn
 	app      *appcore.AppCore
+	token    string
 	connID   string
 	inFlight map[string]chan struct{}
 	writeCh  chan []byte
@@ -118,6 +120,16 @@ func (s *wsSession) runInbound() {
 }
 
 func (s *wsSession) handleHello(msg protocol.ClientMessage) {
+	// behavior.md §12.2：服务端启用 token 时 hello 必须携带匹配的 auth.token，
+	// 失败发送 query_error(UNAUTHORIZED) 后关闭连接；未启用时忽略 auth 字段。
+	if s.token != "" && (msg.Auth == nil || msg.Auth.Token != s.token) {
+		s.send(&protocol.ServerMessage{
+			Type:  protocol.ServerMsgQueryError,
+			Error: &protocol.PolyDBError{Code: protocol.ErrUnauthorized, Message: "missing or invalid bearer token"},
+		})
+		s.stop()
+		return
+	}
 	if msg.ConnectionID == "" {
 		s.send(&protocol.ServerMessage{
 			Type:  protocol.ServerMsgQueryError,

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://polydb.dev/schemas/ws.json",
+  "title": "PolyDB WebSocket inline schemas",
+  "description": "Inline payload schemas referenced by asyncapi.yaml",
+  "definitions": {
+    "WsAuth": {
+      "type": "object",
+      "properties": {
+        "token": {
+          "type": "string",
+          "description": "Bearer token; required when the server is started with POLYDB_SERVER_TOKEN, ignored otherwise (behavior.md §12.2)"
+        }
+      }
+    }
+  }
+}

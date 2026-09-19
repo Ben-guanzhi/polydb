@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -58,11 +59,16 @@ CREATE TABLE IF NOT EXISTS connections (
 	options       TEXT NOT NULL DEFAULT '{}',
 	ssh_tunnel    TEXT,
 	default_schema TEXT,
+	read_only     INTEGER NOT NULL DEFAULT 0,
 	created_at    TEXT NOT NULL,
 	updated_at    TEXT NOT NULL
 );`
 	if _, err := db.Exec(ddl); err != nil {
 		return fmt.Errorf("init schema: %w", err)
+	}
+	// M10 迁移：老库没有 read_only 列。列已存在时报错属预期，忽略。
+	if _, err := db.Exec("ALTER TABLE connections ADD COLUMN read_only INTEGER NOT NULL DEFAULT 0"); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		return fmt.Errorf("migrate read_only: %w", err)
 	}
 	return nil
 }

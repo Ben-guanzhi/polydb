@@ -70,6 +70,8 @@ pub mod codes {
     pub const SSH_TUNNEL_FAILED: &str = "POLYDB_ERR_SSH_TUNNEL_FAILED";
     pub const STORAGE_FAILED: &str = "POLYDB_ERR_STORAGE_FAILED";
     pub const KEYRING_FAILED: &str = "POLYDB_ERR_KEYRING_FAILED";
+    pub const UNAUTHORIZED: &str = "POLYDB_ERR_UNAUTHORIZED";
+    pub const READ_ONLY: &str = "POLYDB_ERR_READ_ONLY";
     pub const CANCELLED: &str = "POLYDB_ERR_CANCELLED";
     pub const QUERY_NOT_FOUND: &str = "POLYDB_ERR_QUERY_NOT_FOUND";
 }

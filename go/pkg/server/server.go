@@ -2,10 +2,12 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,6 +26,8 @@ const (
 
 type Server struct {
 	app *appcore.AppCore
+	// token 非空时启用 Bearer 鉴权（behavior.md §12.1）；空串表示不鉴权（本机开发默认）。
+	token string
 	// httpInFlight 保存正在执行的 HTTP 查询：queryID → context.CancelFunc。
 	// 客户端调 POST /api/queries/{query_id}/cancel 时通过此 registry 触发 cancel。
 	// WS 走 wsSession.inFlight（独立管理），不走此处。
@@ -33,6 +37,13 @@ type Server struct {
 
 func New(app *appcore.AppCore) *Server {
 	return &Server{app: app, httpInFlight: map[string]context.CancelFunc{}}
+}
+
+// NewWithToken 以启用 Bearer 鉴权的方式创建 Server（POLYDB_SERVER_TOKEN）。
+func NewWithToken(app *appcore.AppCore, token string) *Server {
+	s := New(app)
+	s.token = token
+	return s
 }
 
 // registerHTTPQuery 把 queryID 注册到 in-flight registry，返回可取消 ctx 与注销函数。
@@ -108,7 +119,25 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/connections/{id}/kv/keys/{key}", s.kvSetValue)
 	mux.HandleFunc("POST /api/connections/{id}/kv/exec", s.kvExecCommand)
 
-	return logMiddleware(panicMiddleware(mux))
+	return logMiddleware(panicMiddleware(s.authMiddleware(mux)))
+}
+
+// authMiddleware 按 behavior.md §12.1 校验 Bearer token。豁免：/api/health 与 /ws
+// （WS 在 hello 阶段校验）。token 为空时直通（未启用鉴权）。
+func (s *Server) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.token == "" || r.URL.Path == "/api/health" || r.URL.Path == "/ws" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		auth := r.Header.Get("Authorization")
+		const prefix = "Bearer "
+		if !strings.HasPrefix(auth, prefix) || subtle.ConstantTimeCompare([]byte(strings.TrimPrefix(auth, prefix)), []byte(s.token)) != 1 {
+			writeError(w, &protocol.PolyDBError{Code: protocol.ErrUnauthorized, Message: "missing or invalid bearer token"})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // ─── system ────────────────────────────────────────────────
@@ -635,6 +664,8 @@ var errToStatus = map[string]int{
 	protocol.ErrQueryNotFound:       http.StatusNotFound,
 	protocol.ErrCancelled:           http.StatusRequestTimeout,
 	protocol.ErrTimeout:             http.StatusRequestTimeout,
+	protocol.ErrUnauthorized:        http.StatusUnauthorized,
+	protocol.ErrReadOnly:            http.StatusConflict,
 }
 
 func writeError(w http.ResponseWriter, err error) {

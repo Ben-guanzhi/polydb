@@ -26,6 +26,25 @@ import type {
 
 const MSGPACK = 'application/msgpack';
 
+// 服务端启用 POLYDB_SERVER_TOKEN 时的 Bearer 凭据（behavior.md §12.1）。
+// 存 localStorage，跨会话保留；未设置时不发送 Authorization 头。
+const TOKEN_KEY = 'polydb.serverToken';
+
+export function getServerToken(): string {
+  try {
+    return localStorage.getItem(TOKEN_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+export function setServerToken(token: string): void {
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch { /* ignore */ }
+}
+
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
@@ -39,7 +58,10 @@ export class ApiError extends Error {
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const init: RequestInit = { method, headers: { Accept: MSGPACK } };
+  const token = getServerToken();
+  const headers: Record<string, string> = { Accept: MSGPACK };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const init: RequestInit = { method, headers };
   if (body !== undefined) {
     init.headers = { ...init.headers, 'Content-Type': MSGPACK };
     init.body = encode(body);

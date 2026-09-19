@@ -27,6 +27,7 @@ import (
 // 所有业务错误都以 *protocol.PolyDBError 返回（含 code），便于 errors.As 判断。
 type Remote struct {
 	base      string
+	token     string
 	hc        *http.Client
 	connected map[string]bool
 	mu        sync.Mutex
@@ -40,6 +41,9 @@ func NewRemote(baseURL string) *Remote {
 		connected: make(map[string]bool),
 	}
 }
+
+// SetToken 设置 Bearer token（服务端启用 POLYDB_SERVER_TOKEN 时必需）。
+func (r *Remote) SetToken(token string) { r.token = token }
 
 // do 发送请求；body 非 nil 时按 msgpack 编码。2xx 且非 204 时按
 // Content-Type 解码到 out；非 2xx 时解码 PolyDBError 并返回（*protocol.PolyDBError）。
@@ -58,6 +62,9 @@ func (r *Remote) do(method, path string, body any, out any) error {
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/msgpack")
+	}
+	if r.token != "" {
+		req.Header.Set("Authorization", "Bearer "+r.token)
 	}
 	resp, err := r.hc.Do(req)
 	if err != nil {

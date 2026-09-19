@@ -25,6 +25,9 @@ pub struct CreateConnectionRequest {
     pub ssh_tunnel: Option<SshTunnelConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_schema: Option<String>,
+    /// 只读连接（behavior.md §12.3）：为 true 时 app-core 拒绝写语句与 KV 写。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -49,6 +52,8 @@ pub struct UpdateConnectionRequest {
     pub ssh_tunnel: Option<SshTunnelConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_schema: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +75,8 @@ pub struct ConnectionInfo {
     pub ssh_tunnel: Option<SshTunnelConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_schema: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

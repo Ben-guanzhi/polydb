@@ -34,7 +34,12 @@
           "description": "Driver-specific options (e.g., sslmode, charset)"
         },
         "ssh_tunnel": { "$ref": "common.json#/definitions/SshTunnelConfig" },
-        "default_schema": { "type": "string", "description": "Default schema to use (e.g., 'public' for postgres)" }
+        "default_schema": { "type": "string", "description": "Default schema to use (e.g., 'public' for postgres)" },
+        "read_only": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, the server rejects write statements (INSERT/UPDATE/DELETE/DDL) and KV writes on this connection with POLYDB_ERR_READ_ONLY (behavior.md §12)"
+        }
       }
     },
     "UpdateConnectionRequest": {
@@ -52,7 +57,8 @@
         },
         "options": { "type": "object", "additionalProperties": { "type": "string" } },
         "ssh_tunnel": { "$ref": "common.json#/definitions/SshTunnelConfig" },
-        "default_schema": { "type": "string" }
+        "default_schema": { "type": "string" },
+        "read_only": { "type": "boolean", "default": false }
       }
     },
     "ConnectionInfo": {
@@ -69,6 +75,7 @@
         "options": { "type": "object", "additionalProperties": { "type": "string" } },
         "ssh_tunnel": { "$ref": "common.json#/definitions/SshTunnelConfig" },
         "default_schema": { "type": "string" },
+        "read_only": { "type": "boolean", "default": false },
         "created_at": { "type": "string", "format": "date-time" },
         "updated_at": { "type": "string", "format": "date-time" }
       },

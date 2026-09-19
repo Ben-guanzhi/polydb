@@ -41,6 +41,8 @@ const HEADER_X_QUERY_ID: &str = "X-Query-ID";
 struct AppState {
     app: Arc<AppCore>,
     registry: Arc<Mutex<HashMap<Uuid, Arc<Notify>>>>,
+    // Some(token) 时启用 Bearer 鉴权（behavior.md §12.1）。
+    token: Option<String>,
 }
 
 impl std::ops::Deref for AppState {
@@ -56,9 +58,15 @@ mod ws;
 mod tests;
 
 pub fn router(app: Arc<AppCore>) -> Router {
+    router_with_token(app, None)
+}
+
+/// router_with_token 以可选 Bearer token 构建路由（POLYDB_SERVER_TOKEN）。
+pub fn router_with_token(app: Arc<AppCore>, token: Option<String>) -> Router {
     let state = AppState {
         app,
         registry: Arc::new(Mutex::new(HashMap::new())),
+        token,
     };
     let typed = Router::<AppState>::new()
         .route("/ws", get(ws::ws_upgrade))
@@ -120,8 +128,42 @@ pub fn router(app: Arc<AppCore>) -> Router {
             get(kv_get_value).put(kv_set_value),
         )
         .route("/api/connections/{id}/kv/exec", post(kv_exec_command))
-        .route("/api/queries/{query_id}/cancel", post(cancel_query));
+        .route("/api/queries/{query_id}/cancel", post(cancel_query))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ));
     typed.with_state(state)
+}
+
+/// Bearer 鉴权中间件（behavior.md §12.1）。豁免 /api/health 与 /ws
+/// （WS 在 hello 阶段校验）；state.token 为 None 时直通。
+async fn auth_middleware(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let path = req.uri().path();
+    let Some(token) = &state.token else {
+        return next.run(req).await;
+    };
+    if path == "/api/health" || path == "/ws" {
+        return next.run(req).await;
+    }
+    let ok = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .is_some_and(|got| got == token);
+    if ok {
+        next.run(req).await
+    } else {
+        json_response(
+            StatusCode::UNAUTHORIZED,
+            PolyDBError::new(codes::UNAUTHORIZED, "missing or invalid bearer token"),
+        )
+    }
 }
 
 // ─── 响应辅助 ───────────────────────────────────────────────
@@ -157,6 +199,8 @@ fn error_response(e: CoreError) -> Response {
         codes::QUERY_NOT_FOUND => StatusCode::NOT_FOUND,
         // 408：取消与超时都属"请求未在预期时间内完成"（与 Go 侧 errToStatus 一致）。
         codes::CANCELLED | codes::TIMEOUT => StatusCode::REQUEST_TIMEOUT,
+        codes::UNAUTHORIZED => StatusCode::UNAUTHORIZED,
+        codes::READ_ONLY => StatusCode::CONFLICT,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     json_response(status, pe)

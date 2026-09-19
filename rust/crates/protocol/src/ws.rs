@@ -4,6 +4,14 @@ use crate::common::ConnectionId;
 use crate::error::PolyDBError;
 use crate::query::{QueryRequest, QueryResult};
 
+/// hello 阶段的服务端鉴权凭据（behavior.md §12.2）。
+/// 服务端未启用 POLYDB_SERVER_TOKEN 时忽略该字段。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WsAuth {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
@@ -11,6 +19,8 @@ pub enum ClientMessage {
         connection_id: ConnectionId,
         #[serde(skip_serializing_if = "Option::is_none")]
         client_version: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        auth: Option<WsAuth>,
     },
     Query {
         query_id: uuid::Uuid,

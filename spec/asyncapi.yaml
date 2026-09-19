@@ -19,6 +19,8 @@ info:
     6. 客户端可随时发送 `query_cancel`
 
     ## 变更记录
+    - 0.2.0 (M10)：**non-breaking**。`hello` 增加可选 `auth.token`：服务端以 `POLYDB_SERVER_TOKEN`
+      启用鉴权时必须携带；失败时服务端发送 `query_error`（`POLYDB_ERR_UNAUTHORIZED`）并关闭连接。
     - 0.1.0 (M9)：**non-breaking**。本文件描述的传输层此前从未实现，M9 在 Rust / Go 双后端落地。
       `query_result` 明确为 msgpack 对象形态（原先的 Arrow `oneOf` 分支从未实现，已移除，改为预留扩展说明）。
 
@@ -136,6 +138,8 @@ components:
           client_version:
             type: string
             description: 客户端版本号
+          auth:
+            $ref: "schemas/ws.json#/definitions/WsAuth"
 
     Query:
       name: Query
@@ -292,3 +296,12 @@ components:
           rows_returned:
             type: integer
             description: 取消前已返回的行数
+
+  # ─── 内联 schema 定义 ─────────────────────────────────
+  schemas:
+    WsAuth:
+      type: object
+      properties:
+        token:
+          type: string
+          description: 服务端启用 POLYDB_SERVER_TOKEN 时必填；未启用时忽略

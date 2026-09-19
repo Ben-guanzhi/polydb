@@ -23,15 +23,17 @@ const SERVER_VERSION: &str = "0.1.0";
 
 pub async fn ws_upgrade(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
     let app = state.app.clone();
-    ws.on_upgrade(move |socket| session(app, socket))
+    let token = state.token.clone();
+    ws.on_upgrade(move |socket| session(app, token, socket))
 }
 
-async fn session(app: AppRef, socket: WebSocket) {
+async fn session(app: AppRef, token: Option<String>, socket: WebSocket) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
 
     let mut session = Session {
         app,
+        token,
         tx: tx.clone(),
         connection_id: None,
         in_flight: HashMap::new(),
@@ -62,6 +64,7 @@ async fn session(app: AppRef, socket: WebSocket) {
 
 struct Session {
     app: AppRef,
+    token: Option<String>,
     tx: mpsc::UnboundedSender<ServerMessage>,
     connection_id: Option<ConnectionId>,
     in_flight: HashMap<Uuid, Arc<Notify>>,
@@ -96,7 +99,26 @@ async fn receive_loop(
             }
         };
         match msg {
-            ClientMessage::Hello { connection_id, .. } => {
+            ClientMessage::Hello {
+                connection_id,
+                auth,
+                ..
+            } => {
+                // behavior.md §12.2：启用 token 时 hello 必须携带匹配 auth.token，
+                // 失败发送 query_error(UNAUTHORIZED) 后关闭连接。
+                if let Some(expected) = &session.token {
+                    let provided = auth.as_ref().and_then(|a| a.token.as_deref());
+                    if provided != Some(expected.as_str()) {
+                        let _ = session.send(ServerMessage::QueryError {
+                            query_id: Uuid::nil(),
+                            error: PolyDBError::new(
+                                codes::UNAUTHORIZED,
+                                "missing or invalid bearer token",
+                            ),
+                        });
+                        return;
+                    }
+                }
                 let ok = session.handle_hello(connection_id).await;
                 if !ok {
                     return;

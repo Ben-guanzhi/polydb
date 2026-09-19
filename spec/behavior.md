@@ -203,3 +203,32 @@
 - 注意 `WITH ...` 前缀统一判 `select`（含 `WITH ... INSERT/UPDATE/DELETE` 形态）：这是 Go 侧既定规则，Rust 侧对齐；
   语义上是近似（CTE + DML 也标 select），换来的是两端 label 与执行分支（查询式 vs 命令式）的双一致，
   契约测试 `TestContractBehaviorMaxRows` 对该规则有对拍覆盖。
+
+## 12. 鉴权与只读连接（M10，non-breaking）
+
+### 12.1 服务端 Bearer 鉴权（可选启用）
+
+- 服务端读取环境变量 `POLYDB_SERVER_TOKEN`；**未设置时不鉴权**（本机开发默认，历史行为不变）。
+- 设置后，除以下两个豁免路径外，全部 `/api/*` 端点要求请求头 `Authorization: Bearer <token>`：
+  - `GET /api/health`（探活必须无凭据可用）；
+  - `GET /ws`（WebSocket 在 hello 阶段校验，见 §12.2）。
+- 校验失败返回 **401** `{"code": "POLYDB_ERR_UNAUTHORIZED", ...}`（JSON 错误体）；不区分缺失与不匹配。
+- 常量时间比较非目标（token 非用户凭据，直串比较即可）；token 不写入日志（§8 红线）。
+
+### 12.2 WebSocket 鉴权
+
+- 服务端启用 token 时，客户端 `hello` 必须携带 `auth: { token }`；缺失或不匹配：服务端发送
+  `query_error`（`POLYDB_ERR_UNAUTHORIZED`）后**关闭连接**，不发送 `hello_ack`。
+- 未启用 token 时忽略 `auth` 字段（non-breaking）。
+
+### 12.3 连接级只读（read_only）
+
+- `ConnectionConfig.read_only = true`（默认 false）的连接，服务端在 **app-core 执行层**拒绝写操作
+  （UI 禁用只是第一道，服务端拦截才是保证）：
+  - SQL：`execute` / `execute_in_transaction` / batch 中语句按 §11 判型，`insert` / `update` /
+    `delete` / `ddl` 返回 **409** `POLYDB_ERR_READ_ONLY`；`select` / `other` 放行
+    （`PRAGMA` 等写型 `other` 语句不在 M10 拦截范围，文档如实标注）。
+  - KV：`kv/keys/{key}` PUT（SetValue）与 `kv/exec`（ExecCommand）一律返回 409 `POLYDB_ERR_READ_ONLY`；
+    GET / scan / select db 不受限。
+- 事务内语句同样拦截（按事务所属连接判定）。
+- 只读属性是连接配置的一部分，随 create/update 持久化并在 `ConnectionInfo.read_only` 回显。

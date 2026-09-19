@@ -23,6 +23,7 @@ fn sqlite_req(name: &str) -> CreateConnectionRequest {
         options: Default::default(),
         ssh_tunnel: None,
         default_schema: None,
+        read_only: None,
     }
 }
 

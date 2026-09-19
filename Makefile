@@ -1,13 +1,16 @@
-.PHONY: all gen-protocol check-rust check-go check-web test-web lint-web contract-test clean docker-build docker-build-rust docker-run compose-up compose-up-rust compose-down
+.PHONY: all gen-protocol check-protocol check-rust check-go check-web test-web lint-web contract-test clean docker-build docker-build-rust docker-run compose-up compose-up-rust compose-down
 
-all: check-rust check-go
+all: check-protocol check-rust check-go
 
 # ─── Protocol Generation ──────────────────────────────────
+# ts        —— spec/ → web/src/api/index.ts（--check 仅校验不写回）
+# check     —— spec ↔ Rust ↔ Go wire 形态比对，漂移即失败
 gen-protocol:
-	@echo "Protocol types are hand-written from spec/schemas."
-	@echo "Rust:    rust/crates/protocol/src/"
-	@echo "Go:      go/pkg/protocol/"
-	@echo "TypeScript: web/src/api/index.ts"
+	cd tools/genprotocol && go run . ts
+
+check-protocol:
+	cd tools/genprotocol && go run . ts --check
+	cd tools/genprotocol && go run . check
 
 # ─── Rust ─────────────────────────────────────────────────
 check-rust:

@@ -20,12 +20,15 @@ import (
 
 func main() {
 	server := flag.String("server", os.Getenv("POLYDB_SERVER"), "远程 polydb-server 地址（如 http://127.0.0.1:8080）；缺省为本机直连模式")
+	token := flag.String("token", os.Getenv("POLYDB_SERVER_TOKEN"), "远程服务端 Bearer token（服务端启用 POLYDB_SERVER_TOKEN 时必填）")
 	flag.Parse()
 
 	var client transport.Client
 	if *server != "" {
 		// 远程模式：无需本地存储/密钥环（连接与密码都归属服务端）。
-		client = transport.NewRemote(*server)
+		remote := transport.NewRemote(*server)
+		remote.SetToken(*token)
+		client = remote
 	} else {
 		dataDir := storage.DataDir()
 		if err := os.MkdirAll(dataDir, 0o755); err != nil {

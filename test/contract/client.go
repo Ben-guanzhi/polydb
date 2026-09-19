@@ -12,12 +12,20 @@ import (
 
 // Client 是契约测试用的 HTTP 客户端：请求体默认 msgpack，响应按 Content-Type 解码。
 type Client struct {
-	base string
-	hc   *http.Client
+	base  string
+	token string
+	hc    *http.Client
 }
 
 func NewClient(base string) *Client {
 	return &Client{base: strings.TrimRight(base, "/"), hc: &http.Client{}}
+}
+
+// WithToken 返回携带 Bearer token 的客户端副本（M10 鉴权契约测试用）。
+func (c *Client) WithToken(token string) *Client {
+	cp := *c
+	cp.token = token
+	return &cp
 }
 
 // Do 发送请求；body 为 nil 时不携带请求体。返回值：HTTP 状态码与解码后的响应体。
@@ -36,6 +44,9 @@ func (c *Client) Do(method, path string, body any) (int, any, error) {
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/msgpack")
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {

@@ -32,6 +32,7 @@ make compose-up-rust       # Rust server（8081，profile "rust"，与 Go 服务
 |---|---|---|
 | `POLYDB_ADDR` | `0.0.0.0:8080` | 监听地址（镜像内固定 0.0.0.0，宿主机经 `-p` 映射） |
 | `POLYDB_DATA_DIR` | `/data` | 数据目录（connections 等本地库落此处，务必挂卷持久化） |
+| `POLYDB_SERVER_TOKEN` | 未设置 | 设置后启用 Bearer 鉴权（behavior.md §12）：除 `/api/health` 外全部 `/api/*` 需 `Authorization: Bearer <token>`，WS 在 hello.auth.token 校验。容器部署（非本机）建议必开 |
 
 数据目录含本地 SQLite 存储 `polydb.db`；密码仍只存 `password_ref`（M8 keyring 前为占位）。
 

@@ -28,8 +28,14 @@ type Backend struct {
 // backends 提供全部可用后端：Go 进程内 + Rust 二进制（若已构建）。
 func backends(t *testing.T) []*Backend {
 	t.Helper()
-	out := []*Backend{startGoBackend(t)}
-	if b, err := startRustBackend(t); err != nil {
+	return backendsWithToken(t, "")
+}
+
+// backendsWithToken 同 backends，但服务端以指定 token 启用 Bearer 鉴权（behavior.md §12.1）。
+func backendsWithToken(t *testing.T, token string) []*Backend {
+	t.Helper()
+	out := []*Backend{startGoBackend(t, token)}
+	if b, err := startRustBackend(t, token); err != nil {
 		t.Logf("rust backend skipped: %v", err)
 	} else {
 		out = append(out, b)
@@ -37,7 +43,7 @@ func backends(t *testing.T) []*Backend {
 	return out
 }
 
-func startGoBackend(t *testing.T) *Backend {
+func startGoBackend(t *testing.T, token string) *Backend {
 	t.Helper()
 	db, err := storage.Open(filepath.Join(t.TempDir(), "polydb.db"))
 	if err != nil {
@@ -47,7 +53,7 @@ func startGoBackend(t *testing.T) *Backend {
 	if err != nil {
 		t.Fatalf("open keyring: %v", err)
 	}
-	srv := httptest.NewServer(server.New(appcore.New(db, kr)).Handler())
+	srv := httptest.NewServer(server.NewWithToken(appcore.New(db, kr), token).Handler())
 	t.Cleanup(func() {
 		srv.Close()
 		db.Close()
@@ -55,7 +61,7 @@ func startGoBackend(t *testing.T) *Backend {
 	return &Backend{name: "go", base: srv.URL}
 }
 
-func startRustBackend(t *testing.T) (*Backend, error) {
+func startRustBackend(t *testing.T, token string) (*Backend, error) {
 	t.Helper()
 	bin := rustBinary()
 	if _, err := os.Stat(bin); err != nil {
@@ -67,6 +73,9 @@ func startRustBackend(t *testing.T) (*Backend, error) {
 		"POLYDB_ADDR="+addr,
 		"POLYDB_DATA_DIR="+t.TempDir(),
 	)
+	if token != "" {
+		cmd.Env = append(cmd.Env, "POLYDB_SERVER_TOKEN="+token)
+	}
 	var out strings.Builder
 	cmd.Stdout = &out
 	cmd.Stderr = &out

@@ -11,12 +11,19 @@ info:
     - JSON (`application/json`) 仅作为调试/握手 fallback
     - 错误统一使用 `application/json` 格式
 
-    ## 认证
-    当前版本无认证（单机部署）。未来版本可能添加 Bearer Token。
+    ## 认证（M10 起，可选启用）
+    服务端以环境变量 `POLYDB_SERVER_TOKEN` 启用 Bearer 鉴权；未设置该变量时不鉴权（本机开发默认）。
+    启用后，除 `GET /api/health` 与 `GET /ws`（WS 在 `hello.auth.token` 校验）外的全部 `/api/*`
+    端点要求 `Authorization: Bearer <token>`，缺失或不匹配返回 401 `POLYDB_ERR_UNAUTHORIZED`。
+    详见 spec/behavior.md §12。
 
 servers:
   - url: http://localhost:9527
     description: 本地开发服务器
+
+security:
+  # 部署级可选：未设置 POLYDB_SERVER_TOKEN 的服务端忽略本声明（behavior.md §12）。
+  - bearerAuth: []
 
 paths:
   /api/health:
@@ -667,3 +674,9 @@ components:
         application/json:
           schema:
             $ref: "schemas/error.json#/definitions/PolyDBError"
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: POLYDB_SERVER_TOKEN 启用时必填；未设置该环境变量的服务端不校验

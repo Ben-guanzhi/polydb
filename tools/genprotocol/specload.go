@@ -9,7 +9,7 @@ import (
 
 // ─── spec/schemas/*.json 加载 ───────────────────────────────
 
-var schemaFiles = []string{"common.json", "connection.json", "error.json", "metadata.json", "query.json", "redis.json", "transaction.json"}
+var schemaFiles = []string{"common.json", "connection.json", "error.json", "metadata.json", "query.json", "redis.json", "transaction.json", "ws.json"}
 
 // inlineEnumNames：内联枚举 → 导出名（生成 TS 用）。键为「类型.属性」。
 var inlineEnumNames = map[string]string{

@@ -43,6 +43,9 @@ type AppCore struct {
 	connections map[string]dbcore.Connection
 	tunnels     map[string]*sshtunnel.Tunnel
 	txs         map[string]*txEntry
+	// readOnly 记录已打开连接的只读标志（behavior.md §12.3）。
+	// Connect 时从 ConnectionInfo.read_only 快照，Disconnect 时清除。
+	readOnly map[string]bool
 }
 
 func New(db *sql.DB, kr keyring.Keyring) *AppCore {
@@ -52,6 +55,7 @@ func New(db *sql.DB, kr keyring.Keyring) *AppCore {
 		connections: make(map[string]dbcore.Connection),
 		tunnels:     make(map[string]*sshtunnel.Tunnel),
 		txs:         make(map[string]*txEntry),
+		readOnly:    make(map[string]bool),
 	}
 }
 
@@ -187,10 +191,38 @@ func (a *AppCore) Connect(ctx context.Context, id string) error {
 
 	a.mu.Lock()
 	a.connections[id] = dbcore.NewConnection(d)
+	a.readOnly[id] = info.ReadOnly != nil && *info.ReadOnly
 	if tunnel != nil {
 		a.tunnels[id] = tunnel
 	}
 	a.mu.Unlock()
+	return nil
+}
+
+// isReadOnly 报告连接是否以只读模式打开。未连接的连接按其存储配置判定，
+// 这样 execute 前的懒连接路径也能被正确拦截。
+func (a *AppCore) isReadOnly(id string) bool {
+	a.mu.RLock()
+	ro, ok := a.readOnly[id]
+	a.mu.RUnlock()
+	if ok {
+		return ro
+	}
+	info, err := a.repo.Get(id)
+	if err != nil {
+		return false
+	}
+	return info.ReadOnly != nil && *info.ReadOnly
+}
+
+// rejectWriteOnReadOnly 按 behavior.md §12.3 拦截只读连接上的写语句：
+// insert / update / delete / ddl 返回 POLYDB_ERR_READ_ONLY；select / other 放行。
+func rejectWriteOnReadOnly(sqlText string) error {
+	switch dbcore.DetectStatementType(sqlText) {
+	case protocol.StatementTypeInsert, protocol.StatementTypeUpdate,
+		protocol.StatementTypeDelete, protocol.StatementTypeDDL:
+		return &protocol.PolyDBError{Code: protocol.ErrReadOnly, Message: "connection is read-only: write statements are rejected"}
+	}
 	return nil
 }
 
@@ -201,6 +233,7 @@ func (a *AppCore) Disconnect(id string) {
 		_ = c.Driver().Close()
 		delete(a.connections, id)
 	}
+	delete(a.readOnly, id)
 	if t, ok := a.tunnels[id]; ok {
 		_ = t.Close()
 		delete(a.tunnels, id)
@@ -279,6 +312,11 @@ func (a *AppCore) sqlDriver(ctx context.Context, id string) (dbcore.SQLDriver, e
 // ─── 查询 ──────────────────────────────────────────────────
 
 func (a *AppCore) Execute(ctx context.Context, id, sql string, args ...protocol.Value) (*protocol.QueryResult, error) {
+	if a.isReadOnly(id) {
+		if err := rejectWriteOnReadOnly(sql); err != nil {
+			return nil, err
+		}
+	}
 	d, err := a.sqlDriver(ctx, id)
 	if err != nil {
 		return nil, err
@@ -378,7 +416,13 @@ func (a *AppCore) ExecuteInTx(ctx context.Context, txID, sql string, args ...pro
 		a.mu.RUnlock()
 		return nil, &protocol.PolyDBError{Code: protocol.ErrTransactionNotFound, Message: "transaction not found: " + txID}
 	}
+	connID := e.connID
 	a.mu.RUnlock()
+	if a.isReadOnly(connID) {
+		if err := rejectWriteOnReadOnly(sql); err != nil {
+			return nil, err
+		}
+	}
 	return e.driver.ExecuteIn(e.tx, ctx, sql, args...)
 }
 
@@ -496,6 +540,9 @@ func (a *AppCore) GetValue(ctx context.Context, id, key string) (protocol.RedisV
 }
 
 func (a *AppCore) SetValue(ctx context.Context, id, key string, value protocol.RedisValue) error {
+	if a.isReadOnly(id) {
+		return &protocol.PolyDBError{Code: protocol.ErrReadOnly, Message: "connection is read-only: KV writes are rejected"}
+	}
 	d, err := a.kvDriver(ctx, id)
 	if err != nil {
 		return err
@@ -504,6 +551,9 @@ func (a *AppCore) SetValue(ctx context.Context, id, key string, value protocol.R
 }
 
 func (a *AppCore) ExecCommand(ctx context.Context, id string, args []string) (protocol.RedisReply, error) {
+	if a.isReadOnly(id) {
+		return protocol.RedisReply{}, &protocol.PolyDBError{Code: protocol.ErrReadOnly, Message: "connection is read-only: KV commands are rejected"}
+	}
 	d, err := a.kvDriver(ctx, id)
 	if err != nil {
 		return protocol.RedisReply{}, err

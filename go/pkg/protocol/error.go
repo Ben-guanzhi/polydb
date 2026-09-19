@@ -54,4 +54,6 @@ const (
 	ErrStorageFailed       = "POLYDB_ERR_STORAGE_FAILED"
 	ErrKeyringFailed       = "POLYDB_ERR_KEYRING_FAILED"
 	ErrCancelled           = "POLYDB_ERR_CANCELLED"
+	ErrUnauthorized        = "POLYDB_ERR_UNAUTHORIZED"
+	ErrReadOnly            = "POLYDB_ERR_READ_ONLY"
 )
