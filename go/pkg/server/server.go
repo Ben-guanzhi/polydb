@@ -117,6 +117,17 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": "0.1.0"})
 }
 
+// connID 取路径中的连接 id 并校验为合法 UUID（spec 中 {id} 为 uuid 格式）。
+// 非法时写 400 POLYDB_ERR_INVALID_PARAM 并返回 false（与 Rust 侧 parse_conn_id 一致）。
+func connID(w http.ResponseWriter, r *http.Request) (string, bool) {
+	id := r.PathValue("id")
+	if _, err := uuid.Parse(id); err != nil {
+		writeError(w, &protocol.PolyDBError{Code: protocol.ErrInvalidParam, Message: "invalid connection id: " + id})
+		return "", false
+	}
+	return id, true
+}
+
 // ─── connections ───────────────────────────────────────────
 
 func (s *Server) listConnections(w http.ResponseWriter, r *http.Request) {
@@ -143,7 +154,11 @@ func (s *Server) createConnection(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getConnection(w http.ResponseWriter, r *http.Request) {
-	info, err := s.app.GetConnection(r.PathValue("id"))
+	id, ok := connID(w, r)
+	if !ok {
+		return
+	}
+	info, err := s.app.GetConnection(id)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -152,12 +167,16 @@ func (s *Server) getConnection(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) updateConnection(w http.ResponseWriter, r *http.Request) {
+	id, ok := connID(w, r)
+	if !ok {
+		return
+	}
 	var req protocol.UpdateConnectionRequest
 	if err := decodeMsgpack(r, &req); err != nil {
 		writeError(w, err)
 		return
 	}
-	info, err := s.app.UpdateConnection(r.PathValue("id"), &req)
+	info, err := s.app.UpdateConnection(id, &req)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -166,20 +185,27 @@ func (s *Server) updateConnection(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteConnection(w http.ResponseWriter, r *http.Request) {
-	ok, err := s.app.DeleteConnection(r.PathValue("id"))
+	id, ok := connID(w, r)
+	if !ok {
+		return
+	}
+	deleted, err := s.app.DeleteConnection(id)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	if !ok {
-		writeError(w, &protocol.PolyDBError{Code: protocol.ErrConnectionNotFound, Message: "connection not found: " + r.PathValue("id")})
+	if !deleted {
+		writeError(w, &protocol.PolyDBError{Code: protocol.ErrConnectionNotFound, Message: "connection not found: " + id})
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) testConnection(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+	id, ok := connID(w, r)
+	if !ok {
+		return
+	}
 	status := protocol.ConnectionStatus{ID: id}
 	if _, err := s.app.GetConnection(id); err != nil {
 		status.Error = err.Error()
@@ -202,7 +228,11 @@ func (s *Server) testConnection(w http.ResponseWriter, r *http.Request) {
 // ─── metadata ──────────────────────────────────────────────
 
 func (s *Server) listSchemas(w http.ResponseWriter, r *http.Request) {
-	out, err := s.app.ListSchemas(r.Context(), r.PathValue("id"))
+	id, ok := connID(w, r)
+	if !ok {
+		return
+	}
+	out, err := s.app.ListSchemas(r.Context(), id)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -211,7 +241,11 @@ func (s *Server) listSchemas(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listTables(w http.ResponseWriter, r *http.Request) {
-	out, err := s.app.ListTables(r.Context(), r.PathValue("id"), r.PathValue("schema"))
+	id, ok := connID(w, r)
+	if !ok {
+		return
+	}
+	out, err := s.app.ListTables(r.Context(), id, r.PathValue("schema"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -220,7 +254,11 @@ func (s *Server) listTables(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listColumns(w http.ResponseWriter, r *http.Request) {
-	out, err := s.app.ListColumns(r.Context(), r.PathValue("id"), r.PathValue("schema"), r.PathValue("table"))
+	id, ok := connID(w, r)
+	if !ok {
+		return
+	}
+	out, err := s.app.ListColumns(r.Context(), id, r.PathValue("schema"), r.PathValue("table"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -229,7 +267,11 @@ func (s *Server) listColumns(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listIndexes(w http.ResponseWriter, r *http.Request) {
-	out, err := s.app.ListIndexes(r.Context(), r.PathValue("id"), r.PathValue("schema"), r.PathValue("table"))
+	id, ok := connID(w, r)
+	if !ok {
+		return
+	}
+	out, err := s.app.ListIndexes(r.Context(), id, r.PathValue("schema"), r.PathValue("table"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -238,7 +280,11 @@ func (s *Server) listIndexes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listForeignKeys(w http.ResponseWriter, r *http.Request) {
-	out, err := s.app.ListForeignKeys(r.Context(), r.PathValue("id"), r.PathValue("schema"), r.PathValue("table"))
+	id, ok := connID(w, r)
+	if !ok {
+		return
+	}
+	out, err := s.app.ListForeignKeys(r.Context(), id, r.PathValue("schema"), r.PathValue("table"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -247,7 +293,11 @@ func (s *Server) listForeignKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getDDL(w http.ResponseWriter, r *http.Request) {
-	sql, err := s.app.CreateTableSQL(r.Context(), r.PathValue("id"), r.PathValue("schema"), r.PathValue("table"))
+	id, ok := connID(w, r)
+	if !ok {
+		return
+	}
+	sql, err := s.app.CreateTableSQL(r.Context(), id, r.PathValue("schema"), r.PathValue("table"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -263,9 +313,14 @@ func (s *Server) executeQuery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	// 与 Rust 一致：路径 id 无论 body 是否覆盖都先校验；body 未带时用路径 id。
+	pathID, ok := connID(w, r)
+	if !ok {
+		return
+	}
 	id := req.ConnectionID
 	if id == "" {
-		id = r.PathValue("id")
+		id = pathID
 	}
 	// 注册 in-flight query，以便 /api/queries/{query_id}/cancel 能取消。
 	// 用 Background() 派生而非 r.Context()，避免 handler 返回后自动取消尚未完成的任务
@@ -274,25 +329,75 @@ func (s *Server) executeQuery(w http.ResponseWriter, r *http.Request) {
 	defer func() { cancel(); s.unregisterHTTPQuery(queryID) }()
 	// 所有响应路径都回显 X-Query-ID，便于客户端关联响应。
 	w.Header().Set("X-Query-ID", queryID)
-	result, err := s.app.Execute(ctx, id, req.SQL, req.Params...)
-	if err != nil {
-		// 若是 ctx 被取消（来自 /cancel 端点或客户端断连），返回 CANCELLED 错误码
-		if ctx.Err() != nil {
-			writeError(w, &protocol.PolyDBError{Code: protocol.ErrCancelled, Message: "query cancelled: " + queryID})
+
+	// 超时（behavior.md §2.3）：timeout_ms>0 生效，=0/缺省表示无超时，超时不自动重试。
+	// 驱动普遍无法中断已在执行的 SQL（如 sqlite 递归 CTE），因此采用
+	// 「后台执行 + 截止时间竞争」：到点先返回 POLYDB_ERR_TIMEOUT，被放弃的
+	// 执行在后台自然结束（best-effort，与 cancel 的语义一致）。
+	type execOutcome struct {
+		res *protocol.QueryResult
+		err error
+	}
+	ch := make(chan execOutcome, 1)
+	go func() {
+		res, err := s.app.Execute(ctx, id, req.SQL, req.Params...)
+		ch <- execOutcome{res, err}
+	}()
+	var timeoutCh <-chan time.Time
+	if req.TimeoutMs != nil && *req.TimeoutMs > 0 {
+		timer := time.NewTimer(time.Duration(*req.TimeoutMs) * time.Millisecond)
+		defer timer.Stop()
+		timeoutCh = timer.C
+	}
+	select {
+	case out := <-ch:
+		if out.err != nil {
+			// 若是 ctx 被取消（来自 /cancel 端点），返回 CANCELLED 错误码
+			if ctx.Err() != nil {
+				writeError(w, &protocol.PolyDBError{Code: protocol.ErrCancelled, Message: "query cancelled: " + queryID})
+				return
+			}
+			writeError(w, out.err)
 			return
 		}
-		writeError(w, err)
-		return
+		writeMsgpack(w, http.StatusOK, applyMaxRows(out.res, queryRowLimit(&req)))
+	case <-timeoutCh:
+		writeError(w, &protocol.PolyDBError{Code: protocol.ErrTimeout, Retryable: true, Message: fmt.Sprintf("query timed out: %s", queryID)})
 	}
-	writeMsgpack(w, http.StatusOK, result)
+}
+
+// queryRowLimit 计算 effective 行数上限（behavior.md §5）：默认 10000，
+// max_rows>0 覆盖，硬上限同为 10000；0 表示用默认。
+func queryRowLimit(req *protocol.QueryRequest) int64 {
+	limit := int64(10000)
+	if req.MaxRows != nil && *req.MaxRows > 0 {
+		limit = *req.MaxRows
+	}
+	if limit > 10000 {
+		limit = 10000
+	}
+	return limit
+}
+
+// applyMaxRows 按 behavior.md §5 截断结果行：超过 limit 时截断并置
+// truncated=true、total_rows 记录原始行数（不额外 count）。
+func applyMaxRows(res *protocol.QueryResult, limit int64) *protocol.QueryResult {
+	if res == nil || int64(len(res.Rows)) <= limit {
+		return res
+	}
+	total := int64(len(res.Rows))
+	res.Rows = res.Rows[:limit]
+	res.Truncated = true
+	res.TotalRows = &total
+	return res
 }
 
 // cancelQuery 取消一个正在执行的 HTTP 查询（best-effort）。
 // 命中返回 204；未知/已完成返回 404 POLYDB_ERR_QUERY_NOT_FOUND。
 func (s *Server) cancelQuery(w http.ResponseWriter, r *http.Request) {
 	queryID := r.PathValue("query_id")
-	if queryID == "" {
-		writeError(w, &protocol.PolyDBError{Code: protocol.ErrInvalidParam, Message: "missing query_id"})
+	if _, err := uuid.Parse(queryID); err != nil {
+		writeError(w, &protocol.PolyDBError{Code: protocol.ErrInvalidParam, Message: "invalid query id: " + queryID})
 		return
 	}
 	if !s.cancelHTTPQuery(queryID) {
@@ -308,9 +413,13 @@ func (s *Server) executeBatchQuery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	pathID, ok := connID(w, r)
+	if !ok {
+		return
+	}
 	id := req.ConnectionID
 	if id == "" {
-		id = r.PathValue("id")
+		id = pathID
 	}
 	start := time.Now()
 	var results []protocol.BatchResultItem
@@ -329,7 +438,7 @@ func (s *Server) executeBatchQuery(w http.ResponseWriter, r *http.Request) {
 			}
 			continue
 		}
-		results = append(results, protocol.BatchResultItem{Ok: res})
+		results = append(results, protocol.BatchResultItem{Ok: applyMaxRows(res, queryRowLimit(&stmt))})
 	}
 	writeMsgpack(w, http.StatusOK, protocol.BatchQueryResult{
 		Results:              results,
@@ -345,8 +454,13 @@ func (s *Server) beginTransaction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	// 与 Rust 一致：body 未带 connection_id 时校验并使用路径 id。
 	if req.ConnectionID == "" {
-		req.ConnectionID = r.PathValue("id")
+		id, ok := connID(w, r)
+		if !ok {
+			return
+		}
+		req.ConnectionID = id
 	}
 	info, err := s.app.BeginTransaction(r.Context(), &req)
 	if err != nil {
@@ -385,7 +499,7 @@ func (s *Server) executeInTx(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeMsgpack(w, http.StatusOK, res)
+	writeMsgpack(w, http.StatusOK, applyMaxRows(res, queryRowLimit(&req)))
 }
 
 func (s *Server) kvSelectDb(w http.ResponseWriter, r *http.Request) {
@@ -394,7 +508,11 @@ func (s *Server) kvSelectDb(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if err := s.app.SelectDB(r.Context(), r.PathValue("id"), req.Index); err != nil {
+	id, ok := connID(w, r)
+	if !ok {
+		return
+	}
+	if err := s.app.SelectDB(r.Context(), id, req.Index); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -407,7 +525,11 @@ func (s *Server) kvScanKeys(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	page, err := s.app.ScanKeys(r.Context(), r.PathValue("id"), req.Cursor, req.Pattern, req.Count)
+	id, ok := connID(w, r)
+	if !ok {
+		return
+	}
+	page, err := s.app.ScanKeys(r.Context(), id, req.Cursor, req.Pattern, req.Count)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -416,7 +538,11 @@ func (s *Server) kvScanKeys(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) kvGetValue(w http.ResponseWriter, r *http.Request) {
-	v, err := s.app.GetValue(r.Context(), r.PathValue("id"), r.PathValue("key"))
+	id, ok := connID(w, r)
+	if !ok {
+		return
+	}
+	v, err := s.app.GetValue(r.Context(), id, r.PathValue("key"))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -430,7 +556,11 @@ func (s *Server) kvSetValue(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if err := s.app.SetValue(r.Context(), r.PathValue("id"), req.Key, req.Value); err != nil {
+	id, ok := connID(w, r)
+	if !ok {
+		return
+	}
+	if err := s.app.SetValue(r.Context(), id, req.Key, req.Value); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -443,7 +573,11 @@ func (s *Server) kvExecCommand(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	reply, err := s.app.ExecCommand(r.Context(), r.PathValue("id"), req.Args)
+	id, ok := connID(w, r)
+	if !ok {
+		return
+	}
+	reply, err := s.app.ExecCommand(r.Context(), id, req.Args)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -492,7 +626,7 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 var errToStatus = map[string]int{
-	protocol.ErrConnectionNotFound:   http.StatusNotFound,
+	protocol.ErrConnectionNotFound:  http.StatusNotFound,
 	protocol.ErrConnectionFailed:    http.StatusBadGateway,
 	protocol.ErrNotSupported:        http.StatusNotImplemented,
 	protocol.ErrDriverNotAvailable:  http.StatusNotImplemented,
@@ -500,6 +634,7 @@ var errToStatus = map[string]int{
 	protocol.ErrTransactionNotFound: http.StatusNotFound,
 	protocol.ErrQueryNotFound:       http.StatusNotFound,
 	protocol.ErrCancelled:           http.StatusRequestTimeout,
+	protocol.ErrTimeout:             http.StatusRequestTimeout,
 }
 
 func writeError(w http.ResponseWriter, err error) {

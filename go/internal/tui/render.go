@@ -1,5 +1,5 @@
-// Package tui 提供 polydb 终端界面（bubbletea）。仅依赖 appcore 与 protocol，
-// 不接触任何 driver（AGENTS.md 铁律：前端只经 app-core 访问数据）。
+// Package tui 提供 polydb 终端界面（bubbletea）。仅依赖 transport 与 protocol，
+// 不接触任何 driver / appcore（AGENTS.md 铁律：前端只经 app-core 或 transport 访问数据）。
 package tui
 
 import (

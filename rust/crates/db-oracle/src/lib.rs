@@ -1,8 +1,8 @@
 //! polydb-db-oracle：基于 oracle crate（ODPI-C）的驱动实现（对应 Go 侧 dboracle）。
 //! oracle crate 为阻塞式 API，与 db-sqlite 一致：同步调用直接放在 async 方法内。
 
-use std::collections::HashMap;
 use std::any::Any;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -158,12 +158,10 @@ fn quote_ident(s: &str) -> String {
 }
 
 /// Oracle 事务句柄。oracle crate 无独立 Transaction 对象，事务状态由
-/// 连接上的第一条 DML 隐式开启，commit()/rollback() 收尾；本结构仅
-/// 承载诊断字段。
+/// 连接上的第一条 DML 隐式开启，commit()/rollback() 收尾；本结构仅作
+/// 不透明标记。
 #[derive(Clone, Debug)]
-pub struct OracleTxHandle {
-    pub(crate) mode: TxMode,
-}
+pub struct OracleTxHandle;
 
 impl OracleConn {
     pub fn begin_tx(&self, mode: TxMode) -> CoreResult<OracleTxHandle> {
@@ -172,9 +170,7 @@ impl OracleConn {
         // 默认 ReadCommitted 时跳过；其余级别尝试设置，失败回滚。
         if mode.isolation_level != IsolationLevel::ReadCommitted {
             let sql = match mode.isolation_level {
-                IsolationLevel::ReadUncommitted => {
-                    "ALTER SESSION SET TRANSACTION READ UNCOMMITTED"
-                }
+                IsolationLevel::ReadUncommitted => "ALTER SESSION SET TRANSACTION READ UNCOMMITTED",
                 IsolationLevel::RepeatableRead => {
                     "ALTER SESSION SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"
                 }
@@ -182,7 +178,7 @@ impl OracleConn {
                     "ALTER SESSION SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"
                 }
                 IsolationLevel::ReadCommitted => {
-                    return Ok(OracleTxHandle { mode });
+                    return Ok(OracleTxHandle);
                 }
             };
             // 非默认级别设置失败不视为致命错误：Oracle 对会话级隔离切换
@@ -190,7 +186,7 @@ impl OracleConn {
             // 回退到默认即可，与 Go 侧 go-ora 行为一致。
             let _ = self.conn.lock().query_as::<i64>(sql, &[]);
         }
-        Ok(OracleTxHandle { mode })
+        Ok(OracleTxHandle)
     }
 
     pub fn commit(&self, _tx: &mut OracleTxHandle) -> CoreResult<()> {

@@ -12,6 +12,7 @@ import (
 	"github.com/polydb/polydb/pkg/keyring"
 	"github.com/polydb/polydb/pkg/protocol"
 	"github.com/polydb/polydb/pkg/storage"
+	"github.com/polydb/polydb/pkg/transport"
 )
 
 // ─── 渲染辅助 ───────────────────────────────────────────────
@@ -122,7 +123,7 @@ func setupApp(t *testing.T) (*appcore.AppCore, string) {
 
 func TestModelConnectionQueryFlow(t *testing.T) {
 	app, _ := setupApp(t)
-	var m tea.Model = New(app)
+	var m tea.Model = New(transport.NewLocal(app))
 	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	m = drive(t, m, m.Init())
 
@@ -190,7 +191,7 @@ func TestModelConnectionQueryFlow(t *testing.T) {
 // TestModelTableNavigation 验证 viewTable 中 ↑/↓ 切换表并加载新详情。
 func TestModelTableNavigation(t *testing.T) {
 	app, _ := setupApp(t)
-	var m tea.Model = New(app)
+	var m tea.Model = New(transport.NewLocal(app))
 	m = drive(t, m, m.Init())
 	var cmd tea.Cmd
 	m, cmd = m.Update(key(tea.KeyEnter))
@@ -225,7 +226,7 @@ func TestModelTableNavigation(t *testing.T) {
 // TestModelQueryAutocomplete 验证查询视图的 Tab 补全：先出表名，接受后再出列名。
 func TestModelQueryAutocomplete(t *testing.T) {
 	app, _ := setupApp(t)
-	var m tea.Model = New(app)
+	var m tea.Model = New(transport.NewLocal(app))
 	m = drive(t, m, m.Init())
 	// 打开连接
 	var cmd tea.Cmd
@@ -247,7 +248,7 @@ func TestModelQueryAutocomplete(t *testing.T) {
 		m, _ = m.Update(runeKey(r))
 	}
 	// Tab 触发补全，应给出表名候选
-	m, cmd = m.Update(key(tea.KeyTab))
+	m, _ = m.Update(key(tea.KeyTab))
 	if len(md(m).acCandidates) == 0 {
 		t.Fatalf("no table candidates after Tab; sql=%q", md(m).queryInput.Value())
 	}
@@ -307,7 +308,7 @@ func TestModelQueryAutocomplete(t *testing.T) {
 
 func TestModelTestAndDelete(t *testing.T) {
 	app, id := setupApp(t)
-	var m tea.Model = New(app)
+	var m tea.Model = New(transport.NewLocal(app))
 	m = drive(t, m, m.Init())
 
 	// t 测试连接
@@ -332,7 +333,7 @@ func TestModelTestAndDelete(t *testing.T) {
 
 func TestModelCreateForm(t *testing.T) {
 	app, _ := setupApp(t)
-	var m tea.Model = New(app)
+	var m tea.Model = New(transport.NewLocal(app))
 	m = drive(t, m, m.Init())
 
 	// n 打开表单
@@ -395,7 +396,7 @@ func TestModelCreateForm(t *testing.T) {
 func TestProgramSmoke(t *testing.T) {
 	app, _ := setupApp(t)
 	p := tea.NewProgram(
-		New(app),
+		New(transport.NewLocal(app)),
 		tea.WithInput(strings.NewReader("q")),
 		tea.WithOutput(io.Discard),
 	)

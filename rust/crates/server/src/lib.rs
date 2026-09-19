@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Path, State};
 use axum::http::header::CONTENT_TYPE;
@@ -15,10 +15,11 @@ use polydb_core::protocol::error::codes;
 use polydb_core::protocol::error::PolyDBError;
 use polydb_core::protocol::{
     BatchQueryRequest, BatchQueryResult, BatchResultItem, BeginTransactionRequest, ConnectionId,
-    ConnectionStatus, CreateConnectionRequest, QueryRequest, UpdateConnectionRequest,
+    ConnectionStatus, CreateConnectionRequest, QueryRequest, QueryResult, UpdateConnectionRequest,
 };
 use polydb_core::{
-    CoreError, RedisExecCommandRequest, RedisScanRequest, RedisSelectDbRequest, RedisSetRequest,
+    CoreError, CoreResult, RedisExecCommandRequest, RedisScanRequest, RedisSelectDbRequest,
+    RedisSetRequest,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -50,6 +51,9 @@ impl std::ops::Deref for AppState {
 }
 
 mod ws;
+
+#[cfg(test)]
+mod tests;
 
 pub fn router(app: Arc<AppCore>) -> Router {
     let state = AppState {
@@ -96,10 +100,19 @@ pub fn router(app: Arc<AppCore>) -> Router {
             "/api/connections/{id}/schemas/{schema}/tables/{table}/ddl",
             get(get_ddl),
         )
-        .route("/api/connections/{id}/transactions", post(begin_transaction))
+        .route(
+            "/api/connections/{id}/transactions",
+            post(begin_transaction),
+        )
         .route("/api/transactions/{txn_id}/execute", post(execute_in_tx))
-        .route("/api/transactions/{txn_id}/commit", post(commit_transaction))
-        .route("/api/transactions/{txn_id}/rollback", post(rollback_transaction))
+        .route(
+            "/api/transactions/{txn_id}/commit",
+            post(commit_transaction),
+        )
+        .route(
+            "/api/transactions/{txn_id}/rollback",
+            post(rollback_transaction),
+        )
         .route("/api/connections/{id}/kv/select", post(kv_select_db))
         .route("/api/connections/{id}/kv/scan", post(kv_scan_keys))
         .route(
@@ -142,7 +155,8 @@ fn error_response(e: CoreError) -> Response {
         codes::INVALID_PARAM => StatusCode::BAD_REQUEST,
         "POLYDB_ERR_TRANSACTION_NOT_FOUND" => StatusCode::NOT_FOUND,
         codes::QUERY_NOT_FOUND => StatusCode::NOT_FOUND,
-        codes::CANCELLED => StatusCode::REQUEST_TIMEOUT,
+        // 408：取消与超时都属"请求未在预期时间内完成"（与 Go 侧 errToStatus 一致）。
+        codes::CANCELLED | codes::TIMEOUT => StatusCode::REQUEST_TIMEOUT,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     json_response(status, pe)
@@ -423,43 +437,102 @@ async fn execute_query(
         r.insert(query_id, Arc::clone(&cancel));
     }
 
-    // Best-effort cancellation: the driver task isn't aborted, only the response
-    // is discarded if the client asks to cancel. Same pattern as ws.rs.
+    // 超时（behavior.md §2.3）：timeout_ms>0 生效，=0/缺省表示无超时，超时不自动重试。
+    // 驱动无法中断已在执行的 SQL（如 sqlite 递归 CTE），因此用「后台任务 + 截止时间
+    // 竞争」：到点先返回 POLYDB_ERR_TIMEOUT，被放弃的任务在后台自然结束
+    // （best-effort，与 cancel 的语义一致；与 Go 侧 goroutine+timer 实现对齐）。
+    enum Outcome {
+        Done(CoreResult<QueryResult>),
+        Cancelled,
+        TimedOut,
+    }
+    let worker_app = Arc::clone(&state.app);
+    let worker_sql = req.sql.clone();
+    let worker_params = req.params.clone();
+    let worker = tokio::spawn(async move {
+        worker_app
+            .execute(conn_id, &worker_sql, &worker_params)
+            .await
+    });
+    let timeout = req.timeout_ms.filter(|t| *t > 0).map(Duration::from_millis);
+
     let outcome = tokio::select! {
-        r = state.app.execute(conn_id, &req.sql, &req.params) => Some(r),
-        _ = cancel.notified() => None,
+        r = worker => Outcome::Done(r.unwrap_or_else(|e| {
+            Err(CoreError::Internal(format!("query worker failed: {e}")))
+        })),
+        _ = cancel.notified() => Outcome::Cancelled,
+        _ = async {
+            match timeout {
+                Some(d) => tokio::time::sleep(d).await,
+                None => std::future::pending::<()>().await,
+            }
+        } => Outcome::TimedOut,
     };
 
     // Unregister before returning, whether we won or lost the race.
-    let mut r = state.registry.lock().unwrap();
-    r.remove(&query_id);
+    {
+        let mut r = state.registry.lock().unwrap();
+        r.remove(&query_id);
+    }
 
-    let x_query_id = HeaderValue::from_str(&query_id.to_string()).unwrap_or_else(|_| {
-        HeaderValue::from_static("")
-    });
+    let x_query_id = HeaderValue::from_str(&query_id.to_string())
+        .unwrap_or_else(|_| HeaderValue::from_static(""));
 
     match outcome {
-        Some(Ok(result)) => {
+        Outcome::Done(Ok(result)) => {
+            let result = apply_max_rows(result, query_row_limit(&req));
             let mut resp = msgpack_response(StatusCode::OK, result);
             resp.headers_mut().insert(HEADER_X_QUERY_ID, x_query_id);
             resp
         }
-        Some(Err(e)) => {
+        Outcome::Done(Err(e)) => {
             let mut resp = error_response(e);
             resp.headers_mut().insert(HEADER_X_QUERY_ID, x_query_id);
             resp
         }
-        None => {
-            let err = PolyDBError::new(
+        Outcome::Cancelled => {
+            let pe = CoreError::Protocol(Box::new(PolyDBError::new(
                 codes::CANCELLED,
                 format!("query cancelled: {query_id}"),
-            );
-            let pe = CoreError::Protocol(Box::new(err));
+            )));
+            let mut resp = error_response(pe);
+            resp.headers_mut().insert(HEADER_X_QUERY_ID, x_query_id);
+            resp
+        }
+        Outcome::TimedOut => {
+            // behavior.md §4：TIMEOUT 是 retryable 错误（与 Go 侧一致）。
+            let pe = CoreError::Protocol(Box::new(
+                PolyDBError::new(codes::TIMEOUT, format!("query timed out: {query_id}"))
+                    .retryable(),
+            ));
             let mut resp = error_response(pe);
             resp.headers_mut().insert(HEADER_X_QUERY_ID, x_query_id);
             resp
         }
     }
+}
+
+// 默认行数上限（behavior.md §5）；max_rows 缺省或 0 视为使用默认，硬上限同为 10000。
+const DEFAULT_MAX_ROWS: u64 = 10000;
+
+fn query_row_limit(req: &QueryRequest) -> u64 {
+    match req.max_rows {
+        Some(0) | None => DEFAULT_MAX_ROWS,
+        Some(n) => n.min(DEFAULT_MAX_ROWS),
+    }
+}
+
+// apply_max_rows 按 behavior.md §5 截断结果行：超过 limit 时截断并置
+// truncated=true、total_rows 记录原始行数（不额外 count）。
+fn apply_max_rows(mut result: QueryResult, limit: u64) -> QueryResult {
+    if result.rows.len() as u64 <= limit {
+        return result;
+    }
+    let total = result.rows.len() as u64;
+    result.rows.truncate(limit as usize);
+    result.truncated = true;
+    result.total_rows = Some(total);
+    result
 }
 
 /// Cancel an in-flight HTTP query registered under /api/connections/{id}/query.
@@ -470,7 +543,10 @@ async fn cancel_query(State(state): State<AppState>, Path(query_id_str): Path<St
         Err(_) => {
             return json_response(
                 StatusCode::BAD_REQUEST,
-                PolyDBError::new(codes::INVALID_PARAM, format!("invalid query id: {query_id_str}")),
+                PolyDBError::new(
+                    codes::INVALID_PARAM,
+                    format!("invalid query id: {query_id_str}"),
+                ),
             )
         }
     };
@@ -481,7 +557,10 @@ async fn cancel_query(State(state): State<AppState>, Path(query_id_str): Path<St
     } else {
         json_response(
             StatusCode::NOT_FOUND,
-            PolyDBError::new(codes::QUERY_NOT_FOUND, format!("query not found: {query_id}")),
+            PolyDBError::new(
+                codes::QUERY_NOT_FOUND,
+                format!("query not found: {query_id}"),
+            ),
         )
     }
 }
@@ -505,7 +584,10 @@ async fn execute_batch_query(
     for stmt in &req.statements {
         let conn_id = stmt.connection_id.unwrap_or(path_id);
         match app.execute(conn_id, &stmt.sql, &stmt.params).await {
-            Ok(result) => results.push(BatchResultItem::Ok(result)),
+            Ok(result) => results.push(BatchResultItem::Ok(apply_max_rows(
+                result,
+                query_row_limit(stmt),
+            ))),
             Err(e) => {
                 results.push(BatchResultItem::Err(e.to_protocol()));
                 if req.stop_on_error {
@@ -543,10 +625,7 @@ async fn begin_transaction(
             Err(_) => {
                 return json_response(
                     StatusCode::BAD_REQUEST,
-                    PolyDBError::new(
-                        codes::INVALID_PARAM,
-                        format!("invalid connection id: {id}"),
-                    ),
+                    PolyDBError::new(codes::INVALID_PARAM, format!("invalid connection id: {id}")),
                 )
             }
         };
@@ -573,8 +652,14 @@ async fn execute_in_tx(
         Ok(r) => r,
         Err(res) => return *res,
     };
-    match app.execute_in_transaction(&txn_id, &req.sql, &req.params).await {
-        Ok(result) => msgpack_response(StatusCode::OK, result),
+    match app
+        .execute_in_transaction(&txn_id, &req.sql, &req.params)
+        .await
+    {
+        Ok(result) => msgpack_response(
+            StatusCode::OK,
+            apply_max_rows(result, query_row_limit(&req)),
+        ),
         Err(e) => error_response(e),
     }
 }
@@ -586,10 +671,7 @@ async fn commit_transaction(State(app): State<AppState>, Path(txn_id): Path<Stri
     }
 }
 
-async fn rollback_transaction(
-    State(app): State<AppState>,
-    Path(txn_id): Path<String>,
-) -> Response {
+async fn rollback_transaction(State(app): State<AppState>, Path(txn_id): Path<String>) -> Response {
     match app.rollback_transaction(&txn_id).await {
         Ok(info) => msgpack_response(StatusCode::OK, info),
         Err(e) => error_response(e),

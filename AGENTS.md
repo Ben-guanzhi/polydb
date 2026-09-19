@@ -75,7 +75,8 @@ polydb/
 │ │ ├── protocol/ # 由 spec 生成
 │ │ ├── appcore/ dbcore/ server/ storage/ sshtunnel/ keyring/
 │ │ ├── dbsqlite/ dbmysql/ dbpostgres/ dbmssql/ dboracle/ dbredis/
-│ │ └── core/ transport/ # 预留空目录
+│ │ ├── transport/ # 前端数据访问：Client 接口 + Local(进程内) / Remote(REST)
+│ │ └── core/ # 预留空目录
 │ └── internal/tui/
 ├── web/ # 前端只写一次（React/Vue + Monaco）
 │ └── src/api/ # 由 spec 生成 TS 类型（@polydb/api）

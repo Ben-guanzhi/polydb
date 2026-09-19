@@ -17,12 +17,10 @@ pub struct SqliteConn {
 }
 
 /// 事务句柄。SQLite 本身没有独立的事务对象，事务由底层 Connection 的
-/// BEGIN IMMEDIATE 语句开启；因此句柄只携带 TxMode 用于诊断。
-/// 实际 begin/commit/rollback 与执行都通过 self.conn 上的 execute_batch 完成。
+/// BEGIN IMMEDIATE 句柄只是不透明标记；实际 begin/commit/rollback 与执行
+/// 都通过 self.conn 上的 execute_batch 完成。
 #[derive(Clone, Debug)]
-pub struct SqliteTxHandle {
-    pub(crate) mode: TxMode,
-}
+pub struct SqliteTxHandle;
 
 impl SqliteConn {
     pub fn open(path: &str) -> CoreResult<Self> {
@@ -100,7 +98,9 @@ impl SqliteConn {
 
     fn detect_statement_type(sql: &str) -> StatementType {
         let trimmed = Self::strip_leading_comments(sql).trim().to_uppercase();
-        if trimmed.starts_with("SELECT") {
+        // WITH 前缀统一判 select（与 Go 侧 dbcore.DetectStatementType 规则一致，
+        // 双实现行为约定见 spec/behavior.md §11）：包括 `WITH ... INSERT` 形态。
+        if trimmed.starts_with("SELECT") || trimmed.starts_with("WITH") {
             StatementType::Select
         } else if trimmed.starts_with("INSERT") {
             StatementType::Insert
@@ -191,11 +191,11 @@ impl SqliteConn {
 
     /// 开启事务：BEGIN IMMEDIATE。SQLite 不支持任意隔离级别，ReadCommitted
     /// 与驱动默认行为一致（IMMEDIATE 事务），其他级别同样映射到 IMMEDIATE。
-    pub fn begin_tx_impl(&self, mode: TxMode) -> CoreResult<SqliteTxHandle> {
+    pub fn begin_tx_impl(&self) -> CoreResult<SqliteTxHandle> {
         let conn = self.conn.lock();
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|e| CoreError::Driver(format!("begin tx failed: {e}")))?;
-        Ok(SqliteTxHandle { mode })
+        Ok(SqliteTxHandle)
     }
 
     pub fn execute_in_tx_impl(
@@ -253,8 +253,8 @@ impl SqlDriver for SqliteConn {
         arc
     }
 
-    async fn begin_tx(&self, mode: TxMode) -> CoreResult<Box<dyn Any + Send>> {
-        Ok(Box::new(self.begin_tx_impl(mode)?))
+    async fn begin_tx(&self, _mode: TxMode) -> CoreResult<Box<dyn Any + Send>> {
+        Ok(Box::new(self.begin_tx_impl()?))
     }
 
     async fn execute_in_tx(

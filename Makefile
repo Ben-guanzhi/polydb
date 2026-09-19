@@ -1,4 +1,4 @@
-.PHONY: all gen-protocol check-rust check-go check-web contract-test clean docker-build docker-run compose-up compose-down
+.PHONY: all gen-protocol check-rust check-go check-web test-web lint-web contract-test clean docker-build docker-build-rust docker-run compose-up compose-up-rust compose-down
 
 all: check-rust check-go
 
@@ -45,6 +45,12 @@ run-tui:
 check-web:
 	cd web && npm run check
 
+test-web:
+	cd web && npm run test
+
+lint-web:
+	cd web && npm run lint
+
 build-web:
 	cd web && npm run build
 
@@ -56,11 +62,17 @@ contract-test: build-rust
 docker-build:
 	docker build -t polydb-server:latest .
 
+docker-build-rust:
+	docker build -t polydb-server-rust:latest -f rust/Dockerfile.server .
+
 docker-run:
 	docker run --rm -p 8080:8080 -v polydb-data:/data polydb-server:latest
 
 compose-up:
 	docker compose up -d --build
+
+compose-up-rust:
+	docker compose --profile rust up -d --build
 
 compose-down:
 	docker compose down

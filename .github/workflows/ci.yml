@@ -64,7 +64,7 @@ jobs:
         run: go test ./...
 
   web:
-    name: Web (tsc / build)
+    name: Web (tsc / lint / test / build)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -79,6 +79,12 @@ jobs:
       - name: typecheck
         working-directory: web
         run: npm run check
+      - name: lint
+        working-directory: web
+        run: npm run lint
+      - name: test
+        working-directory: web
+        run: npm run test
       - name: build
         working-directory: web
         run: npm run build

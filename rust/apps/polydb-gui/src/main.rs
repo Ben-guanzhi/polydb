@@ -1,6 +1,6 @@
 use polydb_app_core::AppCore;
 use polydb_storage::Storage;
-use polydb_transport::LocalTransport;
+use polydb_transport::{LocalTransport, Transport};
 use std::sync::Arc;
 
 fn main() {
@@ -12,7 +12,7 @@ fn main() {
     let storage = Storage::open(db_path.to_str().unwrap()).expect("failed to open storage");
 
     let app_core = Arc::new(AppCore::new(storage));
-    let transport = Arc::new(LocalTransport::new(app_core));
+    let transport: Arc<dyn Transport> = Arc::new(LocalTransport::new(app_core));
 
     polydb_ui_gui::run(transport);
 }

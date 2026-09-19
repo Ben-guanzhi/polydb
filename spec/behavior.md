@@ -186,3 +186,20 @@
 
 - Web 前端「批量编辑」面板：先 `begin_transaction`，逐行 `execute_in_tx`，最后 `commit_transaction` 或用户取消时 `rollback_transaction`。
 - 前端展示 `TransactionInfo.isolation_level` 与 `started_at` 作为事务上下文提示。
+
+## 11. 语句类型检测（statement_type）
+
+- `QueryResult.statement_type` 由驱动层按**前缀规则**判定，判定前先剥离前导注释与空白（`--` 行注释、`/* */` 块注释），两端规则必须逐字一致：
+
+  | 前缀（大写匹配） | statement_type |
+  |---|---|
+  | `SELECT` / `WITH` | `select` |
+  | `INSERT` | `insert` |
+  | `UPDATE` | `update` |
+  | `DELETE` | `delete` |
+  | `CREATE` / `ALTER` / `DROP` | `ddl` |
+  | 其他 | `other` |
+
+- 注意 `WITH ...` 前缀统一判 `select`（含 `WITH ... INSERT/UPDATE/DELETE` 形态）：这是 Go 侧既定规则，Rust 侧对齐；
+  语义上是近似（CTE + DML 也标 select），换来的是两端 label 与执行分支（查询式 vs 命令式）的双一致，
+  契约测试 `TestContractBehaviorMaxRows` 对该规则有对拍覆盖。

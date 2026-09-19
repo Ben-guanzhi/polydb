@@ -1,0 +1,33 @@
+# syntax=docker/dockerfile:1
+
+# polydb-server 的 Rust 实现镜像（与根目录 Dockerfile 的 Go 镜像对等）。
+# 构建上下文为仓库根目录：COPY rust/ 携带整个 workspace（.dockerignore 已排除 rust/target）。
+
+# ─── build：release 编译（rusqlite bundled 需 C 编译器） ──────────
+FROM rust:1-slim AS build
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY rust/Cargo.toml rust/Cargo.lock ./
+COPY rust/crates ./crates
+COPY rust/apps ./apps
+# 先拉依赖缓存层
+RUN mkdir crates/.cache && cargo fetch
+RUN cargo build --release -p polydb-server
+
+# ─── runtime：debian slim + 非 root 用户（与 Go 镜像同语义） ─────
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -u 10001 polydb \
+    && mkdir -p /data && chown polydb:polydb /data
+WORKDIR /app
+COPY --from=build /src/target/release/polydb-server /app/polydb-server
+USER polydb
+ENV POLYDB_ADDR=0.0.0.0:8080 \
+    POLYDB_DATA_DIR=/data
+VOLUME ["/data"]
+EXPOSE 8080
+HEALTHCHECK --interval=15s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:8080/api/health >/dev/null || exit 1
+ENTRYPOINT ["/app/polydb-server"]

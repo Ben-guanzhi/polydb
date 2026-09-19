@@ -1,19 +1,29 @@
 # Docker 发布（M7）
 
+## Go 镜像 `polydb-server`
+
 镜像名 `polydb-server`（AGENTS.md 命名速查）。Go 后端单二进制，CGO 关闭静态编译，
 alpine 运行时 + 非 root 用户（`polydb`，uid 10001）。
+
+## Rust 镜像 `polydb-server-rust`
+
+Rust 实现（axum）的等价部署路径：`rust/Dockerfile.server`，多阶段构建
+（`rust:1-slim` release 编译 → `debian:bookworm-slim` 非 root 运行）。
+与 Go 镜像同一套环境变量/卷约定，双实现可互为热备或 A/B 对比。
 
 ## 构建与运行
 
 ```bash
 # 构建镜像
-make docker-build          # docker build -t polydb-server:latest .
+make docker-build          # Go:    docker build -t polydb-server:latest .
+make docker-build-rust     # Rust:  docker build -t polydb-server-rust:latest -f rust/Dockerfile.server .
 
 # 单容器运行（数据卷 polydb-data 挂到 /data）
 make docker-run            # docker run --rm -p 8080:8080 -v polydb-data:/data polydb-server:latest
 
 # 或 compose 一键起（server + redis）
-make compose-up
+make compose-up            # Go server（8080）
+make compose-up-rust       # Rust server（8081，profile "rust"，与 Go 服务并存）
 ```
 
 ## 环境变量

@@ -4993,6 +4993,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -5034,6 +5035,8 @@ dependencies = [
  "polydb-core",
  "polydb-protocol",
  "polydb-transport",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

@@ -1,5 +1,6 @@
 # polydb-server + redis 本地一键起（M7 Docker 发布）。
 # 数据落在命名卷 polydb-data（即容器内 POLYDB_DATA_DIR=/data）。
+# Rust 实现的服务端通过 profile "rust" 启用（docker compose --profile rust up）。
 services:
   polydb-server:
     image: polydb-server:latest
@@ -16,6 +17,22 @@ services:
     depends_on:
       - redis
 
+  polydb-server-rust:
+    image: polydb-server-rust:latest
+    build:
+      context: .
+      dockerfile: rust/Dockerfile.server
+    profiles: ["rust"]
+    ports:
+      - "8081:8080"
+    environment:
+      POLYDB_ADDR: 0.0.0.0:8080
+      POLYDB_DATA_DIR: /data
+    volumes:
+      - polydb-data-rust:/data
+    depends_on:
+      - redis
+
   redis:
     image: redis:7-alpine
     ports:
@@ -23,3 +40,4 @@ services:
 
 volumes:
   polydb-data:
+  polydb-data-rust:

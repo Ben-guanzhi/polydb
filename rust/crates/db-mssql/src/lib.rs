@@ -229,25 +229,23 @@ fn quote_ident(s: &str) -> String {
 }
 
 /// MSSQL 事务句柄。tiberius Client 无独立事务对象，事务状态由
-/// BEGIN/COMMIT/ROLLBACK TRAN 在连接上隐式维护；本结构仅承载诊断字段。
+/// BEGIN/COMMIT/ROLLBACK TRAN 在连接上隐式维护；本结构仅作不透明标记。
 #[derive(Clone, Debug)]
-pub struct MssqlTxHandle {
-    pub(crate) mode: TxMode,
-}
+pub struct MssqlTxHandle;
 
 impl MssqlConn {
     fn begin_stmt(mode: TxMode) -> Option<&'static str> {
         match mode.isolation_level {
             IsolationLevel::ReadCommitted => None,
-            IsolationLevel::ReadUncommitted => Some(
-                "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; BEGIN TRAN",
-            ),
-            IsolationLevel::RepeatableRead => Some(
-                "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ; BEGIN TRAN",
-            ),
-            IsolationLevel::Serializable => Some(
-                "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRAN",
-            ),
+            IsolationLevel::ReadUncommitted => {
+                Some("SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED; BEGIN TRAN")
+            }
+            IsolationLevel::RepeatableRead => {
+                Some("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ; BEGIN TRAN")
+            }
+            IsolationLevel::Serializable => {
+                Some("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; BEGIN TRAN")
+            }
         }
     }
 
@@ -264,7 +262,7 @@ impl MssqlConn {
             None => "BEGIN TRAN".to_string(),
         };
         self.run_batch(&sql, "begin tx failed")?;
-        Ok(MssqlTxHandle { mode })
+        Ok(MssqlTxHandle)
     }
 
     pub fn commit(&self, _tx: &mut MssqlTxHandle) -> CoreResult<()> {

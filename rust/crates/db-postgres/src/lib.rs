@@ -143,18 +143,16 @@ impl PostgresConn {
     /// 隔离级别时才生成 statement，默认走 sqlx 的 BEGIN 语句。
     fn begin_statement(mode: TxMode) -> Option<String> {
         match mode.isolation_level {
-            IsolationLevel::ReadCommitted => Some(
-                "BEGIN ISOLATION LEVEL READ COMMITTED".to_string(),
-            ),
-            IsolationLevel::Serializable => Some(
-                "BEGIN ISOLATION LEVEL SERIALIZABLE".to_string(),
-            ),
-            IsolationLevel::ReadUncommitted => Some(
-                "BEGIN ISOLATION LEVEL READ UNCOMMITTED".to_string(),
-            ),
-            IsolationLevel::RepeatableRead => Some(
-                "BEGIN ISOLATION LEVEL REPEATABLE READ".to_string(),
-            ),
+            IsolationLevel::ReadCommitted => {
+                Some("BEGIN ISOLATION LEVEL READ COMMITTED".to_string())
+            }
+            IsolationLevel::Serializable => Some("BEGIN ISOLATION LEVEL SERIALIZABLE".to_string()),
+            IsolationLevel::ReadUncommitted => {
+                Some("BEGIN ISOLATION LEVEL READ UNCOMMITTED".to_string())
+            }
+            IsolationLevel::RepeatableRead => {
+                Some("BEGIN ISOLATION LEVEL REPEATABLE READ".to_string())
+            }
         }
     }
 
@@ -168,23 +166,21 @@ impl PostgresConn {
     }
 
     pub async fn commit(&self, tx: PostgresTxHandle) -> CoreResult<()> {
-        tx.0.commit().await
+        tx.0.commit()
+            .await
             .map_err(|e| CoreError::Driver(format!("commit failed: {e}")))?;
         Ok(())
     }
 
     pub async fn rollback(&self, tx: PostgresTxHandle) -> CoreResult<()> {
-        tx.0.rollback().await
+        tx.0.rollback()
+            .await
             .map_err(|e| CoreError::Driver(format!("rollback failed: {e}")))?;
         Ok(())
     }
 
     /// 在给定 executor（pool 或 transaction）上跑一条 SQL。
-    async fn execute_on<'e, E>(
-        executor: E,
-        sql: &str,
-        params: &[Value],
-    ) -> CoreResult<QueryResult>
+    async fn execute_on<'e, E>(executor: E, sql: &str, params: &[Value]) -> CoreResult<QueryResult>
     where
         E: sqlx::Executor<'e, Database = sqlx::Postgres>,
     {

@@ -60,19 +60,22 @@ func run(args []string, in io.Reader, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("open %q: %w", *dbPath, err)
 	}
-	defer conn.Close()
 
 	res, err := conn.Execute(ctx, sql)
+	closeErr := conn.Close()
 	if err != nil {
 		return err
+	}
+	if closeErr != nil {
+		return closeErr
 	}
 	return printResult(out, res, *compact)
 }
 
 func printResult(out io.Writer, res *protocol.QueryResult, compact bool) error {
 	if len(res.Columns) == 0 {
-		fmt.Fprintf(out, "ok (%d row(s) affected)\n", res.AffectedRows)
-		return nil
+		_, err := fmt.Fprintf(out, "ok (%d row(s) affected)\n", res.AffectedRows)
+		return err
 	}
 
 	// 表头
@@ -114,17 +117,22 @@ func printResult(out io.Writer, res *protocol.QueryResult, compact bool) error {
 		return strings.TrimRight(b.String(), " ")
 	}
 
-	fmt.Fprintln(out, line(header))
+	var buf strings.Builder
+	buf.WriteString(line(header))
+	buf.WriteByte('\n')
 	total := 0
 	for i := range width {
 		total += width[i] + 3
 	}
-	fmt.Fprintln(out, strings.Repeat("-", total-3+2)) // 粗略分隔线
+	buf.WriteString(strings.Repeat("-", total-3+2)) // 粗略分隔线
+	buf.WriteByte('\n')
 	for _, row := range text {
-		fmt.Fprintln(out, line(row))
+		buf.WriteString(line(row))
+		buf.WriteByte('\n')
 	}
-	fmt.Fprintf(out, "(%d row(s))\n", len(text))
-	return nil
+	fmt.Fprintf(&buf, "(%d row(s))\n", len(text))
+	_, err := io.WriteString(out, buf.String())
+	return err
 }
 
 func renderCell(v protocol.Value) string {

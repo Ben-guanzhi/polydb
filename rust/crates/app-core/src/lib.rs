@@ -211,8 +211,7 @@ impl AppCore {
                     &host,
                     port,
                     conn_info.database.as_deref(),
-                    conn_info.username.as_deref().unwrap_or("")
-,
+                    conn_info.username.as_deref().unwrap_or(""),
                     password,
                 )?))
             }
@@ -448,9 +447,10 @@ impl AppCore {
                 .ok_or_else(|| CoreError::TransactionNotFound(txn_id.to_string()))?
         };
         let info = entry.info_finalized(TransactionStatus::Committed);
-        let handle = entry.handle.take().ok_or_else(|| {
-            CoreError::Internal("tx already committed".into())
-        })?;
+        let handle = entry
+            .handle
+            .take()
+            .ok_or_else(|| CoreError::Internal("tx already committed".into()))?;
         entry.driver.commit(handle).await?;
         Ok(info)
     }
@@ -462,9 +462,10 @@ impl AppCore {
                 .ok_or_else(|| CoreError::TransactionNotFound(txn_id.to_string()))?
         };
         let info = entry.info_finalized(TransactionStatus::RolledBack);
-        let handle = entry.handle.take().ok_or_else(|| {
-            CoreError::Internal("tx already rolled back".into())
-        })?;
+        let handle = entry
+            .handle
+            .take()
+            .ok_or_else(|| CoreError::Internal("tx already rolled back".into()))?;
         entry.driver.rollback(handle).await?;
         Ok(info)
     }

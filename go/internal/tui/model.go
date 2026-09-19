@@ -6,8 +6,8 @@ import (
 
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/polydb/polydb/pkg/appcore"
 	"github.com/polydb/polydb/pkg/protocol"
+	"github.com/polydb/polydb/pkg/transport"
 )
 
 type view int
@@ -29,7 +29,7 @@ var viewTitles = map[view]string{
 }
 
 type model struct {
-	app *appcore.AppCore
+	app transport.Client
 
 	view   view
 	width  int
@@ -67,7 +67,7 @@ type model struct {
 	acColumns    []protocol.ColumnInfo
 }
 
-func New(app *appcore.AppCore) *model {
+func New(app transport.Client) *model {
 	ta := textarea.New()
 	ta.Placeholder = "输入 SQL（F5 执行）…"
 	ta.ShowLineNumbers = true

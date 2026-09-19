@@ -5,7 +5,7 @@
 polydb 是一个前端与数据库后端严格解耦的通用数据库客户端：
 同一套契约（`spec/`）驱动 Rust 与 Go 双后端，Web / TUI / GUI 三类前端共用。
 
-- **前端**：Web（React + Monaco，主力）、TUI（bubbletea）、GUI（GPUI，**原型沉淀**）；GUI/TUI 共用 Go 后端逻辑，GUI 目前仅做技术验证
+- **前端**：Web（React + Monaco，主力）、TUI（bubbletea，支持 `-server` 连远程服务端）、GUI（GPUI 最小可用：连接列表/查询/结果）
 - **数据库**：SQLite、PostgreSQL、MySQL、SQL Server、Oracle、Redis
 - **语言**：Rust（桌面 / 本地开发）+ Go（服务端 / TUI / CLI）
 - **契约**：`spec/openapi.yaml`（REST 控制面）、`spec/asyncapi.yaml`（WebSocket 查询流）、`spec/schemas/*.json`（JSON Schema）、`spec/arrow/`（结果集，预留）
@@ -27,7 +27,7 @@ polydb/
 ├── spec/          # 契约唯一真相源（语言中立）
 ├── rust/          # Rust workspace（workspace: polydb）
 │   ├── crates/    # protocol / core / db-core / db-<name> / storage / app-core / transport / server / ui-*
-│   └── apps/      # polydb-gui / polydb-tui / polydb-server
+│   └── apps/      # polydb-gui（GPUI；server 二进制在 crates/server 内）
 ├── go/            # Go module github.com/polydb/polydb
 │   ├── cmd/       # polydb-server / polydb-tui / polydb-cli
 │   ├── pkg/       # protocol / core / dbcore / db<name> / storage / appcore / transport / server / keyring / sshtunnel
@@ -52,8 +52,14 @@ cd go && go run ./cmd/polydb-server
 cd web && npm install && npm run dev
 # Vite 代理 /api 与 /ws → POLYDB_SERVER_URL || http://127.0.0.1:8080
 
-# TUI
+# TUI（本机直连 app-core）
 cd go && go run ./cmd/polydb-tui
+
+# TUI 远程模式（连 polydb-server 的 REST 接口）
+cd go && go run ./cmd/polydb-tui -server http://127.0.0.1:8080
+
+# GUI（Rust + GPUI，进程内 app-core）
+cd rust && cargo run -p polydb-gui
 
 # CLI（本地 SQLite 最小查询器，非交互）
 cd go && go run ./cmd/polydb-cli -db test.db -e "SELECT 1 AS x"

@@ -5,8 +5,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/polydb/polydb/pkg/appcore"
 	"github.com/polydb/polydb/pkg/protocol"
+	"github.com/polydb/polydb/pkg/transport"
 )
 
 // 各类异步结果消息（bubbletea 消息，避免阻塞渲染循环）。
@@ -61,14 +61,14 @@ type tableDetail struct {
 	ddl     string
 }
 
-func loadConnsCmd(a *appcore.AppCore) tea.Cmd {
+func loadConnsCmd(a transport.Client) tea.Cmd {
 	return func() tea.Msg {
 		conns, err := a.ListConnections()
 		return connsLoadedMsg{conns: conns, err: err}
 	}
 }
 
-func testCmd(a *appcore.AppCore, id string) tea.Cmd {
+func testCmd(a transport.Client, id string) tea.Cmd {
 	return func() tea.Msg {
 		start := time.Now()
 		err := a.Ping(context.Background(), id)
@@ -82,14 +82,14 @@ func testCmd(a *appcore.AppCore, id string) tea.Cmd {
 	}
 }
 
-func createCmd(a *appcore.AppCore, req *protocol.CreateConnectionRequest) tea.Cmd {
+func createCmd(a transport.Client, req *protocol.CreateConnectionRequest) tea.Cmd {
 	return func() tea.Msg {
 		conn, err := a.CreateConnection(req)
 		return createdMsg{conn: conn, err: err}
 	}
 }
 
-func deleteCmd(a *appcore.AppCore, id string) tea.Cmd {
+func deleteCmd(a transport.Client, id string) tea.Cmd {
 	return func() tea.Msg {
 		_, err := a.DeleteConnection(id)
 		return deletedMsg{err: err}
@@ -98,7 +98,7 @@ func deleteCmd(a *appcore.AppCore, id string) tea.Cmd {
 
 // openConnCmd 打开连接并读取 schema 列表（进入库表浏览的前置步骤）。
 // 已连接时跳过 Connect：重复 Connect 会重开驱动，:memory: 等会话数据会丢失。
-func openConnCmd(a *appcore.AppCore, id string) tea.Cmd {
+func openConnCmd(a transport.Client, id string) tea.Cmd {
 	return func() tea.Msg {
 		if !a.IsConnected(id) {
 			if err := a.Connect(context.Background(), id); err != nil {
@@ -116,14 +116,14 @@ func openConnCmd(a *appcore.AppCore, id string) tea.Cmd {
 	}
 }
 
-func tablesCmd(a *appcore.AppCore, id, schema string) tea.Cmd {
+func tablesCmd(a transport.Client, id, schema string) tea.Cmd {
 	return func() tea.Msg {
 		tables, err := a.ListTables(context.Background(), id, schema)
 		return tablesMsg{schema: schema, tables: tables, err: err}
 	}
 }
 
-func detailCmd(a *appcore.AppCore, id, schema, table string) tea.Cmd {
+func detailCmd(a transport.Client, id, schema, table string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 		d := &tableDetail{}
@@ -144,14 +144,14 @@ func detailCmd(a *appcore.AppCore, id, schema, table string) tea.Cmd {
 	}
 }
 
-func columnsCmd(a *appcore.AppCore, id, schema, table string) tea.Cmd {
+func columnsCmd(a transport.Client, id, schema, table string) tea.Cmd {
 	return func() tea.Msg {
 		cols, err := a.ListColumns(context.Background(), id, schema, table)
 		return columnsLoadedMsg{table: table, columns: cols, err: err}
 	}
 }
 
-func queryCmd(a *appcore.AppCore, id, sql string) tea.Cmd {
+func queryCmd(a transport.Client, id, sql string) tea.Cmd {
 	return func() tea.Msg {
 		start := time.Now()
 		res, err := a.Execute(context.Background(), id, sql)
