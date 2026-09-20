@@ -18,13 +18,10 @@ import {
   type DiffSearchScope,
   type FailedRow,
   PresetManager,
-  WHITELIST_TTL_MS,
-  type WhitelistPersisted,
   type BackupAppliedDetail,
 } from './ImportModalParts';
 import { STEP_ORDER } from './ImportModalParts';
 import {
-  boolLabel,
   classifyFailReason,
   failCategoryMeta,
   previewParams,
@@ -33,7 +30,14 @@ import {
 import {
   classifyDiffItem, FIX_STACK_MAX_BYTES, DIFF_EMPTY_MARKS, diffGroupColor, diffItemColor, diffItemIcon,
   diffItemLabel, diffKeywordColor, splitDiffSearchKeywords, splitDiffSearchParts,
+  buildUndoDiff as buildUndoDiffLib, copyAllItems, copyDiffSummary, densityAlpha, groupDiffItems,
+  filterDiffGroups as filterDiffGroupsLib,
 } from '../lib/importDiff';
+import {
+  buildRiskWhitelistExport, loadRiskWhitelist, mergeWhitelistItems, parseRiskWhitelistCsv,
+  parseRiskWhitelistJson, persistRiskWhitelist, RISK_WHITELIST_KEY, removeExpiredWhitelist,
+  whitelistKeyLabel,
+} from '../lib/riskWhitelist';
 import * as api from '../lib/api';
 import { detectDelimiter, parseCsv, type Delimiter, type CsvParseResult } from '../lib/csvParser';
 import {
@@ -229,38 +233,13 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
   const [riskItemCtxMenu, setRiskItemCtxMenu] = useState<{ x: number; y: number; key: string } | null>(null);
   // M30.154 C 高风险项白名单：加入后从勾选剔除，并持久化下次导入自动跳过
   // M30.156 C 存储升级为 v2 {key, addedAt}[] 结构（旧 v1 string[] 兼容加载），30 天自动过期
-  const loadRiskWhitelist = (): Map<string, number> => {
-    try {
-      const raw = localStorage.getItem('polydb.riskWhitelist.v1');
-      if (!raw) return new Map();
-      const parsed = JSON.parse(raw);
-      const now = Date.now();
-      const out = new Map<string, number>();
-      if (Array.isArray(parsed)) {
-        // 旧 v1：仅 key 字符串数组，无时间戳——用当前时间兜底（不主动清，用户手动清）
-        for (const k of parsed) if (typeof k === 'string') out.set(k, now);
-      } else if (parsed && typeof parsed === 'object' && Array.isArray(parsed.items)) {
-        for (const e of parsed.items) {
-          if (e && typeof e === 'object' && typeof e.key === 'string' && typeof e.addedAt === 'number') {
-            // 首次读时若已过 TTL 静默剔除
-            if (now - e.addedAt <= WHITELIST_TTL_MS) out.set(e.key, e.addedAt);
-          }
-        }
-      }
-      return out;
-    } catch { return new Map(); }
-  };
+
   const [riskWhitelist, setRiskWhitelist] = useState<Map<string, number>>(loadRiskWhitelist);
   const addToRiskWhitelist = (key: string) => {
     setRiskWhitelist((prev) => {
       if (prev.has(key)) return prev;
-      const now = Date.now();
-      const next = new Map(prev);
-      next.set(key, now);
-      try {
-        const payload: WhitelistPersisted = { v: 2, items: Array.from(next, ([k, addedAt]) => ({ key: k, addedAt })) };
-        localStorage.setItem('polydb.riskWhitelist.v1', JSON.stringify(payload));
-      } catch { /* ignore */ }
+      const next = mergeWhitelistItems(prev, [{ key, addedAt: Date.now() }], 'merge');
+      persistRiskWhitelist(next);
       return next;
     });
     setBackupSelected((prev) => {
@@ -269,7 +248,7 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
       next.delete(key);
       return next;
     });
-    setPresetManagerMsg({ kind: 'ok', text: `🔒 已加入白名单并剔除（30 天后自动失效）：${(() => { const p = key.split('::'); return p.length >= 3 ? `${p[1]}.${p[2]}` : key; })()}` });
+    setPresetManagerMsg({ kind: 'ok', text: `🔒 已加入白名单并剔除（30 天后自动失效）：${whitelistKeyLabel(key)}` });
   };
   // M30.155 A 白名单管理浮层：可视化 polydb.riskWhitelist.v1，支持单项移除/清空全部
   const [riskWhitelistOpen, setRiskWhitelistOpen] = useState(false);
@@ -288,14 +267,11 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
       if (!prev.has(key)) return prev;
       const next = new Map(prev);
       next.delete(key);
-      try {
-        const payload: WhitelistPersisted = { v: 2, items: Array.from(next, ([k, addedAt]) => ({ key: k, addedAt })) };
-        localStorage.setItem('polydb.riskWhitelist.v1', JSON.stringify(payload));
-      } catch { /* ignore */ }
+      persistRiskWhitelist(next);
       return next;
     });
     setWhitelistSel((prev) => { const next = new Set(prev); next.delete(key); return next; });
-    setPresetManagerMsg({ kind: 'ok', text: `🔓 已从白名单移除：${(() => { const p = key.split('::'); return p.length >= 3 ? `${p[1]}.${p[2]}` : key; })()}` });
+    setPresetManagerMsg({ kind: 'ok', text: `🔓 已从白名单移除：${whitelistKeyLabel(key)}` });
   };
   const clearRiskWhitelist = () => {
     if (riskWhitelist.size === 0) return;
@@ -303,28 +279,16 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
     setRiskWhitelist(new Map());
     setWhitelistSel(new Set());
     whitelistAnchorIdx.current = null;
-    try { localStorage.removeItem('polydb.riskWhitelist.v1'); } catch { /* ignore */ }
+    try { localStorage.removeItem(RISK_WHITELIST_KEY); } catch { /* ignore */ }
     setPresetManagerMsg({ kind: 'ok', text: `🧹 已清空白名单（${n} 项）` });
     setRiskWhitelistOpen(false);
   };
-  // M30.156 C 每次打开 presetManager 时清理一次过期项（仅 presetManagerOpen 转 true 时触发；
-  // M30.160 D：不再依赖 riskWhitelist，避免会话中新增后立即被清理）
+  // M30.156 C 每次打开 presetManager 时清理一次过期项（M30.160 D：只扫当前 map，不依赖新增即清理）
   useEffect(() => {
     if (!presetManagerOpen || riskWhitelist.size === 0) return;
-    const now = Date.now();
-    let removed = 0;
-    for (const [, addedAt] of riskWhitelist) {
-      if (now - addedAt > WHITELIST_TTL_MS) removed += 1;
-    }
+    const { next, removed } = removeExpiredWhitelist(riskWhitelist);
     if (removed === 0) return;
-    const next = new Map<string, number>();
-    for (const [k, addedAt] of riskWhitelist) {
-      if (now - addedAt <= WHITELIST_TTL_MS) next.set(k, addedAt);
-    }
-    try {
-      const payload: WhitelistPersisted = { v: 2, items: Array.from(next, ([k, addedAt]) => ({ key: k, addedAt })) };
-      localStorage.setItem('polydb.riskWhitelist.v1', JSON.stringify(payload));
-    } catch { /* ignore */ }
+    persistRiskWhitelist(next);
     setRiskWhitelist(next);
     setPresetManagerMsg({ kind: 'ok', text: `⏳ 白名单过期清理：${removed} 项已超 30 天，已自动剔除` });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -344,34 +308,7 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
       setPresetManagerMsg({ kind: 'err', text: '⚠ 白名单为空，无内容可导出' });
       return;
     }
-    const items = Array.from(riskWhitelist, ([key, addedAt]) => ({ key, addedAt }))
-      .sort((a, b) => a.key.localeCompare(b.key));
-    const now = new Date();
-    const ts = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}${String(now.getSeconds()).padStart(2,'0')}`;
-    let text: string;
-    let filename: string;
-    let mime: string;
-    if (whitelistExportFormat === 'csv') {
-      // M30.157 A CSV 格式：手动引号转义防中文乱码，表头 key,addedAt
-      const esc = (s: string) => {
-        if (/["\n\r,]/.test(s)) {
-          return '"' + s.replace(/"/g, '""') + '"';
-        }
-        return s;
-      };
-      const rows = items.map((it) => `${esc(it.key)},${it.addedAt}`);
-      text = 'key,addedAt\n' + rows.join('\n');
-      filename = `polydb-risk-whitelist-${ts}.csv`;
-      mime = 'text/csv;charset=utf-8';
-    } else {
-      text = JSON.stringify({
-        version: 2,
-        exportedAt: new Date().toISOString(),
-        items,
-      }, null, 2);
-      filename = `polydb-risk-whitelist-${ts}.json`;
-      mime = 'application/json';
-    }
+    const { text, filename, mime } = buildRiskWhitelistExport(riskWhitelist, whitelistExportFormat);
     const blob = new Blob([text], { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -381,49 +318,27 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
     a.click();
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    setPresetManagerMsg({ kind: 'ok', text: `📦 已导出白名单 ${filename}（${items.length} 项 · ${text.length} 字符）` });
+    setPresetManagerMsg({ kind: 'ok', text: `📦 已导出白名单 ${filename}（${riskWhitelist.size} 项 · ${text.length} 字符）` });
   };
   const handleRiskWhitelistImport = async (file: File) => {
     try {
       const text = await file.text();
-      let parsed: { version?: number; exportedAt?: string; items?: unknown };
-      try {
-        parsed = JSON.parse(text);
-      } catch (e) {
-        setPresetManagerMsg({ kind: 'err', text: `❌ JSON 解析失败：${(e as Error).message}` });
+      const parsed = parseRiskWhitelistJson(text);
+      if (!parsed.ok) {
+        setPresetManagerMsg({ kind: 'err', text: parsed.error });
         return;
       }
-      if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.items)) {
-        setPresetManagerMsg({ kind: 'err', text: '❌ 文件结构无效：缺少 items 数组' });
-        return;
-      }
-      // 兼容 v1 (string[]) 与 v2 ({key, addedAt}[]) 两种 item 形态
-      const now = Date.now();
-      const incoming: Array<{ key: string; addedAt: number }> = [];
-      for (const x of parsed.items) {
-        if (typeof x === 'string') {
-          incoming.push({ key: x, addedAt: now });
-        } else if (x && typeof x === 'object' && typeof (x as { key?: unknown }).key === 'string') {
-          const k = (x as { key: string; addedAt?: unknown }).key;
-          const a = (x as { addedAt?: unknown }).addedAt;
-          incoming.push({ key: k, addedAt: typeof a === 'number' ? a : now });
-        }
-      }
-      if (incoming.length === 0) {
+      if (parsed.items.length === 0) {
         setPresetManagerMsg({ kind: 'err', text: '⚠ 导入文件 items 为空' });
         return;
       }
       setRiskWhitelist((prev) => {
-        const next = whitelistImportMode === 'replace' ? new Map<string, number>() : new Map(prev);
-        for (const { key, addedAt } of incoming) next.set(key, addedAt);
-        try {
-          const payload: WhitelistPersisted = { v: 2, items: Array.from(next, ([k, a]) => ({ key: k, addedAt: a })) };
-          localStorage.setItem('polydb.riskWhitelist.v1', JSON.stringify(payload));
-        } catch { /* ignore */ }
+        const next = mergeWhitelistItems(prev, parsed.items, whitelistImportMode);
+        persistRiskWhitelist(next);
         return next;
       });
       const verb = whitelistImportMode === 'replace' ? '覆盖' : '合并';
-      setPresetManagerMsg({ kind: 'ok', text: `📥 已${verb}白名单：导入 ${incoming.length} 项 · 当前 ${whitelistImportMode === 'replace' ? incoming.length : '见浮层'} 项` });
+      setPresetManagerMsg({ kind: 'ok', text: `📥 已${verb}白名单：导入 ${parsed.items.length} 项 · 当前 ${whitelistImportMode === 'replace' ? parsed.items.length : '见浮层'} 项` });
     } finally {
       if (whitelistFileRef.current) whitelistFileRef.current.value = '';
     }
@@ -433,73 +348,22 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
   const handleRiskWhitelistCsvImport = async (file: File) => {
     try {
       const text = await file.text();
-      const lines = text.split(/\r?\n/);
-      if (lines.length === 0) {
-        setPresetManagerMsg({ kind: 'err', text: '⚠ CSV 文件为空' });
+      const parsed = parseRiskWhitelistCsv(text);
+      if (!parsed.ok) {
+        setPresetManagerMsg({ kind: 'err', text: parsed.error });
         return;
       }
-      const parseLine = (line: string): string[] => {
-        const out: string[] = [];
-        let cur = '';
-        let inQuote = false;
-        for (let i = 0; i < line.length; i++) {
-          const ch = line[i];
-          if (inQuote) {
-            if (ch === '"') {
-              if (i + 1 < line.length && line[i + 1] === '"') { cur += '"'; i++; }
-              else inQuote = false;
-            } else cur += ch;
-          } else {
-            if (ch === '"') inQuote = true;
-            else if (ch === ',') { out.push(cur); cur = ''; }
-            else cur += ch;
-          }
-        }
-        out.push(cur);
-        return out;
-      };
-      // 首行是表头：识别 key / addedAt 列位置（大小写不敏感）
-      const header = parseLine(lines[0]).map((h) => h.trim().toLowerCase());
-      let keyIdx = header.indexOf('key');
-      let addedAtIdx = header.indexOf('addedAt');
-      let dataStart = 1;
-      // 无表头：假定顺序为 key,addedAt，第一行就是数据
-      if (keyIdx < 0) {
-        if (lines.length < 1) {
-          setPresetManagerMsg({ kind: 'err', text: '❌ CSV 缺少表头或缺少 key 列' });
-          return;
-        }
-        keyIdx = 0;
-        addedAtIdx = 1;
-        dataStart = 0;
-      }
-      const now = Date.now();
-      const incoming: Array<{ key: string; addedAt: number }> = [];
-      for (let li = dataStart; li < lines.length; li++) {
-        const raw = lines[li];
-        if (!raw.trim()) continue;
-        const cells = parseLine(raw);
-        const k = cells[keyIdx] ?? '';
-        if (!k) continue;
-        const aRaw = cells[addedAtIdx];
-        const a = aRaw ? Number(aRaw) : now;
-        incoming.push({ key: k, addedAt: Number.isFinite(a) && a > 0 ? a : now });
-      }
-      if (incoming.length === 0) {
+      if (parsed.items.length === 0) {
         setPresetManagerMsg({ kind: 'err', text: '⚠ CSV 无有效数据行' });
         return;
       }
       setRiskWhitelist((prev) => {
-        const next = whitelistImportMode === 'replace' ? new Map<string, number>() : new Map(prev);
-        for (const { key, addedAt } of incoming) next.set(key, addedAt);
-        try {
-          const payload: WhitelistPersisted = { v: 2, items: Array.from(next, ([k, a]) => ({ key: k, addedAt: a })) };
-          localStorage.setItem('polydb.riskWhitelist.v1', JSON.stringify(payload));
-        } catch { /* ignore */ }
+        const next = mergeWhitelistItems(prev, parsed.items, whitelistImportMode);
+        persistRiskWhitelist(next);
         return next;
       });
       const verb = whitelistImportMode === 'replace' ? '覆盖' : '合并';
-      setPresetManagerMsg({ kind: 'ok', text: `📥 已${verb}白名单（CSV）：导入 ${incoming.length} 项 · 当前 ${whitelistImportMode === 'replace' ? incoming.length : '见浮层'} 项` });
+      setPresetManagerMsg({ kind: 'ok', text: `📥 已${verb}白名单（CSV）：导入 ${parsed.items.length} 项 · 当前 ${whitelistImportMode === 'replace' ? parsed.items.length : '见浮层'} 项` });
     } catch (e) {
       setPresetManagerMsg({ kind: 'err', text: `❌ CSV 解析失败：${(e as Error).message}` });
     } finally {
@@ -2496,109 +2360,29 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
     const tgt = m?.targetColumn ? ` → ${m.targetColumn}` : '';
     return `${csvCol}${tgt}`;
   };
-  const recDiffItems = (
-    label: string,
-    aMap: Record<number, unknown>,
-    bMap: Record<number, unknown>,
-    fmt: (v: unknown) => string,
-  ): { field: string; before: string; after: string }[] => {
-    const out: { field: string; before: string; after: string }[] = [];
-    const keys = new Set<number>([...Object.keys(aMap).map(Number), ...Object.keys(bMap).map(Number)]);
-    for (const k of Array.from(keys).sort((x, y) => x - y)) {
-      const av = aMap[k] === undefined ? null : aMap[k];
-      const bv = bMap[k] === undefined ? null : bMap[k];
-      if (JSON.stringify(av) !== JSON.stringify(bv)) out.push({ field: `${label} ${colLabel(k)}`, before: fmt(av), after: fmt(bv) });
-    }
-    return out;
-  };
-  const buildUndoDiff = (a: ImportOptions, b: ImportOptions): { field: string; before: string; after: string }[] => {
-    const items: { field: string; before: string; after: string }[] = [];
-    if (a.mode !== b.mode) items.push({ field: '模式 mode', before: a.mode, after: b.mode });
-    if (a.strictValidation !== b.strictValidation) items.push({ field: '严格校验', before: boolLabel(a.strictValidation), after: boolLabel(b.strictValidation) });
-    if (a.emptyAsNull !== b.emptyAsNull) items.push({ field: '空串视为 null', before: boolLabel(a.emptyAsNull), after: boolLabel(b.emptyAsNull) });
-    if (a.batchSize !== b.batchSize) items.push({ field: '批大小', before: String(a.batchSize), after: String(b.batchSize) });
-    items.push(...recDiffItems('转换 transform', a.transforms ?? {}, b.transforms ?? {}, (v) => v === null ? '∅' : String(v)));
-    items.push(...recDiffItems('空值策略 nullPolicy', a.nullPolicies ?? {}, b.nullPolicies ?? {}, (v) => v === null ? 'null（默认）' : String(v)));
-    items.push(...recDiffItems('校验 validation', a.validations ?? {}, b.validations ?? {}, (v) => {
-      if (v === null) return '∅';
-      const vv = v as ColumnValidation;
-      const parts: string[] = [];
-      if (vv.required) parts.push('必填');
-      if (vv.regex) parts.push(`regex:${vv.regex.slice(0, 24)}`);
-      if (vv.minValue) parts.push(`≥${vv.minValue}`);
-      if (vv.maxValue) parts.push(`≤${vv.maxValue}`);
-      if (vv.enum) parts.push(`enum:[${vv.enum.slice(0, 40)}]`);
-      return parts.length > 0 ? parts.join(' · ') : '空';
-    }));
-    if (JSON.stringify(a.filterColumn) !== JSON.stringify(b.filterColumn) ||
-        JSON.stringify(a.filterOp) !== JSON.stringify(b.filterOp) ||
-        JSON.stringify(a.filterValue) !== JSON.stringify(b.filterValue)) {
-      const fa = a.filterColumn === null ? '∅' : `列#${a.filterColumn} ${a.filterOp} "${a.filterValue}"`;
-      const fb = b.filterColumn === null ? '∅' : `列#${b.filterColumn} ${b.filterOp} "${b.filterValue}"`;
-      items.push({ field: '行过滤', before: fa, after: fb });
-    }
-    return items;
-  };
+
+  const buildUndoDiff = (a: ImportOptions, b: ImportOptions) => buildUndoDiffLib(a, b, (i) => colLabel(i));
 
   // 分组策略：field 首 token 作为 groupKey
   // 「转换 transform ...」→「转换」；「空值策略 nullPolicy ...」→「空值策略」；「校验 validation ...」→「校验」
   // 其他 field 直接以自身为 groupKey（模式/严格校验/空串视为 null/批大小/行过滤）
-  const classifyDiffGroup = (field: string): string => {
-    const spaceIdx = field.indexOf(' ');
-    const head = spaceIdx > 0 ? field.slice(0, spaceIdx) : field;
-    return head;
-  };
+
 
   // 每组分色：按语义分配到色卡（未识别分组 fallback 到 muted）
 
   // 栈可视条按 fix 字段变化密度着色：density=1 淡（rgba 0.30），density>=4 饱和（rgba 0.95）
   // undo 段用红色 rgba(220,38,38,α)，redo 段用蓝色 rgba(59,130,246,α)
-  const densityAlpha = (n: number): number => {
-    if (n <= 0) return 0.30;
-    if (n >= 4) return 0.95;
-    return 0.30 + (n - 1) * 0.22;
-  };
 
-  // 分组：保留首次出现顺序
-  const groupDiffItems = (items: { field: string; before: string; after: string }[]):
-    { group: string; items: { field: string; before: string; after: string }[] }[] => {
-    const map = new Map<string, { field: string; before: string; after: string }[]>();
-    const order: string[] = [];
-    for (const it of items) {
-      const g = classifyDiffGroup(it.field);
-      if (!map.has(g)) { map.set(g, []); order.push(g); }
-      map.get(g)!.push(it);
-    }
-    return order.map((g) => ({ group: g, items: map.get(g)! }));
-  };
+
+
 
   // 搜索过滤：按 field/before/after 子串（默认不区分大小写；diffSearchCaseSensitive=true 时精确匹配）
   // 支持多关键字 OR 匹配：空白或 `|` 分隔，任一命中即保留（M30.32）
   // 支持作用域过滤（M30.33）：diffSearchScope='all|field|before|after'，非 all 时仅匹配对应字段
   // 副作用：命中分组的折叠态会被自动展开（下一次渲染时用户能看到匹配内容）
   const filterDiffGroups = (groups: { group: string; items: { field: string; before: string; after: string }[] }[]):
-    { group: string; items: { field: string; before: string; after: string }[] }[] => {
-    const qRaw = diffSearch.trim();
-    if (!qRaw) return groups;
-    const kws = splitDiffSearchKeywords(qRaw).map((k) => diffSearchCaseSensitive ? k : k.toLowerCase());
-    if (kws.length === 0) return groups;
-    const norm = (s: string) => diffSearchCaseSensitive ? s : s.toLowerCase();
-    const matchItem = (it: { field: string; before: string; after: string }): boolean => {
-      for (const k of kws) {
-        if (diffSearchScope === 'field' && norm(it.field).includes(k)) return true;
-        if (diffSearchScope === 'before' && norm(it.before).includes(k)) return true;
-        if (diffSearchScope === 'after' && norm(it.after).includes(k)) return true;
-        if (diffSearchScope === 'all' && (norm(it.field).includes(k) || norm(it.before).includes(k) || norm(it.after).includes(k))) return true;
-      }
-      return false;
-    };
-    const out: { group: string; items: { field: string; before: string; after: string }[] }[] = [];
-    for (const g of groups) {
-      const matchedItems = g.items.filter(matchItem);
-      if (matchedItems.length > 0) out.push({ group: g.group, items: matchedItems });
-    }
-    return out;
-  };
+    { group: string; items: { field: string; before: string; after: string }[] }[] =>
+    filterDiffGroupsLib(groups, { search: diffSearch, caseSensitive: diffSearchCaseSensitive, scope: diffSearchScope });
 
   // 命中时自动展开分组：只在搜索非空时生效，避免污染用户手动折叠的偏好
   useEffect(() => {
@@ -2677,46 +2461,10 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [diffHitCursor]);
 
-  const copyDiffSummary = async (items: { field: string; before: string; after: string }[], title?: string) => {
-    const lines = [
-      `# polydb 撤销预览 diff${title ? ' — ' + title : ''}`,
-      `> 方向：当前（✗） → 撤销后（✓）`,
-      `> 共 ${items.length} 项变化`,
-      ``,
-      ...items.map((it) => `- **${it.field}**: ${it.before} → ${it.after}`),
-    ];
-    const text = lines.join('\n');
-    try {
-      await navigator.clipboard.writeText(text);
-      publishEditorStatus({ message: `📋 已复制撤销 diff${title ? '（' + title + '）' : ''}（${items.length} 项变化，${text.length} 字符）`, messageAt: Date.now() });
-    } catch {
-      publishEditorStatus({ message: `撤销 diff 已生成（${text.length} 字符），但 clipboard 权限拒绝：请手动复制`, messageAt: Date.now() });
-    }
-  };
+
 
   // 按分组复制：分组标题作为二级标题，组内 items 缩进
-  const copyAllItems = async (items: { field: string; before: string; after: string }[]) => {
-    const groups = groupDiffItems(items);
-    const lines: string[] = [
-      '# polydb 撤销预览 diff（按分组）',
-      `> 方向：当前（✗） → 撤销后（✓）`,
-      `> 共 ${items.length} 项变化 / ${groups.length} 个分组`,
-      ``,
-    ];
-    for (const g of groups) {
-      lines.push(`## ${g.group} (${g.items.length})`);
-      lines.push('');
-      for (const it of g.items) lines.push(`- ${it.field}: ${it.before} → ${it.after}`);
-      lines.push('');
-    }
-    const text = lines.join('\n');
-    try {
-      await navigator.clipboard.writeText(text);
-      publishEditorStatus({ message: `📋 已按分组复制 diff（${items.length} 项 / ${groups.length} 组，${text.length} 字符）`, messageAt: Date.now() });
-    } catch {
-      publishEditorStatus({ message: `分组 diff 已生成（${text.length} 字符），但 clipboard 权限拒绝：请手动复制`, messageAt: Date.now() });
-    }
-  };
+
 
   // 导出所有已撤销修复的完整时间线到 Markdown 文件
   // 语义：redoStack[i].snapshot 是"应用 fix[i] 前"的状态，redoStack[i+1].snapshot 是"应用 fix[i] 后"的状态

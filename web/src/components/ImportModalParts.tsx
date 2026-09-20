@@ -36,10 +36,12 @@ export type DiffSearchScope = 'all' | 'field' | 'before' | 'after';
 // 导入失败行（原 ImportModal 局部 interface，上移供 Step4Preview 复用）
 export interface FailedRow { csvRow: number; reason: string; preview: string; stmtIdx: number; }
 // 删除预设的恢复快照（原 ImportModal 局部 state 形状）
-// 风险白名单持久化形状（M30.x，原 ImportModal 组件体内，上移供 PresetManager 与白名单回调共用）
-export type WhitelistEntry = { key: string; addedAt: number };
-export type WhitelistPersisted = { v: 2; items: WhitelistEntry[] };
-export const WHITELIST_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 天
+// 风险白名单持久化（M30.x）：权威定义在 lib/riskWhitelist，此处 re-export 兼容旧导入路径；
+// PresetManager 体直接引用，故同时保留本地 import 绑定
+export { WHITELIST_TTL_MS } from '../lib/riskWhitelist';
+export type { WhitelistEntry, WhitelistPersisted } from '../lib/riskWhitelist';
+import { WHITELIST_TTL_MS } from '../lib/riskWhitelist';
+import type { WhitelistPersisted } from '../lib/riskWhitelist';
 // M30.159 D 备份应用后变更清单：按分组记录本次 apply 的项 key，供 banner 数字点击展开明细浮层
 export interface BackupAppliedDetail {
   presetsAdded: string[];
