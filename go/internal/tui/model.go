@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/polydb/polydb/pkg/protocol"
 	"github.com/polydb/polydb/pkg/transport"
@@ -18,6 +19,7 @@ const (
 	viewTables
 	viewTable
 	viewQuery
+	viewKV
 )
 
 var viewTitles = map[view]string{
@@ -26,6 +28,7 @@ var viewTitles = map[view]string{
 	viewTables: "库表结构",
 	viewTable:  "表详情",
 	viewQuery:  "查询",
+	viewKV:     "Redis 键",
 }
 
 type model struct {
@@ -65,6 +68,21 @@ type model struct {
 	acSchema     string // 候选所属 schema（用于列补全上下文）
 	acTable      string // 当前候选对应的表（列补全结果）
 	acColumns    []protocol.ColumnInfo
+
+	// Redis KV（M6 前端 Redis 模式；redis 连接走 viewKV，不进库表/查询流）。
+	kvDB       int
+	kvPattern  string
+	kvKeys     []protocol.RedisKeyInfo
+	kvCur      int
+	kvPageCur  uint64
+	kvValue    protocol.RedisValue
+	kvValueKey string
+	kvValueErr error
+	kvReply    *protocol.RedisReply
+	kvFilter   textinput.Model
+	kvFilterOn bool
+	kvCmd      textinput.Model
+	kvCmdOn    bool
 }
 
 func New(app transport.Client) *model {
@@ -72,12 +90,19 @@ func New(app transport.Client) *model {
 	ta.Placeholder = "输入 SQL（F5 执行）…"
 	ta.ShowLineNumbers = true
 	ta.SetHeight(6)
-	return &model{
+	filter := textinput.New()
+	filter.Placeholder = "键模式（* 或 user:*）"
+	km := textinput.New()
+	km.Placeholder = "Redis 命令（GET user:1 / EXPIRE user:1 60 …）"
+	m := &model{
 		app:        app,
 		view:       viewConns,
 		connStatus: make(map[string]*protocol.ConnectionStatus),
 		queryInput: ta,
+		kvFilter:   filter,
+		kvCmd:      km,
 	}
+	return m
 }
 
 func (m *model) Init() tea.Cmd {
@@ -204,6 +229,66 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.acCandidates = cands
 		m.acIdx = 0
 		return m, nil
+	case kvScanMsg:
+		m.busy = ""
+		if msg.err != nil {
+			m.status = "打开连接或扫描失败: " + msg.err.Error()
+			return m, nil
+		}
+		if msg.reset {
+			m.kvKeys = msg.page.Keys
+		} else {
+			m.kvKeys = append(m.kvKeys, msg.page.Keys...)
+		}
+		m.kvPageCur = msg.page.Cursor
+		m.kvPattern = msg.pattern
+		if len(m.kvKeys) == 0 {
+			m.kvCur = 0
+		}
+		if m.kvCur >= len(m.kvKeys) {
+			m.kvCur = len(m.kvKeys) - 1
+		}
+		m.kvValueKey = ""
+		m.kvValueErr = nil
+		m.kvFilter.SetValue(msg.pattern)
+		m.kvFilterOn = false
+		m.kvFilter.Blur()
+		m.view = viewKV
+		return m, nil
+	case kvValueMsg:
+		m.busy = ""
+		if msg.err != nil {
+			m.kvValueErr = msg.err
+			m.kvValue = protocol.RedisValue{}
+		} else {
+			m.kvValueErr = nil
+			m.kvValue = msg.val
+			m.kvValueKey = msg.key
+		}
+		return m, nil
+	case kvExecMsg:
+		m.busy = ""
+		m.kvCmdOn = false
+		m.kvCmd.Blur()
+		if msg.err != nil {
+			m.kvReply = nil
+			m.status = "命令失败: " + msg.err.Error()
+		} else {
+			m.kvReply = msg.reply
+		}
+		return m, nil
+	case kvDBMsg:
+		m.busy = ""
+		if msg.err != nil {
+			m.status = "切换 db 失败: " + msg.err.Error()
+			return m, nil
+		}
+		m.kvDB = msg.index
+		m.kvValueKey = ""
+		m.kvValueErr = nil
+		m.kvReply = nil
+		m.busy = "扫描键 …"
+		return m, scanCmd(m.app, m.selectedID, m.kvPattern, 0, true)
 	}
 	return m, nil
 }
@@ -233,6 +318,8 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.tableKey(msg)
 	case viewQuery:
 		return m.queryKey(msg)
+	case viewKV:
+		return m.kvKey(msg)
 	}
 	return m, nil
 }
@@ -257,6 +344,9 @@ func (m *model) connsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(m.conns) > 0 {
 			c := m.conns[m.connCursor]
 			m.busy = "连接中 " + c.Name + " …"
+			if c.Kind == protocol.DatabaseKindRedis {
+				return m, kvOpenCmd(m.app, c.ID)
+			}
 			return m, openConnCmd(m.app, c.ID)
 		}
 	case tea.KeyRunes:
@@ -625,6 +715,304 @@ func (m *model) runQuery() (tea.Model, tea.Cmd) {
 	return m, queryCmd(m.app, m.selectedID, sql)
 }
 
+// ─── Redis KV 视图 ──────────────────────────────────────────
+
+func (m *model) kvKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// 输入子模式：/ 键模式过滤、c 命令输入，其余键路由给焦点输入框。
+	if m.kvFilterOn {
+		var cmd tea.Cmd
+		m.kvFilter, cmd = m.kvFilter.Update(msg)
+		switch msg.Type {
+		case tea.KeyEnter:
+			pat := strings.TrimSpace(m.kvFilter.Value())
+			if pat == "" {
+				pat = "*"
+			}
+			m.kvFilterOn = false
+			m.kvFilter.Blur()
+			m.kvValueKey = ""
+			m.kvValueErr = nil
+			m.busy = "扫描键 …"
+			return m, scanCmd(m.app, m.selectedID, pat, 0, true)
+		case tea.KeyEsc:
+			m.kvFilterOn = false
+			m.kvFilter.Blur()
+			return m, nil
+		}
+		return m, cmd
+	}
+	if m.kvCmdOn {
+		var cmd tea.Cmd
+		m.kvCmd, cmd = m.kvCmd.Update(msg)
+		switch msg.Type {
+		case tea.KeyEnter:
+			return m.kvRunCommand()
+		case tea.KeyEsc:
+			m.kvCmdOn = false
+			m.kvCmd.Blur()
+			return m, nil
+		}
+		return m, cmd
+	}
+	switch msg.Type {
+	case tea.KeyCtrlC:
+		m.quit = true
+		return m, tea.Quit
+	case tea.KeyEsc, tea.KeyBackspace:
+		m.view = viewConns
+		m.status = ""
+		return m, nil
+	case tea.KeyUp:
+		if m.kvCur > 0 {
+			m.kvCur--
+		}
+	case tea.KeyDown:
+		if m.kvCur < len(m.kvKeys)-1 {
+			m.kvCur++
+		}
+	case tea.KeyEnter:
+		if len(m.kvKeys) > 0 {
+			ki := m.kvKeys[m.kvCur]
+			m.kvValueKey = ki.Key
+			m.kvValue = protocol.RedisValue{}
+			m.kvValueErr = nil
+			m.busy = "加载值 …"
+			return m, kvValueCmd(m.app, m.selectedID, ki.Key)
+		}
+	case tea.KeyRunes:
+		switch string(msg.Runes) {
+		case "k":
+			if m.kvCur > 0 {
+				m.kvCur--
+			}
+		case "j":
+			if m.kvCur < len(m.kvKeys)-1 {
+				m.kvCur++
+			}
+		case "/":
+			m.kvFilter.SetValue(m.kvPattern)
+			m.kvFilter.CursorEnd()
+			m.kvFilter.Focus()
+			m.kvFilterOn = true
+			return m, nil
+		case "r":
+			m.kvValueKey = ""
+			m.kvValueErr = nil
+			m.kvReply = nil
+			m.busy = "刷新 …"
+			return m, scanCmd(m.app, m.selectedID, m.kvPattern, 0, true)
+		case "g":
+			if m.kvPageCur != 0 {
+				m.busy = "加载下一页 …"
+				return m, scanCmd(m.app, m.selectedID, m.kvPattern, m.kvPageCur, false)
+			}
+		case "b":
+			next := (m.kvDB + 1) % 16
+			m.busy = "切换 db " + fmt.Sprint(next) + " …"
+			return m, kvSelectDbCmd(m.app, m.selectedID, next)
+		case "c":
+			m.kvCmd.Focus()
+			m.kvCmdOn = true
+			return m, nil
+		case "q":
+			m.view = viewConns
+			m.status = ""
+			return m, nil
+		}
+	}
+	return m, nil
+}
+
+// kvRunCommand 解析命令并下发 ExecCommand（引号拆分与 Web 端 splitArgs 一致）。
+func (m *model) kvRunCommand() (tea.Model, tea.Cmd) {
+	raw := strings.TrimSpace(m.kvCmd.Value())
+	if raw == "" {
+		m.status = "命令为空"
+		return m, nil
+	}
+	args := splitArgs(raw)
+	m.kvCmd.SetValue("")
+	m.kvReply = nil
+	m.busy = "执行中 …"
+	return m, kvExecCmd(m.app, m.selectedID, args)
+}
+
+func (m *model) kvView() string {
+	var b strings.Builder
+	header := fmt.Sprintf("db %d · 模式 %s", m.kvDB, m.kvPattern)
+	if m.kvPageCur != 0 {
+		header += " · 有剩余键（g）"
+	}
+	b.WriteString(header + "\n")
+	if len(m.kvKeys) == 0 {
+		if m.busy != "" {
+			b.WriteString("加载中 …\n")
+		} else {
+			b.WriteString("（无键，按 / 输入模式或 c 执行命令）\n")
+		}
+	}
+	maxRows := max(5, m.height-16)
+	start := min(max(m.kvCur-maxRows/2, 0), max(len(m.kvKeys)-maxRows, 0))
+	end := min(start+maxRows, len(m.kvKeys))
+	for i := start; i < end; i++ {
+		ki := m.kvKeys[i]
+		marker := "  "
+		if i == m.kvCur {
+			marker = "▸ "
+		}
+		line := marker + truncate(ki.Key, 36) + "  [" + string(ki.Type) + "]"
+		if ki.TTL != nil && *ki.TTL > 0 {
+			line += fmt.Sprintf("  ttl:%d", *ki.TTL)
+		}
+		if i == m.kvCur {
+			line = "\x1b[7m" + line + "\x1b[0m"
+		}
+		b.WriteString(line + "\n")
+	}
+	if len(m.kvKeys) > maxRows {
+		fmt.Fprintf(&b, "… 显示 %d-%d / %d 键\n", start+1, end, len(m.kvKeys))
+	}
+	if m.kvValueKey != "" {
+		b.WriteString("\n")
+		if m.kvValueErr != nil {
+			b.WriteString("值加载失败: \x1b[31m" + m.kvValueErr.Error() + "\x1b[0m\n")
+		} else {
+			b.WriteString("键 " + truncate(m.kvValueKey, 40) + " (" + string(m.kvValue.Type) + "):\n")
+			b.WriteString(kvValueText(m.kvValue, max(3, m.height-24)) + "\n")
+		}
+	}
+	b.WriteString("\n")
+	if m.kvReply != nil {
+		b.WriteString("上次回复: " + redisReplyText(m.kvReply) + "\n")
+	}
+	if m.kvCmdOn {
+		b.WriteString("> " + m.kvCmd.View() + "\n")
+	} else {
+		b.WriteString("> 按 c 输入 Redis 命令\n")
+	}
+	return b.String()
+}
+
+// kvValueText 按类型渲染键值（与 Web 端 ValueView 对齐；超行数截断）。
+func kvValueText(v protocol.RedisValue, maxLines int) string {
+	var lines []string
+	switch v.Type {
+	case protocol.RedisKeyTypeString, protocol.RedisKeyTypeStream:
+		lines = append(lines, strings.Split(fmt.Sprint(v.Value), "\n")...)
+	case protocol.RedisKeyTypeList, protocol.RedisKeyTypeSet:
+		items, _ := v.Value.([]string)
+		if len(items) == 0 {
+			lines = []string{"（空）"}
+		}
+		for i, it := range items {
+			lines = append(lines, fmt.Sprintf("%d) %s", i+1, it))
+		}
+	case protocol.RedisKeyTypeZSet:
+		items, _ := v.Value.([]protocol.RedisZSetMember)
+		for _, mem := range items {
+			lines = append(lines, fmt.Sprintf("%s  (%.6g)", mem.Member, mem.Score))
+		}
+	case protocol.RedisKeyTypeHash:
+		mm, _ := v.Value.(map[string]string)
+		for k, val := range mm {
+			lines = append(lines, k+" = "+val)
+		}
+	default:
+		lines = []string{"(nil)"}
+	}
+	for i, l := range lines {
+		if i >= maxLines {
+			total := len(lines)
+			lines = lines[:maxLines]
+			lines = append(lines, fmt.Sprintf("… 仅显示前 %d / %d 项", maxLines, total))
+			break
+		}
+		lines[i] = "  " + truncate(l, 60)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// redisReplyText 渲染命令回复（与 Web 端 ReplyView 对齐）。
+func redisReplyText(r *protocol.RedisReply) string {
+	switch r.Type {
+	case protocol.RedisReplyNull:
+		return "(nil)"
+	case protocol.RedisReplyInteger:
+		return fmt.Sprint(r.Value)
+	case protocol.RedisReplyError:
+		return "ERR " + fmt.Sprint(r.Value)
+	case protocol.RedisReplySimpleString:
+		return fmt.Sprint(r.Value)
+	case protocol.RedisReplyBulkString:
+		return fmt.Sprintf("%q", fmt.Sprint(r.Value))
+	case protocol.RedisReplyArray:
+		sub, _ := r.Value.([]protocol.RedisReply)
+		return redisReplyArrayText(sub, 0)
+	}
+	return "?"
+}
+
+func redisReplyArrayText(items []protocol.RedisReply, depth int) string {
+	if len(items) == 0 {
+		return "(空数组)"
+	}
+	indent := strings.Repeat("  ", depth+1)
+	var b strings.Builder
+	for i, it := range items {
+		if i >= 32 {
+			fmt.Fprintf(&b, "%s…\n", indent)
+			break
+		}
+		switch it.Type {
+		case protocol.RedisReplyArray:
+			sub, _ := it.Value.([]protocol.RedisReply)
+			fmt.Fprintf(&b, "%s%d) [array %d]\n", indent, i+1, len(sub))
+			b.WriteString(redisReplyArrayText(sub, depth+1))
+		case protocol.RedisReplyNull:
+			fmt.Fprintf(&b, "%s%d) (nil)\n", indent, i+1)
+		case protocol.RedisReplyError:
+			fmt.Fprintf(&b, "%s%d) ERR %v\n", indent, i+1, it.Value)
+		default:
+			fmt.Fprintf(&b, "%s%d) %v\n", indent, i+1, it.Value)
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// splitArgs 把命令行拆为参数（支持单双引号与反斜杠转义），与 Web 端 splitArgs 行为一致。
+func splitArgs(input string) []string {
+	var args []string
+	cur := ""
+	quote := byte(0)
+	for i := 0; i < len(input); i++ {
+		ch := input[i]
+		switch {
+		case quote != 0:
+			if ch == quote {
+				quote = 0
+			} else if ch == '\\' && i+1 < len(input) && (input[i+1] == quote || input[i+1] == '\\') {
+				cur += string(input[i+1])
+				i++
+			} else {
+				cur += string(ch)
+			}
+		case ch == '"' || ch == '\'':
+			quote = ch
+		case ch == ' ' || ch == '\t':
+			if cur != "" {
+				args = append(args, cur)
+				cur = ""
+			}
+		default:
+			cur += string(ch)
+		}
+	}
+	if cur != "" {
+		args = append(args, cur)
+	}
+	return args
+}
+
 // ─── View ───────────────────────────────────────────────────
 
 func (m *model) View() string {
@@ -643,6 +1031,8 @@ func (m *model) View() string {
 		body = m.tableView()
 	case viewQuery:
 		body = m.queryView()
+	case viewKV:
+		body = m.kvView()
 	}
 	return m.frame(body)
 }
@@ -682,6 +1072,14 @@ func (m *model) footer() string {
 			return "↑/↓ 选择 · Enter 接受 · Esc 关闭 · F5 执行"
 		}
 		return "Tab 补全表/列 · F5 / Ctrl+E 执行 · Esc 返回"
+	case viewKV:
+		if m.kvFilterOn {
+			return "输入模式 · Enter 应用 · Esc 取消"
+		}
+		if m.kvCmdOn {
+			return "输入命令 · Enter 执行 · Esc 返回列表"
+		}
+		return "↑/↓ 键 · Enter 值 · / 过滤 · g 更多 · b 换db · c 命令 · r 刷新 · Esc 返回"
 	}
 	return ""
 }

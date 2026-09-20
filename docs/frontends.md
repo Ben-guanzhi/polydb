@@ -27,6 +27,9 @@ polydb 有多个前端，均遵守 AGENTS.md 铁律：**只经 `app-core`（进�
   - 新建表单：`Tab`/`↑↓` 切换字段，`←/→` 切换类型，`Enter` 提交，`Esc` 返回
   - 库表浏览：`Enter` 表详情，`s` 切换 schema，`q` 查询，`Esc` 返回
   - 查询：多行输入，`F5`/`Ctrl+E` 执行，`Esc` 返回
+  - Redis 键（redis 连接 `Enter` 后进入，M6 前端 Redis 模式在 TUI 闭环）：
+    `↑/↓`/`j/k` 选键，`Enter` 看值，`/` 键模式过滤（`Enter` 应用、`Esc` 取消），`g` 加载下一页，
+    `b` 循环切换 db 0–15，`c` 命令输入（`Enter` 执行、`Esc` 返回），`r` 刷新，`Esc` 返回列表
 - 注意：打开连接时若已连接则跳过 `Connect`（`IsConnected` 判断），否则重复 Connect 会重开驱动导致 `:memory:` 会话数据丢失
 
 ## GUI（M1 扩展，Rust + GPUI）

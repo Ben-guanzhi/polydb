@@ -80,3 +80,25 @@ func (l *Local) CreateTableSQL(ctx context.Context, id, schema, table string) (s
 func (l *Local) Execute(ctx context.Context, id, sql string, args ...protocol.Value) (*protocol.QueryResult, error) {
 	return l.app.Execute(ctx, id, sql, args...)
 }
+
+// ─── Redis KV ───────────────────────────────────────────────
+
+func (l *Local) SelectDB(ctx context.Context, id string, index int) error {
+	return l.app.SelectDB(ctx, id, index)
+}
+
+func (l *Local) ScanKeys(ctx context.Context, id string, cursor uint64, pattern string, count int) (*protocol.RedisScanPage, error) {
+	return l.app.ScanKeys(ctx, id, cursor, pattern, count)
+}
+
+func (l *Local) GetValue(ctx context.Context, id, key string) (protocol.RedisValue, error) {
+	return l.app.GetValue(ctx, id, key)
+}
+
+func (l *Local) SetValue(ctx context.Context, id, key string, value protocol.RedisValue) error {
+	return l.app.SetValue(ctx, id, key, value)
+}
+
+func (l *Local) ExecCommand(ctx context.Context, id string, args []string) (protocol.RedisReply, error) {
+	return l.app.ExecCommand(ctx, id, args)
+}

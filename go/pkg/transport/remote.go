@@ -246,3 +246,42 @@ func (r *Remote) Execute(ctx context.Context, id, sql string, args ...protocol.V
 	}
 	return &out, nil
 }
+
+// ─── Redis KV ──────────────────────────────────────────────
+
+func (r *Remote) SelectDB(ctx context.Context, id string, index int) error {
+	req := protocol.RedisSelectDbRequest{Index: index}
+	return r.do(http.MethodPost, "/api/connections/"+url.PathEscape(id)+"/kv/select", &req, nil)
+}
+
+func (r *Remote) ScanKeys(ctx context.Context, id string, cursor uint64, pattern string, count int) (*protocol.RedisScanPage, error) {
+	req := protocol.RedisScanRequest{Cursor: cursor, Pattern: pattern, Count: count}
+	var out protocol.RedisScanPage
+	if err := r.do(http.MethodPost, "/api/connections/"+url.PathEscape(id)+"/kv/scan", &req, &out); err != nil {
+		return nil, err
+	}
+	if out.Keys == nil {
+		out.Keys = []protocol.RedisKeyInfo{}
+	}
+	return &out, nil
+}
+
+func (r *Remote) GetValue(ctx context.Context, id, key string) (protocol.RedisValue, error) {
+	var out protocol.RedisValue
+	err := r.do(http.MethodGet, "/api/connections/"+url.PathEscape(id)+"/kv/keys/"+url.PathEscape(key), nil, &out)
+	return out, err
+}
+
+func (r *Remote) SetValue(ctx context.Context, id, key string, value protocol.RedisValue) error {
+	req := protocol.RedisSetRequest{Key: key, Value: value}
+	return r.do(http.MethodPut, "/api/connections/"+url.PathEscape(id)+"/kv/keys/"+url.PathEscape(key), &req, nil)
+}
+
+func (r *Remote) ExecCommand(ctx context.Context, id string, args []string) (protocol.RedisReply, error) {
+	req := protocol.RedisExecCommandRequest{Args: args}
+	var out protocol.RedisReply
+	if err := r.do(http.MethodPost, "/api/connections/"+url.PathEscape(id)+"/kv/exec", &req, &out); err != nil {
+		return protocol.RedisReply{}, err
+	}
+	return out, nil
+}

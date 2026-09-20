@@ -411,3 +411,139 @@ func TestProgramSmoke(t *testing.T) {
 		t.Fatal("program did not exit")
 	}
 }
+
+// ─── Redis KV 视图（M6）────────────────────────────────────
+
+func TestSplitArgs(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"GET user:1", []string{"GET", "user:1"}},
+		{`SET k "a b c"`, []string{"SET", "k", "a b c"}},
+		{`EXPIRE 'k' 60`, []string{"EXPIRE", "k", "60"}},
+		{`  HSET h  f1  v1  `, []string{"HSET", "h", "f1", "v1"}},
+		{``, []string{}},
+		{"a\\ b", []string{"a\\", "b"}},
+		// 引号内反斜杠转义
+		{`SET k "a\"b"`, []string{"SET", "k", `a"b`}},
+	}
+	for _, c := range cases {
+		got := splitArgs(c.in)
+		if len(got) != len(c.want) {
+			t.Errorf("splitArgs(%q) = %v, want %v", c.in, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("splitArgs(%q)[%d] = %q, want %q", c.in, i, got[i], c.want[i])
+			}
+		}
+	}
+}
+
+func TestKVValueText(t *testing.T) {
+	str := protocol.RedisValue{Type: protocol.RedisKeyTypeString, Value: "hello"}
+	if got := kvValueText(str, 10); got != "  hello" {
+		t.Errorf("string value = %q", got)
+	}
+	li := protocol.RedisValue{Type: protocol.RedisKeyTypeList, Value: []string{"a", "b"}}
+	if got := kvValueText(li, 10); !strings.Contains(got, "1) a") || !strings.Contains(got, "2) b") {
+		t.Errorf("list value = %q", got)
+	}
+	zs := protocol.RedisValue{Type: protocol.RedisKeyTypeZSet, Value: []protocol.RedisZSetMember{{Member: "m", Score: 1.5}}}
+	if got := kvValueText(zs, 10); !strings.Contains(got, "m") || !strings.Contains(got, "1.5") {
+		t.Errorf("zset value = %q", got)
+	}
+	h := protocol.RedisValue{Type: protocol.RedisKeyTypeHash, Value: map[string]string{"f": "v"}}
+	if got := kvValueText(h, 10); !strings.Contains(got, "f = v") {
+		t.Errorf("hash value = %q", got)
+	}
+	// 截断
+	many := protocol.RedisValue{Type: protocol.RedisKeyTypeList, Value: []string{"a", "b", "c", "d"}}
+	if got := kvValueText(many, 2); !strings.Contains(got, "仅显示前 2 / 4 项") {
+		t.Errorf("truncation hint missing: %q", got)
+	}
+}
+
+func TestRedisReplyText(t *testing.T) {
+	null := protocol.RedisReply{Type: protocol.RedisReplyNull}
+	if got := redisReplyText(&null); got != "(nil)" {
+		t.Errorf("null = %q", got)
+	}
+	er := protocol.RedisReply{Type: protocol.RedisReplyError, Value: "ERR no such key"}
+	if got := redisReplyText(&er); got != "ERR ERR no such key" {
+		t.Errorf("error = %q", got)
+	}
+	ikv := protocol.RedisReply{Type: protocol.RedisReplyInteger, Value: 42}
+	if got := redisReplyText(&ikv); got != "42" {
+		t.Errorf("integer = %q", got)
+	}
+	arr := protocol.RedisReply{Type: protocol.RedisReplyArray, Value: []protocol.RedisReply{
+		{Type: protocol.RedisReplyBulkString, Value: "x"},
+	}}
+	if got := redisReplyText(&arr); !strings.Contains(got, "1) x") {
+		t.Errorf("array = %q", got)
+	}
+}
+
+// TestKVViewNavigation 验证 Redis KV 视图的键导航状态机（直接灌入键列表）。
+func TestKVViewNavigation(t *testing.T) {
+	app, _ := setupApp(t)
+	m := New(transport.NewLocal(app))
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	mm := md(m)
+	mm.view = viewKV
+	mm.selectedID = "fake-redis"
+	mm.kvPattern = "*"
+	mm.kvKeys = []protocol.RedisKeyInfo{
+		{Key: "a", Type: protocol.RedisKeyTypeString},
+		{Key: "b", Type: protocol.RedisKeyTypeHash},
+	}
+	// j / ↓ 前进
+	mm.kvKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if mm.kvCur != 1 {
+		t.Fatalf("after j: kvCur=%d, want 1", mm.kvCur)
+	}
+	mm.kvKey(tea.KeyMsg{Type: tea.KeyDown})
+	if mm.kvCur != 1 {
+		t.Fatalf("down at end should clamp: kvCur=%d", mm.kvCur)
+	}
+	// k / ↑ 后退
+	mm.kvKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	if mm.kvCur != 0 {
+		t.Fatalf("after k: kvCur=%d, want 0", mm.kvCur)
+	}
+	// / 打开过滤输入
+	mm.kvKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	if !mm.kvFilterOn {
+		t.Fatalf("/ should open filter input")
+	}
+	// Esc 关闭过滤
+	mm.kvKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if mm.kvFilterOn {
+		t.Fatalf("esc should close filter")
+	}
+	// c 打开命令输入
+	mm.kvKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	if !mm.kvCmdOn {
+		t.Fatalf("c should open command input")
+	}
+	// Esc 回到连接列表
+	mm.kvKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if mm.kvCmdOn {
+		t.Fatalf("esc in cmd input should close it")
+	}
+	// 再次进入后 Esc 退出视图
+	mm.kvKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	mm.kvCmdOn = false
+	mm.kvKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if mm.view != viewConns {
+		t.Fatalf("esc from kv list should return to viewConns, got %v", mm.view)
+	}
+	// 渲染冒烟
+	mm.view = viewKV
+	if v := mm.View(); !strings.Contains(v, "db 0") || !strings.Contains(v, "a") || !strings.Contains(v, "b") {
+		t.Fatalf("kv view missing content:\n%s", v)
+	}
+}

@@ -51,6 +51,25 @@ type (
 		columns []protocol.ColumnInfo
 		err     error
 	}
+	kvScanMsg struct {
+		pattern string
+		page    *protocol.RedisScanPage
+		reset   bool
+		err     error
+	}
+	kvValueMsg struct {
+		key string
+		val protocol.RedisValue
+		err error
+	}
+	kvExecMsg struct {
+		reply *protocol.RedisReply
+		err   error
+	}
+	kvDBMsg struct {
+		index int
+		err   error
+	}
 )
 
 // tableDetail 聚合一张表的列、索引、外键与 DDL。
@@ -156,5 +175,50 @@ func queryCmd(a transport.Client, id, sql string) tea.Cmd {
 		start := time.Now()
 		res, err := a.Execute(context.Background(), id, sql)
 		return queryMsg{res: res, err: err, elapsed: time.Since(start)}
+	}
+}
+
+// ─── Redis KV（M6 前端 Redis 模式）────────────────────────
+
+// kvOpenCmd 打开 Redis 连接并首扫键（Enter 于 redis 连接时触发）。
+func kvOpenCmd(a transport.Client, id string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		if !a.IsConnected(id) {
+			if err := a.Connect(ctx, id); err != nil {
+				return kvScanMsg{err: err}
+			}
+		}
+		page, err := a.ScanKeys(ctx, id, 0, "*", 200)
+		return kvScanMsg{pattern: "*", page: page, reset: true, err: err}
+	}
+}
+
+// scanCmd 按 pattern/cursor 扫描一页键。reset=true 替换列表，false 追加。
+func scanCmd(a transport.Client, id, pattern string, cursor uint64, reset bool) tea.Cmd {
+	return func() tea.Msg {
+		page, err := a.ScanKeys(context.Background(), id, cursor, pattern, 200)
+		return kvScanMsg{pattern: pattern, page: page, reset: reset, err: err}
+	}
+}
+
+func kvValueCmd(a transport.Client, id, key string) tea.Cmd {
+	return func() tea.Msg {
+		v, err := a.GetValue(context.Background(), id, key)
+		return kvValueMsg{key: key, val: v, err: err}
+	}
+}
+
+func kvExecCmd(a transport.Client, id string, args []string) tea.Cmd {
+	return func() tea.Msg {
+		reply, err := a.ExecCommand(context.Background(), id, args)
+		return kvExecMsg{reply: &reply, err: err}
+	}
+}
+
+func kvSelectDbCmd(a transport.Client, id string, index int) tea.Cmd {
+	return func() tea.Msg {
+		err := a.SelectDB(context.Background(), id, index)
+		return kvDBMsg{index: index, err: err}
 	}
 }
