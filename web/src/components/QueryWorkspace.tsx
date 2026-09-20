@@ -13,12 +13,14 @@ import { addStat, hashSql, loadStats, summarize } from '../lib/runStats';
 import { registerCommand } from '../lib/commandRegistry';
 import { publishEditorStatus, clearEditorStatus } from '../lib/statusBus';
 import { loadSettings } from '../lib/settings';
+import { loadAiSettings, saveAiSettings, type AiSettings } from '../lib/aiSettings';
 import { startDragResize } from '../lib/dragResize';
 import { splitSql, countParams as countSqlParams } from '../lib/sqlSplit';
 import { lintSql, severityLabel, SEV_NUM, type LintResult } from '../lib/sqlLint';
 import { TEMPLATES, filterTemplates, renderTemplate, type SqlTemplate, type TemplateContext } from '../lib/sqlTemplates';
 import { loadCustomTemplates, saveCustomTemplates, toSqlTemplate, type CustomTemplate, default as CustomTemplatesModal } from '../lib/customTemplates';
 import ImportModal from './ImportModal';
+import AIPanel from './AIPanel';
 import type { ParamItem, ParamType } from '../lib/tabStore';
 import { genId, loadTabState, nextTabTitle, saveTabState, type EditorTab } from '../lib/tabStore';
 import CollapsiblePane from './CollapsiblePane';
@@ -438,6 +440,10 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
   const [batchOpen, setBatchOpen] = useState(false);
   const [batchEdit, setBatchEdit] = useState<{ col: number; value: string; isNull: boolean; isExpr: boolean } | null>(null);
   const [batchBusy, setBatchBusy] = useState(false);
+  // M17：BYOK AI 助手（密钥仅存浏览器，不经过服务端）
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiSettings, setAiSettings] = useState<AiSettings>(() => loadAiSettings());
+  const [connKind, setConnKind] = useState<import('../api').DatabaseKind | null>(null);
   // 事务化批量编辑：pending 事务信息 + 每行的旧值快照（用于回滚时恢复内存网格）
   const [pendingTx, setPendingTx] = useState<{
     txId: string;
@@ -489,9 +495,11 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
     connIdRef.current = connId;
     setSqlCompletionConnId(connId);
     let cancelled = false;
-    void api.getConnection(connId).then((c) => { if (!cancelled) connKindRef.current = c.kind; }).catch(() => {});
-    return () => { cancelled = true; setSqlCompletionConnId(null); connKindRef.current = null; };
+    void api.getConnection(connId).then((c) => { if (!cancelled) { connKindRef.current = c.kind; setConnKind(c.kind); } }).catch(() => {});
+    return () => { cancelled = true; setSqlCompletionConnId(null); connKindRef.current = null; setConnKind(null); };
   }, [connId]);
+
+  useEffect(() => { saveAiSettings(aiSettings); }, [aiSettings]);
 
   useEffect(() => { histIdxRef.current = histIdx; }, [histIdx]);
   useEffect(() => { historyRef.current = history; }, [history]);
@@ -2095,6 +2103,15 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
           <span aria-hidden="true" style={{ fontSize: 12 }}>📥</span>
           <span>导入</span>
         </button>
+        <button
+          onClick={() => setAiOpen((v) => !v)}
+          title="AI 助手（BYOK：密钥仅存浏览器，直连 OpenAI 兼容端点）"
+          className={aiOpen ? 'primary' : ''}
+          disabled={connKind === 'redis'}
+        >
+          <span aria-hidden="true" style={{ fontSize: 12 }}>🤖</span>
+          <span>AI</span>
+        </button>
         {contextLabel && onClearContext && (
           <button onClick={onClearContext} title="清除上下文，回到自由 SQL">
             <span style={{ fontWeight: 600, marginRight: 2 }}>×</span>
@@ -2102,6 +2119,39 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
           </button>
         )}
       </div>
+      {aiOpen && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 4px)',
+            right: 0,
+            width: 420,
+            maxWidth: '90vw',
+            maxHeight: 560,
+            overflow: 'auto',
+            zIndex: 40,
+            border: '1px solid var(--border)',
+            borderRadius: 6,
+            background: 'var(--bg-elev, var(--panel))',
+            boxShadow: '0 8px 24px rgba(0,0,0,0.25)',
+            padding: 10,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+            <span style={{ fontWeight: 700, fontSize: 12 }}>🤖 AI 助手</span>
+            <button className="btn-ico" onClick={() => setAiOpen(false)} title="关闭">×</button>
+          </div>
+          <AIPanel
+            settings={aiSettings}
+            onSettings={setAiSettings}
+            dialect={connKind ?? undefined}
+            schema={contextSchema}
+            table={contextTable}
+            currentSql={sql}
+            onInsertSql={(s) => { insertTemplateSql(s); setAiOpen(false); }}
+          />
+        </div>
+      )}
       {templatesOpen && (
         <div
           ref={templatesRef}

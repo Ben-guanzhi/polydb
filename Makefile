@@ -44,6 +44,10 @@ fmt-go:
 run-tui:
 	cd go && go run ./cmd/polydb-tui
 
+# M17：MCP server（stdio，供 Cursor / Claude Desktop 连接；只读工具）
+run-mcp:
+	cd go && go run ./cmd/polydb-mcp
+
 # ─── Web / TypeScript ─────────────────────────────────────
 check-web:
 	cd web && npm run check

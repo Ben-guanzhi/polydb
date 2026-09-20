@@ -44,14 +44,15 @@
 
 > **进度（2026-09-20）**：M10–M15 已实现并全绿提交（见 git log：feat(M10)~feat(M15)）。
 > M14 核实后确认目标能力（参数面板 / EXPLAIN 树渲染 / 日志全文搜索）此前已存在，无需开发。
-> 遗留可选项：M17（AI 助手 + MCP server）；横切还债中「ImportModal 拆分」未动；
+> 横切还债「ImportModal 拆分」未动（持续并行）；
 > 「TUI Redis 模式」「sshtunnel known_hosts 首用校验（TOFU）」「Rust Transport trait 补齐」
-> 「M16（ER 图 + 表结构编辑器）」已实现（transport KV 五方法 + TUI viewKV；Go `HostKeyCallback`
-> + Rust `TunnelHandler::check_server_key` known_hosts 双端一致，spec/behavior.md §9 +
-> docs/ssh-tunnel.md 已更新；Rust `Transport` trait 加 browse/KV/事务 + 委托接线测试；
-> M16：`lib/erDiagram`（确定性网格布局）+ `ERDiagram.tsx`（SVG，SchemaBrowser 🕸 开关）、
-> `lib/alterSql`（方言 DDL 生成，SQLite/Oracle 限制明确拒绝）+ `TableStructureEditor.tsx`
-> （表详情内「结构编辑」，事务内执行、失败回滚），见 docs/frontends.md）。
+> 「M16（ER 图 + 表结构编辑器）」「M17（AI 助手 + MCP server）」已实现
+> （transport KV 五方法 + TUI viewKV；Go `HostKeyCallback` + Rust `TunnelHandler::check_server_key`
+> known_hosts 双端一致，spec/behavior.md §9 + docs/ssh-tunnel.md 已更新；Rust `Transport`
+> trait 加 browse/KV/事务 + 委托接线测试；M16 `lib/erDiagram` + `ERDiagram.tsx`、
+> `lib/alterSql` + `TableStructureEditor.tsx`；M17 `go/cmd/polydb-mcp` + `go/pkg/mcp`
+> （stdio JSON-RPC 只读工具）+ Web BYOK AI 面板（`lib/aiSettings`/`lib/aiSql` + `AIPanel.tsx`），
+> 见 docs/frontends.md 与 AGENTS.md）。
 
 ### M10 — 安全基线：服务端鉴权 + 连接级只读 【规模 S-M，前置必须】
 
@@ -145,7 +146,16 @@
 - 结构编辑：list_columns/indexes/fks → 表单 → 前端按方言生成 `ALTER TABLE` 预览 → 确认执行（走 executeQuery）。先 SQLite + PG。spec 不变。
 - ER 图：`list_foreign_keys` 关系渲染（SVG/Canvas，评估 react-flow 依赖——纯 UI 库允许）。只读关系图，不做逆向同步。
 
-### M17 — AI 助手 + MCP server 【规模 M，可选独立】
+### M17 — AI 助手 + MCP server 【规模 M，可选独立】✅ 已实现（2026-09-20）
+
+> 实现落点：**MCP**：`go/cmd/polydb-mcp` + `go/pkg/mcp`（stdio newline-delimited JSON-RPC，
+> 无第三方 SDK）——`initialize` / `tools/list` / `tools/call`；工具：list_connections、
+> list_schemas、list_tables、get_table_schema、run_readonly_query（`assertReadOnly` 只放行
+> SELECT/EXPLAIN/WITH/SHOW/DESC，写语句 `POLYDB_ERR_READ_ONLY` 拒绝）；`make run-mcp` 入口；
+> 单测 `pkg/mcp/mcp_test.go`（tools/list、只读查询、写拒绝、表结构）。**AI 面板**：
+> `web/src/lib/aiSettings.ts`（BYOK，密钥仅 localStorage）+ `web/src/lib/aiSql.ts`（提示词/
+> 响应解析，纯函数）+ `AIPanel.tsx`，挂 QueryWorkspace 工具栏「🤖 AI」，浏览器直连 OpenAI
+> 兼容端点，生成 SQL 经 `insertTemplateSql` 插入编辑器；单测 aiSql 7。
 
 - **MCP**（先决条件 M10）：Go 侧新增 `cmd/polydb-mcp`（或 server 挂 `/mcp`），把「元数据浏览 + 只读查询」暴露为 MCP tools，复用 token 鉴权与只读连接，供 Cursor / Claude Desktop 直查。
 - **AI 面板**：浏览器直连用户自配的 OpenAI 兼容端点（BYOK），**密钥不经过 polydb server**（服务端不持有 LLM key）；生成 SQL → 插入编辑器 / 解释当前查询 / 优化建议。

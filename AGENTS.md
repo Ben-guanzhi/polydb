@@ -70,10 +70,11 @@ polydb/
 │ ├── cmd/
 │ │ ├── polydb-server/ # HTTP+WS
 │ │ ├── polydb-tui/ # bubbletea
-│ │ └── polydb-cli/ # 本地 SQLite 最小查询器（非交互）
+│ │ ├── polydb-cli/ # 本地 SQLite 最小查询器（非交互）
+│ │ └── polydb-mcp/ # MCP server（stdio JSON-RPC，只读工具，M17）
 │ ├── pkg/
 │ │ ├── protocol/ # 由 spec 生成
-│ │ ├── appcore/ dbcore/ server/ storage/ sshtunnel/ keyring/
+│ │ ├── appcore/ dbcore/ server/ storage/ sshtunnel/ keyring/ mcp/
 │ │ ├── dbsqlite/ dbmysql/ dbpostgres/ dbmssql/ dboracle/ dbredis/
 │ │ ├── transport/ # 前端数据访问：Client 接口 + Local(进程内) / Remote(REST)
 │ │ └── core/ # 预留空目录
@@ -397,7 +398,7 @@ Rust workspace	polydb
 Rust crate 前缀	polydb-
 Rust 二进制	polydb-gui（仅 GUI；TUI/Server 另一套走 Go）
 Go module	github.com/<org>/polydb
-Go 二进制	polydb-server / polydb-tui / polydb-cli（本地 SQLite 查询器）
+Go 二进制	polydb-server / polydb-tui / polydb-cli（本地 SQLite 查询器）/ polydb-mcp（MCP 只读工具）
 Web 包名	@polydb/api / @polydb/web
 环境变量前缀	POLYDB_
 配置目录	~/.config/polydb/
