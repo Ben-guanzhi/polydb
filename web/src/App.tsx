@@ -6,6 +6,7 @@ import ConnectionList from './components/ConnectionList';
 import RedisBrowser from './components/RedisBrowser';
 import SchemaBrowser from './components/SchemaBrowser';
 import QueryWorkspace from './components/QueryWorkspace';
+import TableDataView from './components/TableDataView';
 import QueryLogPanel from './components/QueryLogPanel';
 import CollapsiblePane from './components/CollapsiblePane';
 import CommandPalette from './components/CommandPalette';
@@ -63,6 +64,9 @@ export default function App() {
   const [connections, setConnections] = useState<ConnectionInfo[]>([]);
   const [context, setContext] = useState<{ sql: string; label: string; schema: string; table: string } | null>(null);
   const [autoRunToken, setAutoRunToken] = useState(0);
+  // M11 表数据浏览：主区模式切换。tableCtx 记录当前浏览的表；'data' 模式渲染 TableDataView。
+  const [tableCtx, setTableCtx] = useState<{ schema: string; table: string } | null>(null);
+  const [mainMode, setMainMode] = useState<'sql' | 'data'>('sql');
   const [stats, setStats] = useState<RunStat[]>(() => loadStats());
   const [cmdOpen, setCmdOpen] = useState(false);
   const [shortcutOpen, setShortcutOpen] = useState(false);
@@ -147,6 +151,8 @@ export default function App() {
   };
 
   const handleSelectTable = (schema: string, table: string) => {
+    setTableCtx({ schema, table });
+    setMainMode('sql');
     setContext({
       sql: `SELECT * FROM ${schema}.${table}\nLIMIT 100;`,
       label: `${schema}.${table}`,
@@ -156,8 +162,9 @@ export default function App() {
   };
 
   const handlePreviewTable = (schema: string, table: string) => {
-    handleSelectTable(schema, table);
-    setAutoRunToken((n) => n + 1);
+    // M11：双击/预览 → 表数据浏览器（服务端分页），不再拼一次性 SQL。
+    setTableCtx({ schema, table });
+    setMainMode('data');
   };
 
   const handlePrefillSql = (sql: string) => {
@@ -381,15 +388,47 @@ export default function App() {
             conn.kind === 'redis' ? (
               <RedisBrowser connId={conn.id} />
             ) : (
-              <QueryWorkspace
-                connId={conn.id}
-                prefillSql={context?.sql}
-                contextLabel={context?.label}
-                contextSchema={context?.schema}
-                contextTable={context?.table}
-                autoRunToken={autoRunToken}
-                onClearContext={context ? () => setContext(null) : undefined}
-              />
+              <>
+                {/* 查询/数据 模式切换（有选表上下文时） */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px 0', borderBottom: '1px solid var(--border)' }}>
+                  {(['sql', 'data'] as const).map((m) => (
+                    <button
+                      key={m}
+                      onClick={() => setMainMode(m)}
+                      disabled={m === 'data' && !tableCtx}
+                      style={{
+                        fontFamily: 'inherit', fontSize: 12, padding: '4px 12px', cursor: 'pointer',
+                        background: mainMode === m ? 'var(--bg)' : 'transparent',
+                        color: mainMode === m ? 'var(--fg)' : 'var(--muted)',
+                        border: '1px solid var(--border)', borderBottom: mainMode === m ? '1px solid var(--bg)' : '1px solid var(--border)',
+                        borderRadius: '4px 4px 0 0',
+                      }}
+                    >
+                      {m === 'sql' ? 'SQL 查询' : `数据${tableCtx ? ` · ${tableCtx.schema}.${tableCtx.table}` : ''}`}
+                    </button>
+                  ))}
+                </div>
+                <div style={{ flex: 1, minHeight: 0 }}>
+                  {mainMode === 'data' && tableCtx ? (
+                    <TableDataView
+                      connId={conn.id}
+                      schema={tableCtx.schema}
+                      table={tableCtx.table}
+                      onOpenSql={(s, t) => { handleSelectTable(s, t); }}
+                    />
+                  ) : (
+                    <QueryWorkspace
+                      connId={conn.id}
+                      prefillSql={context?.sql}
+                      contextLabel={context?.label}
+                      contextSchema={context?.schema}
+                      contextTable={context?.table}
+                      autoRunToken={autoRunToken}
+                      onClearContext={context ? () => setContext(null) : undefined}
+                    />
+                  )}
+                </div>
+              </>
             )
           ) : (
             <CollapsiblePane title="工作区" variant="main">

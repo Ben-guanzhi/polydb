@@ -103,6 +103,122 @@
         },
         "total_execution_time_ms": { "type": "number" }
       }
+    },
+    "FilterOperator": {
+      "type": "string",
+      "description": "Filter operators for table data browsing (behavior.md §13)",
+      "enum": ["eq", "ne", "lt", "le", "gt", "ge", "like", "not_like", "in", "not_in", "between", "null", "not_null"]
+    },
+    "FilterLogic": {
+      "type": "string",
+      "enum": ["and", "or"],
+      "default": "and",
+      "description": "How multiple conditions combine"
+    },
+    "SortDirection": {
+      "type": "string",
+      "enum": ["asc", "desc"]
+    },
+    "FilterCondition": {
+      "type": "object",
+      "required": ["column", "op"],
+      "properties": {
+        "column": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Column name; server quotes it as an identifier (never interpolated raw)"
+        },
+        "op": { "$ref": "#/definitions/FilterOperator" },
+        "value": {
+          "$ref": "common.json#/definitions/Value",
+          "description": "Single value for eq/ne/lt/le/gt/ge/like/not_like; ignored for null/not_null"
+        },
+        "second_value": {
+          "$ref": "common.json#/definitions/Value",
+          "description": "Upper bound for between"
+        },
+        "values": {
+          "type": "array",
+          "items": { "$ref": "common.json#/definitions/Value" },
+          "description": "List for in/not_in (must be non-empty)"
+        }
+      }
+    },
+    "OrderClause": {
+      "type": "object",
+      "required": ["column", "dir"],
+      "properties": {
+        "column": { "type": "string", "minLength": 1 },
+        "dir": { "$ref": "#/definitions/SortDirection" }
+      }
+    },
+    "TableRowsRequest": {
+      "type": "object",
+      "properties": {
+        "columns": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Projection; omitted/empty = all columns"
+        },
+        "conditions": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/FilterCondition" },
+          "description": "Filter conditions combined per logic"
+        },
+        "logic": { "$ref": "#/definitions/FilterLogic" },
+        "order_by": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/OrderClause" }
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Rows to skip"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000,
+          "default": 200,
+          "description": "Max rows to return; server clamps to 10000 (behavior.md §13)"
+        }
+      }
+    },
+    "TableRowsResult": {
+      "type": "object",
+      "required": ["columns", "rows", "offset", "has_more"],
+      "properties": {
+        "columns": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/ResultColumn" }
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": { "$ref": "common.json#/definitions/Value" }
+          }
+        },
+        "offset": { "type": "integer", "minimum": 0 },
+        "has_more": {
+          "type": "boolean",
+          "description": "true when more rows exist beyond offset+limit (server fetches limit+1 and trims)"
+        },
+        "total_estimate": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Optional engine-estimated row count when cheaply available"
+        },
+        "execution_time_ms": { "type": "number" }
+      }
+    },
+    "TableCountResult": {
+      "type": "object",
+      "required": ["count"],
+      "properties": {
+        "count": { "type": "integer", "minimum": 0 }
+      }
     }
   }
 }

@@ -4,7 +4,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use polydb_core::{
     ColumnInfo, CoreResult, DatabaseKind, ForeignKeyInfo, IndexInfo, QueryResult, RedisKeyType,
-    RedisReply, RedisScanPage, RedisValue, SchemaInfo, TableInfo, Value,
+    RedisReply, RedisScanPage, RedisValue, SchemaInfo, TableInfo, TableRowsRequest,
+    TableRowsResult, Value,
 };
 
 use crate::tx::TxMode;
@@ -32,6 +33,22 @@ pub trait SqlDriver: DatabaseDriver {
     async fn list_foreign_keys(&self, schema: &str, table: &str)
         -> CoreResult<Vec<ForeignKeyInfo>>;
     async fn create_table_sql(&self, schema: &str, table: &str) -> CoreResult<String>;
+
+    /// 按表浏览行（服务端分页/排序/过滤，behavior.md §13）。
+    /// 实现经 db-core browse 模块构造参数化 SQL 后走自身执行管线。
+    async fn browse_rows(
+        &self,
+        schema: &str,
+        table: &str,
+        req: &TableRowsRequest,
+    ) -> CoreResult<TableRowsResult>;
+    /// 对同条件执行 COUNT(*)。
+    async fn browse_rows_count(
+        &self,
+        schema: &str,
+        table: &str,
+        req: &TableRowsRequest,
+    ) -> CoreResult<u64>;
 
     /// 事务接口。句柄以 Box<dyn Any + Send> 承载，具体类型由驱动内部决定
     /// （sqlx::Transaction 或驱动自持的 TxHandle 结构）；调用方通过 downcast

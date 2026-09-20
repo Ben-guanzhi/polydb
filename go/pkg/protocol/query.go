@@ -85,3 +85,72 @@ func (b BatchResultItem) MarshalMsgpack() ([]byte, error) {
 	}
 	return msgpack.Marshal(v)
 }
+
+// ─── 表数据浏览（M11，behavior.md §13）───────────────────────
+
+type FilterOperator string
+
+const (
+	FilterOpEq      FilterOperator = "eq"
+	FilterOpNe      FilterOperator = "ne"
+	FilterOpLt      FilterOperator = "lt"
+	FilterOpLe      FilterOperator = "le"
+	FilterOpGt      FilterOperator = "gt"
+	FilterOpGe      FilterOperator = "ge"
+	FilterOpLike    FilterOperator = "like"
+	FilterOpNotLike FilterOperator = "not_like"
+	FilterOpIn      FilterOperator = "in"
+	FilterOpNotIn   FilterOperator = "not_in"
+	FilterOpBetween FilterOperator = "between"
+	FilterOpNull    FilterOperator = "null"
+	FilterOpNotNull FilterOperator = "not_null"
+)
+
+type FilterLogic string
+
+const (
+	FilterLogicAnd FilterLogic = "and"
+	FilterLogicOr  FilterLogic = "or"
+)
+
+type SortDirection string
+
+const (
+	SortAsc  SortDirection = "asc"
+	SortDesc SortDirection = "desc"
+)
+
+type FilterCondition struct {
+	Column      string         `json:"column" msgpack:"column"`
+	Op          FilterOperator `json:"op" msgpack:"op"`
+	Value       Value          `json:"value,omitempty" msgpack:"value,omitempty"`
+	SecondValue Value          `json:"second_value,omitempty" msgpack:"second_value,omitempty"`
+	Values      []Value        `json:"values,omitempty" msgpack:"values,omitempty"`
+}
+
+type OrderClause struct {
+	Column string        `json:"column" msgpack:"column"`
+	Dir    SortDirection `json:"dir" msgpack:"dir"`
+}
+
+type TableRowsRequest struct {
+	Columns    []string          `json:"columns,omitempty" msgpack:"columns,omitempty"`
+	Conditions []FilterCondition `json:"conditions,omitempty" msgpack:"conditions,omitempty"`
+	Logic      FilterLogic       `json:"logic,omitempty" msgpack:"logic,omitempty"`
+	OrderBy    []OrderClause     `json:"order_by,omitempty" msgpack:"order_by,omitempty"`
+	Offset     uint64            `json:"offset,omitempty" msgpack:"offset,omitempty"`
+	Limit      uint32            `json:"limit,omitempty" msgpack:"limit,omitempty"`
+}
+
+type TableRowsResult struct {
+	Columns         []ResultColumn `json:"columns" msgpack:"columns"`
+	Rows            [][]Value      `json:"rows" msgpack:"rows"`
+	Offset          uint64         `json:"offset" msgpack:"offset"`
+	HasMore         bool           `json:"has_more" msgpack:"has_more"`
+	TotalEstimate   *uint64        `json:"total_estimate,omitempty" msgpack:"total_estimate,omitempty"`
+	ExecutionTimeMs float64        `json:"execution_time_ms" msgpack:"execution_time_ms"`
+}
+
+type TableCountResult struct {
+	Count uint64 `json:"count" msgpack:"count"`
+}

@@ -289,6 +289,37 @@ impl DatabaseDriver for PostgresConn {
 
 #[async_trait]
 impl SqlDriver for PostgresConn {
+    async fn browse_rows(
+        &self,
+        schema: &str,
+        table: &str,
+        req: &polydb_protocol::TableRowsRequest,
+    ) -> CoreResult<polydb_protocol::TableRowsResult> {
+        let (sql, args) =
+            polydb_db_core::build_rows_query(polydb_db_core::DIALECT_DEFAULT, schema, table, req)?;
+        let limit = polydb_db_core::browse_rows_limits(req.limit);
+        let res = self.execute(&sql, &args).await?;
+        Ok(polydb_db_core::rows_result_to_browse_page(
+            res, req.offset, limit,
+        ))
+    }
+
+    async fn browse_rows_count(
+        &self,
+        schema: &str,
+        table: &str,
+        req: &polydb_protocol::TableRowsRequest,
+    ) -> CoreResult<u64> {
+        let (sql, args) = polydb_db_core::build_rows_count_query(
+            polydb_db_core::DIALECT_DEFAULT,
+            schema,
+            table,
+            req,
+        )?;
+        let res = self.execute(&sql, &args).await?;
+        polydb_db_core::count_result_to_u64(res)
+    }
+
     fn clone_sql_driver_arc(&self) -> Arc<dyn SqlDriver> {
         let arc: Arc<PostgresConn> = self.clone_arc();
         arc

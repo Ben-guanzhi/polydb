@@ -89,3 +89,141 @@ pub enum BatchResultItem {
     Ok(QueryResult),
     Err(crate::error::PolyDBError),
 }
+
+// ─── 表数据浏览（M11，behavior.md §13）───────────────────────
+
+/// 过滤操作符（behavior.md §13.3）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FilterOperator {
+    #[serde(rename = "eq")]
+    Eq,
+    #[serde(rename = "ne")]
+    Ne,
+    #[serde(rename = "lt")]
+    Lt,
+    #[serde(rename = "le")]
+    Le,
+    #[serde(rename = "gt")]
+    Gt,
+    #[serde(rename = "ge")]
+    Ge,
+    #[serde(rename = "like")]
+    Like,
+    #[serde(rename = "not_like")]
+    NotLike,
+    #[serde(rename = "in")]
+    In,
+    #[serde(rename = "not_in")]
+    NotIn,
+    #[serde(rename = "between")]
+    Between,
+    #[serde(rename = "null")]
+    Null,
+    #[serde(rename = "not_null")]
+    NotNull,
+    /// 解码回退（#[serde(other)]）：未知 op 不在解码期拒绝，交给 browse 校验层
+    /// 返回 POLYDB_ERR_INVALID_PARAM（behavior.md §13.3）。序列化时跳过，不出现在线上。
+    #[serde(other)]
+    #[serde(skip_serializing)]
+    Unknown,
+}
+
+impl FilterOperator {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Eq => "eq",
+            Self::Ne => "ne",
+            Self::Lt => "lt",
+            Self::Le => "le",
+            Self::Gt => "gt",
+            Self::Ge => "ge",
+            Self::Like => "like",
+            Self::NotLike => "not_like",
+            Self::In => "in",
+            Self::NotIn => "not_in",
+            Self::Between => "between",
+            Self::Null => "null",
+            Self::NotNull => "not_null",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// 多条件组合方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FilterLogic {
+    #[serde(rename = "and")]
+    And,
+    #[serde(rename = "or")]
+    Or,
+}
+
+/// 排序方向。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SortDirection {
+    #[serde(rename = "asc")]
+    Asc,
+    #[serde(rename = "desc")]
+    Desc,
+}
+
+/// Value::Null 序列化辅助：null 视为"未提供"，与 Go 侧 omitempty(nil interface) 一致。
+pub fn value_is_null(v: &Value) -> bool {
+    matches!(v, Value::Null)
+}
+
+fn default_null_value() -> Value {
+    Value::Null
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FilterCondition {
+    pub column: String,
+    pub op: FilterOperator,
+    #[serde(default = "default_null_value", skip_serializing_if = "value_is_null")]
+    pub value: Value,
+    #[serde(default = "default_null_value", skip_serializing_if = "value_is_null")]
+    pub second_value: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderClause {
+    pub column: String,
+    pub dir: SortDirection,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TableRowsRequest {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<FilterCondition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logic: Option<FilterLogic>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order_by: Vec<OrderClause>,
+    #[serde(default)]
+    pub offset: u64,
+    #[serde(default)]
+    pub limit: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableRowsResult {
+    pub columns: Vec<ResultColumn>,
+    pub rows: Vec<Vec<Value>>,
+    pub offset: u64,
+    #[serde(default)]
+    pub has_more: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_estimate: Option<u64>,
+    #[serde(default)]
+    pub execution_time_ms: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableCountResult {
+    pub count: u64,
+}

@@ -561,6 +561,32 @@ func (a *AppCore) ExecCommand(ctx context.Context, id string, args []string) (pr
 	return d.ExecCommand(ctx, args)
 }
 
+// ─── 表数据浏览（M11，behavior.md §13）───────────────────────
+
+// BrowseRows 按表浏览行。只读操作，不受 read_only 影响。
+func (a *AppCore) BrowseRows(ctx context.Context, id, schema, table string, req *protocol.TableRowsRequest) (*protocol.TableRowsResult, error) {
+	if req == nil {
+		req = &protocol.TableRowsRequest{}
+	}
+	d, err := a.sqlDriver(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return d.BrowseRows(ctx, schema, table, req)
+}
+
+// BrowseRowsCount 对同条件执行精确 COUNT(*)。
+func (a *AppCore) BrowseRowsCount(ctx context.Context, id, schema, table string, req *protocol.TableRowsRequest) (uint64, error) {
+	if req == nil {
+		req = &protocol.TableRowsRequest{}
+	}
+	d, err := a.sqlDriver(ctx, id)
+	if err != nil {
+		return 0, err
+	}
+	return d.BrowseRowsCount(ctx, schema, table, req)
+}
+
 // ─── 辅助 ──────────────────────────────────────────────────
 
 // secret 从 keyring 取回机密；ref 为空返回空串（连接可能不需要密码）。

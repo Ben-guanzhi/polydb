@@ -40,6 +40,8 @@ type pendingAttrs struct {
 	hasDefault bool
 	hasFlat    bool
 	untagged   bool
+	// #[serde(other)]：解码回退变体，不属于线上枚举集合（如 FilterOperator::Unknown）。
+	hasOther bool
 }
 
 func (p *pendingAttrs) reset() { *p = pendingAttrs{serdeKVs: map[string]string{}} }
@@ -59,6 +61,9 @@ func (p *pendingAttrs) feed(line string) {
 			continue
 		case "flatten":
 			p.hasFlat = true
+			continue
+		case "other":
+			p.hasOther = true
 			continue
 		}
 		name, val, ok := strings.Cut(kv, "=")

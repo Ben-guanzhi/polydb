@@ -232,3 +232,42 @@
     GET / scan / select db 不受限。
 - 事务内语句同样拦截（按事务所属连接判定）。
 - 只读属性是连接配置的一部分，随 create/update 持久化并在 `ConnectionInfo.read_only` 回显。
+
+## 13. 表数据浏览（M11，non-breaking）
+
+### 13.1 端点与语义
+
+- `POST /api/connections/{id}/schemas/{schema}/tables/{table}/rows/query`：按表浏览行。
+  服务端把 `TableRowsRequest` 渲染为参数化 SQL——**条件值一律走绑定参数**，列名/表名按方言
+  做标识符引用（内部引号翻倍），绝不拼接字面量。两端 SQL 形态不要求逐字节一致，行为一致即可。
+- `POST .../rows/count`：对同一 WHERE 条件执行 `COUNT(*)`，返回 `TableCountResult`（精确计数，
+  客户端显式动作才调用，不用作分页默认值）。
+
+### 13.2 分页与 has_more
+
+- `limit` 缺省 200，服务端钳制到 10000；`offset` 缺省 0。分页用 OFFSET/LIMIT 语义
+  （MSSQL/Oracle 用 `OFFSET n ROWS FETCH NEXT m ROWS ONLY`；MSSQL 无排序时补
+  `ORDER BY (SELECT NULL)` 兜底）。
+- `has_more`：服务端实际请求 `limit+1` 行，多于 limit 时截断并置 `has_more=true`。
+- 无 `order_by` 时行顺序不承诺稳定；前端跨页保序应自带主键排序。
+- `total_estimate` 可选；服务端拿不到廉价估算时省略，**不得**用 `COUNT(*)` 凑数。
+
+### 13.3 过滤条件渲染（两端一致的行为约定）
+
+| op | SQL 形态（`?` 为绑定参数） | 备注 |
+|---|---|---|
+| `eq` / `ne` / `lt` / `le` / `gt` / `ge` | `col = ?` 等 | |
+| `like` / `not_like` | `col LIKE ?` / `col NOT LIKE ?` | 模式原样透传，不做 `%` 包裹、不做转义 |
+| `in` / `not_in` | `col IN (?[, ?...])` | `values` 为空数组 → `POLYDB_ERR_INVALID_PARAM` |
+| `between` | `col BETWEEN ? AND ?` | 用 `value` + `second_value` |
+| `null` / `not_null` | `col IS NULL` / `col IS NOT NULL` | 忽略 value |
+
+- 多条件用 `logic`（`and`/`or`，缺省 `and`）以同层平铺连接，不支持括号分组（前端需要复杂
+  条件时引导用户写 SQL）。
+- 未知 op / 空列名 / 非法列名（渲染失败）→ `POLYDB_ERR_INVALID_PARAM`。
+- 列不存在由数据库报错，映射 `POLYDB_ERR_QUERY_FAILED`。
+
+### 13.4 驱动能力
+
+- `SqlDriver` 新增 `browse_rows` / `browse_rows_count`；五个 SQL 驱动（sqlite/mysql/pg/mssql/oracle）
+  双端全部实现，方言差异（标识符引用、LIMIT 风格）封在共享构造器 + 每驱动一份 dialect 声明。

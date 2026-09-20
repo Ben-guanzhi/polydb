@@ -19,7 +19,10 @@ import type {
   RedisSetRequest,
   RedisValue,
   SchemaInfo,
+  TableCountResult,
   TableInfo,
+  TableRowsRequest,
+  TableRowsResult,
   TransactionInfo,
   UpdateConnectionRequest,
 } from '../api';
@@ -197,6 +200,18 @@ export function commitTransaction(txId: string) {
 
 export function rollbackTransaction(txId: string) {
   return request<TransactionInfo>('POST', `/api/transactions/${encodeURIComponent(txId)}/rollback`);
+}
+
+// ─── 表数据浏览（M11）────────────────────────────────────────
+
+export function browseRows(id: string, schema: string, table: string, req: TableRowsRequest) {
+  const path = enc(id, `/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}/rows/query`);
+  return request<TableRowsResult>('POST', path, req);
+}
+
+export function browseRowsCount(id: string, schema: string, table: string, req: TableRowsRequest) {
+  const path = enc(id, `/schemas/${encodeURIComponent(schema)}/tables/${encodeURIComponent(table)}/rows/count`);
+  return request<TableCountResult>('POST', path, req);
 }
 
 // ─── KV（Redis）─────────────────────────────────────────────

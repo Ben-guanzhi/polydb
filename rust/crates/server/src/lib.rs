@@ -15,7 +15,8 @@ use polydb_core::protocol::error::codes;
 use polydb_core::protocol::error::PolyDBError;
 use polydb_core::protocol::{
     BatchQueryRequest, BatchQueryResult, BatchResultItem, BeginTransactionRequest, ConnectionId,
-    ConnectionStatus, CreateConnectionRequest, QueryRequest, QueryResult, UpdateConnectionRequest,
+    ConnectionStatus, CreateConnectionRequest, QueryRequest, QueryResult, TableCountResult,
+    TableRowsRequest, UpdateConnectionRequest,
 };
 use polydb_core::{
     CoreError, CoreResult, RedisExecCommandRequest, RedisScanRequest, RedisSelectDbRequest,
@@ -107,6 +108,14 @@ pub fn router_with_token(app: Arc<AppCore>, token: Option<String>) -> Router {
         .route(
             "/api/connections/{id}/schemas/{schema}/tables/{table}/ddl",
             get(get_ddl),
+        )
+        .route(
+            "/api/connections/{id}/schemas/{schema}/tables/{table}/rows/query",
+            post(browse_rows),
+        )
+        .route(
+            "/api/connections/{id}/schemas/{schema}/tables/{table}/rows/count",
+            post(browse_rows_count),
         )
         .route(
             "/api/connections/{id}/transactions",
@@ -456,6 +465,48 @@ async fn get_ddl(
 }
 
 // ─── 查询 ───────────────────────────────────────────────────
+
+// ─── 表数据浏览（M11，behavior.md §13）──────────────────────
+
+async fn browse_rows(
+    State(app): State<AppState>,
+    Path((id, schema, table)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let id = match parse_conn_id(id) {
+        Ok(v) => v,
+        Err(res) => return *res,
+    };
+    let req: TableRowsRequest = match decode_body(&headers, &body) {
+        Ok(r) => r,
+        Err(res) => return *res,
+    };
+    match app.browse_rows(id, &schema, &table, &req).await {
+        Ok(out) => msgpack_response(StatusCode::OK, out),
+        Err(e) => error_response(e),
+    }
+}
+
+async fn browse_rows_count(
+    State(app): State<AppState>,
+    Path((id, schema, table)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let id = match parse_conn_id(id) {
+        Ok(v) => v,
+        Err(res) => return *res,
+    };
+    let req: TableRowsRequest = match decode_body(&headers, &body) {
+        Ok(r) => r,
+        Err(res) => return *res,
+    };
+    match app.browse_rows_count(id, &schema, &table, &req).await {
+        Ok(count) => msgpack_response(StatusCode::OK, TableCountResult { count }),
+        Err(e) => error_response(e),
+    }
+}
 
 async fn execute_query(
     State(state): State<AppState>,

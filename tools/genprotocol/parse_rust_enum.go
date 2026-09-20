@@ -83,6 +83,13 @@ func collectRustEnum(lines []string, start int, pa pendingAttrs) (*SideType, int
 		if line == "" || strings.HasPrefix(line, "//") {
 			continue
 		}
+		// #[serde(other)] 变体：解码回退用，不在线上枚举集合，跳过收集。
+		if vp.hasOther {
+			vp.reset()
+			if !strings.HasSuffix(line, "{") {
+				continue
+			}
+		}
 		if strings.HasSuffix(line, "{") {
 			// 结构体变体：Name { fields }
 			m := rustVariantRe.FindStringSubmatch(strings.TrimSuffix(line, "{"))

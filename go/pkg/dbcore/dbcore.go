@@ -28,6 +28,11 @@ type SQLDriver interface {
 	ListIndexes(ctx context.Context, schema, table string) ([]protocol.IndexInfo, error)
 	ListForeignKeys(ctx context.Context, schema, table string) ([]protocol.ForeignKeyInfo, error)
 	CreateTableSQL(ctx context.Context, schema, table string) (string, error)
+	// BrowseRows 按表浏览行（服务端分页/排序/过滤，behavior.md §13）。
+	// 实现经 dbcore.BuildRowsQuery 构造参数化 SQL 后走自身 Execute 管线。
+	BrowseRows(ctx context.Context, schema, table string, req *protocol.TableRowsRequest) (*protocol.TableRowsResult, error)
+	// BrowseRowsCount 对同条件执行 COUNT(*)（behavior.md §13.1）。
+	BrowseRowsCount(ctx context.Context, schema, table string, req *protocol.TableRowsRequest) (uint64, error)
 }
 
 // SQLTxDriver 是 SQLDriver 的可选事务扩展。支持事务的驱动应同时实现 SQLTxDriver，

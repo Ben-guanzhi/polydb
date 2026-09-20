@@ -252,6 +252,57 @@ export interface BatchQueryResult {
   total_execution_time_ms: number;
 }
 
+export type FilterOperator = 'between' | 'eq' | 'ge' | 'gt' | 'in' | 'le' | 'like' | 'lt' | 'ne' | 'not_in' | 'not_like' | 'not_null' | 'null';
+
+export type FilterLogic = 'and' | 'or';
+
+export type SortDirection = 'asc' | 'desc';
+
+export interface FilterCondition {
+  /** Column name; server quotes it as an identifier (never interpolated raw) */
+  column: string;
+  op: FilterOperator;
+  /** Single value for eq/ne/lt/le/gt/ge/like/not_like; ignored for null/not_null */
+  value?: Value;
+  /** Upper bound for between */
+  second_value?: Value;
+  /** List for in/not_in (must be non-empty) */
+  values?: Value[];
+}
+
+export interface OrderClause {
+  column: string;
+  dir: SortDirection;
+}
+
+export interface TableRowsRequest {
+  /** Projection; omitted/empty = all columns */
+  columns?: string[];
+  /** Filter conditions combined per logic */
+  conditions?: FilterCondition[];
+  logic?: FilterLogic;
+  order_by?: OrderClause[];
+  /** Rows to skip */
+  offset?: number;
+  /** Max rows to return; server clamps to 10000 (behavior.md §13) */
+  limit?: number;
+}
+
+export interface TableRowsResult {
+  columns: ResultColumn[];
+  rows: Value[][];
+  offset: number;
+  /** true when more rows exist beyond offset+limit (server fetches limit+1 and trims) */
+  has_more: boolean;
+  /** Optional engine-estimated row count when cheaply available */
+  total_estimate?: number;
+  execution_time_ms?: number;
+}
+
+export interface TableCountResult {
+  count: number;
+}
+
 export type RedisKeyType = 'hash' | 'list' | 'none' | 'set' | 'stream' | 'string' | 'zset';
 
 export interface RedisValue {

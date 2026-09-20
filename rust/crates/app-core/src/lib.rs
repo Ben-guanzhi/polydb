@@ -8,7 +8,8 @@ use polydb_core::{
     BeginTransactionRequest, ColumnInfo, ConnectionId, ConnectionInfo, ConnectionStatus, CoreError,
     CoreResult, CreateConnectionRequest, DatabaseKind, ForeignKeyInfo, IndexInfo, IsolationLevel,
     QueryResult, RedisKeyType, RedisReply, RedisScanPage, RedisValue, SchemaInfo, TableInfo,
-    TransactionInfo, TransactionStatus, UpdateConnectionRequest, Value,
+    TableRowsRequest, TableRowsResult, TransactionInfo, TransactionStatus, UpdateConnectionRequest,
+    Value,
 };
 use polydb_db_core::{Connection, DatabaseDriver, SqlDriver, TxMode};
 use polydb_protocol::common::SshTunnelConfig;
@@ -393,6 +394,34 @@ impl AppCore {
         self.ensure_connected(&id)?;
         let conn = self.get_conn(id)?;
         conn.as_sql()?.create_table_sql(schema, table).await
+    }
+
+    // ─── 表数据浏览（M11，behavior.md §13）──────────────────
+
+    /// 按表浏览行。只读操作，不受 read_only 影响。
+    pub async fn browse_rows(
+        &self,
+        id: ConnectionId,
+        schema: &str,
+        table: &str,
+        req: &TableRowsRequest,
+    ) -> CoreResult<TableRowsResult> {
+        self.ensure_connected(&id)?;
+        let conn = self.get_conn(id)?;
+        conn.as_sql()?.browse_rows(schema, table, req).await
+    }
+
+    /// 对同条件执行精确 COUNT(*)。
+    pub async fn browse_rows_count(
+        &self,
+        id: ConnectionId,
+        schema: &str,
+        table: &str,
+        req: &TableRowsRequest,
+    ) -> CoreResult<u64> {
+        self.ensure_connected(&id)?;
+        let conn = self.get_conn(id)?;
+        conn.as_sql()?.browse_rows_count(schema, table, req).await
     }
 
     // ─── KV（Redis）─────────────────────────────────────────

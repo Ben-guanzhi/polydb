@@ -107,6 +107,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/queries/{query_id}/cancel", s.cancelQuery)
 
 	mux.HandleFunc("GET /api/connections/{id}/schemas/{schema}/tables/{table}/ddl", s.getDDL)
+	mux.HandleFunc("POST /api/connections/{id}/schemas/{schema}/tables/{table}/rows/query", s.browseRows)
+	mux.HandleFunc("POST /api/connections/{id}/schemas/{schema}/tables/{table}/rows/count", s.browseRowsCount)
 
 	mux.HandleFunc("POST /api/connections/{id}/transactions", s.beginTransaction)
 	mux.HandleFunc("POST /api/transactions/{txnId}/commit", s.commitTransaction)
@@ -612,6 +614,44 @@ func (s *Server) kvExecCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeMsgpack(w, http.StatusOK, reply)
+}
+
+// ─── 表数据浏览（M11）──────────────────────────────────────
+
+func (s *Server) browseRows(w http.ResponseWriter, r *http.Request) {
+	id, ok := connID(w, r)
+	if !ok {
+		return
+	}
+	var req protocol.TableRowsRequest
+	if err := decodeMsgpack(r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	out, err := s.app.BrowseRows(r.Context(), id, r.PathValue("schema"), r.PathValue("table"), &req)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeMsgpack(w, http.StatusOK, out)
+}
+
+func (s *Server) browseRowsCount(w http.ResponseWriter, r *http.Request) {
+	id, ok := connID(w, r)
+	if !ok {
+		return
+	}
+	var req protocol.TableRowsRequest
+	if err := decodeMsgpack(r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	count, err := s.app.BrowseRowsCount(r.Context(), id, r.PathValue("schema"), r.PathValue("table"), &req)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeMsgpack(w, http.StatusOK, protocol.TableCountResult{Count: count})
 }
 
 // ─── wire helpers ──────────────────────────────────────────

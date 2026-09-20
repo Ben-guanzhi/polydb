@@ -448,6 +448,85 @@ paths:
         default:
           $ref: "#/components/responses/Error"
 
+  # ─── 表数据浏览（M11，behavior.md §13）───────────────────
+  /api/connections/{id}/schemas/{schema}/tables/{table}/rows/query:
+    post:
+      operationId: browseTableRows
+      summary: 按表浏览行数据（服务端分页/排序/过滤）
+      description: |
+        服务端构造参数化 SQL（值全部走绑定参数，列名按方言做标识符引用）。
+        服务端实际取 limit+1 行并截断，用 has_more 标记是否有下一页；
+        精确总数用 rows/count 显式获取。
+      tags: [data]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            $ref: "schemas/common.json#/definitions/ConnectionId"
+        - name: schema
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: table
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/msgpack:
+            schema:
+              $ref: "schemas/query.json#/definitions/TableRowsRequest"
+      responses:
+        "200":
+          description: 行数据页
+          content:
+            application/msgpack:
+              schema:
+                $ref: "schemas/query.json#/definitions/TableRowsResult"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /api/connections/{id}/schemas/{schema}/tables/{table}/rows/count:
+    post:
+      operationId: countTableRows
+      summary: 精确统计行数（显式动作，带过滤条件）
+      tags: [data]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            $ref: "schemas/common.json#/definitions/ConnectionId"
+        - name: schema
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: table
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/msgpack:
+            schema:
+              $ref: "schemas/query.json#/definitions/TableRowsRequest"
+      responses:
+        "200":
+          description: 行数
+          content:
+            application/msgpack:
+              schema:
+                $ref: "schemas/query.json#/definitions/TableCountResult"
+        default:
+          $ref: "#/components/responses/Error"
+
   # ─── 事务 ───────────────────────────────────────────────
   /api/connections/{id}/transactions:
     parameters:

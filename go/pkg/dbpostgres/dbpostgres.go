@@ -396,3 +396,35 @@ func quoteIdent(s string) string {
 func timeNowMs() float64 {
 	return float64(time.Now().UnixNano()) / 1e6
 }
+
+// ─── 表数据浏览（behavior.md §13）────────────────────────────
+
+// BrowseRows 按表浏览行：共享构造器产参数化 SQL 后走自身执行管线。
+func (c *Conn) BrowseRows(ctx context.Context, schema, table string, req *protocol.TableRowsRequest) (*protocol.TableRowsResult, error) {
+	sqlText, args, err := dbcore.BuildRowsQuery(dbcore.DefaultSQLDialect(), schema, table, req)
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	res, err := c.executeIn(ctx, c.db, sqlText, args)
+	if err != nil {
+		return nil, err
+	}
+	return dbcore.RowsResultToBrowsePage(res, req.Offset, dbcore.BrowseRowsLimits(req.Limit)), nil
+}
+
+// BrowseRowsCount 对同条件执行 COUNT(*)。
+func (c *Conn) BrowseRowsCount(ctx context.Context, schema, table string, req *protocol.TableRowsRequest) (uint64, error) {
+	sqlText, args, err := dbcore.BuildRowsCountQuery(dbcore.DefaultSQLDialect(), schema, table, req)
+	if err != nil {
+		return 0, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	res, err := c.executeIn(ctx, c.db, sqlText, args)
+	if err != nil {
+		return 0, err
+	}
+	return dbcore.CountResultToUint64(res)
+}
