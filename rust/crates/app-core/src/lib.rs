@@ -167,7 +167,17 @@ impl AppCore {
                 let passphrase =
                     self.secret(cfg.private_key_passphrase_ref.as_deref().unwrap_or(""))?;
                 let (target_host, target_port) = target_host_port(&info);
-                let t = Tunnel::open(cfg, &target_host, target_port, &ssh_pwd, &passphrase)?;
+                // SSH 主机密钥 known_hosts TOFU 校验（与 Go 侧 SetKnownHostsPath 对齐）：
+                // 条目落在数据目录；首次使用自动记录，主机密钥变更即拒绝。
+                let known_hosts = std::path::Path::new(&data_dir()).join("known_hosts");
+                let t = Tunnel::open(
+                    cfg,
+                    &target_host,
+                    target_port,
+                    &ssh_pwd,
+                    &passphrase,
+                    Some(&known_hosts),
+                )?;
                 let (host, port) = split_local_addr(t.local_addr())?;
                 conn_info.host = Some(host);
                 conn_info.port = Some(port);

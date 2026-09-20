@@ -158,6 +158,15 @@
 - 隧道建立失败返回 `POLYDB_ERR_SSH_TUNNEL_FAILED`（`retryable: true`）。
 - 断开连接（`Disconnect`/`DELETE`）时关闭隧道。
 - SQLite（本地文件）不适用隧道；配置了隧道时忽略。
+- SSH 端口缺省为 22（配置为 0/未填时按 22 处理，双端一致）。
+- **主机密钥校验（known_hosts，首用 TOFU，non-breaking 新增行为）**：
+  - 文件：数据目录下 `known_hosts`（`POLYDB_DATA_DIR` 或平台数据目录），OpenSSH 兼容三列格式
+    `host keytype base64`；host 字段约定：22 端口用裸 host，其余端口 `[host]:port`。
+  - 连接时：该 host 已有条目且 key 一致 → 接受；条目存在但 key 不同 → **拒绝**
+    （主机密钥变更 = MITM 信号，错误走 `POLYDB_ERR_SSH_TUNNEL_FAILED`）；无条目 →
+    追加条目并接受（首次使用 / OpenSSH accept-new 语义）。
+  - 文件记录失败（不可写等）不阻断连接；校验仅对「已知 host」有约束力。
+  - 两端写出的条目互相可读（base64 同为 wire blob 的 std base64）。
 
 ## 10. 事务（M25）
 

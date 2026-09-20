@@ -1,25 +1,83 @@
 // SSH 本地端口转发（等价 ssh -L），与 Go 端 go/pkg/sshtunnel 行为一致：
 // 监听 127.0.0.1 随机端口，驱动连接本地端口，隧道经 SSH 转发到目标 host:port。
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use polydb_core::{CoreError, CoreResult};
 use polydb_protocol::common::SshTunnelConfig;
 use russh::client::AuthResult;
 
-/// 客户端 Handler：接受任意服务器主机密钥。与 Go 侧 ssh.InsecureIgnoreHostKey
-/// 对齐；first-use known_hosts 验证留待 M9。
-#[derive(Default)]
-struct TunnelHandler;
+// known_hosts 读-改-写串行化（TOFU 首用校验，双实现行为一致，见 docs/ssh-tunnel.md）。
+static KNOWN_HOSTS_MU: Mutex<()> = Mutex::new(());
+
+/// 客户端 Handler：SSH 主机密钥校验（与 Go 侧 `sshtunnel::HostKeyCallback` 对齐）：
+///
+/// - `known_hosts` 为 `None`：接受任意 key（M8 原行为）；
+/// - `Some`：known_hosts 中已有该 host 条目且 key 一致 → 接受；
+///   key 变更 → 拒绝（MITM 信号，`russh::keys::Error::KeyChanged`）；
+///   无条目 → 追加条目并接受（首次使用 / OpenSSH accept-new 语义）。
+///
+/// 记簿（文件写入）失败不阻断连接。
+struct TunnelHandler {
+    known_hosts: Option<std::path::PathBuf>,
+    host: String,
+    port: u16,
+}
 
 impl russh::client::Handler for TunnelHandler {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &russh::keys::ssh_key::PublicKey,
+        server_public_key: &russh::keys::ssh_key::PublicKey,
     ) -> Result<bool, Self::Error> {
-        Ok(true)
+        let Some(path) = &self.known_hosts else {
+            return Ok(true);
+        };
+        let _guard = KNOWN_HOSTS_MU
+            .lock()
+            .map_err(|_| russh::Error::Inconsistent)?;
+        match russh::keys::check_known_hosts_path(&self.host, self.port, server_public_key, path) {
+            Ok(true) => Ok(true),
+            Ok(false) => {
+                record_known_host(path, &self.host, self.port, server_public_key);
+                Ok(true)
+            }
+            Err(e) => Err(e.into()),
+        }
     }
+}
+
+/// 追加首用条目（OpenSSH known_hosts 格式 `host keytype base64`）。
+/// host 字段与 russh known_hosts 匹配规则一致：22 端口用裸 host，其余 `[host]:port`；
+/// 第三列 wire blob 的 base64（public_key_base64）与 Go 侧 key.Marshal() 的 base64 同格式，
+/// 两端条目可互通（russh 解析时只读 host 与 base64 两列，keytype 列仅供参考）。
+fn record_known_host(
+    path: &std::path::Path,
+    host: &str,
+    port: u16,
+    key: &russh::keys::ssh_key::PublicKey,
+) {
+    use russh::keys::PublicKeyBase64;
+    let host_spec = if port == 22 {
+        host.to_string()
+    } else {
+        format!("[{host}]:{port}")
+    };
+    let algo = key.algorithm();
+    let key_type = algo.as_str();
+    let entry = format!("{host_spec} {key_type} {}\n", key.public_key_base64());
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    else {
+        return;
+    };
+    use std::io::Write;
+    let _ = file.write_all(entry.as_bytes());
 }
 
 /// 已建立的隧道。session 供转发与关闭共享；runtime 保活转发任务。
@@ -44,11 +102,13 @@ impl Tunnel {
         target_port: u16,
         ssh_password: &str,
         passphrase: &str,
+        known_hosts: Option<&std::path::Path>,
     ) -> CoreResult<Tunnel> {
         let cfg_owned = cfg.clone();
         let target_host = target_host.to_string();
         let ssh_password = ssh_password.to_string();
         let passphrase = passphrase.to_string();
+        let known_hosts = known_hosts.map(|p| p.to_path_buf());
         let (tx, rx) = std::sync::mpsc::channel::<CoreResult<Tunnel>>();
 
         std::thread::spawn(move || {
@@ -58,6 +118,7 @@ impl Tunnel {
                 target_port,
                 &ssh_password,
                 &passphrase,
+                known_hosts,
             ));
         });
 
@@ -72,6 +133,7 @@ impl Tunnel {
         target_port: u16,
         ssh_password: &str,
         passphrase: &str,
+        known_hosts: Option<std::path::PathBuf>,
     ) -> CoreResult<Tunnel> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -83,6 +145,7 @@ impl Tunnel {
             target_port,
             ssh_password,
             passphrase,
+            known_hosts,
         ))?;
         Ok(Tunnel {
             session,
@@ -97,13 +160,21 @@ impl Tunnel {
         target_port: u16,
         ssh_password: &str,
         passphrase: &str,
+        known_hosts: Option<std::path::PathBuf>,
     ) -> CoreResult<(
         Arc<tokio::sync::Mutex<russh::client::Handle<TunnelHandler>>>,
         String,
     )> {
-        let ssh_addr = format!("{}:{}", cfg.host, cfg.port);
+        // 端口缺省 22（与 Go 侧一致；known_hosts 校验与拨号用同一端口值）。
+        let ssh_port = if cfg.port == 0 { 22 } else { cfg.port };
+        let ssh_addr = format!("{}:{ssh_port}", cfg.host);
         let config = Arc::new(russh::client::Config::default());
-        let mut session = russh::client::connect(config, &ssh_addr, TunnelHandler)
+        let handler = TunnelHandler {
+            known_hosts,
+            host: cfg.host.clone(),
+            port: ssh_port,
+        };
+        let mut session = russh::client::connect(config, &ssh_addr, handler)
             .await
             .map_err(|e| CoreError::SshTunnel(format!("connect {ssh_addr}: {e}")))?;
 
@@ -219,5 +290,76 @@ async fn forward_loop(
             let mut ch = ch.into_stream();
             let _ = tokio::io::copy_bidirectional(&mut stream, &mut ch).await;
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::record_known_host;
+    use russh::keys::ssh_key::PublicKey;
+
+    const KEY1: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDyghIykDbRDLDQpRaT38Kyzbz5TU20isF9/W2JHMfVB";
+    const KEY2: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEd5R74QHGpKkki6q3Zb2CNFLgzxV87WroYfolztKqxx";
+
+    /// known_hosts 首用（TOFU）回读：record 写入的条目能被 russh 校验器识别
+    /// （含 host 字段约定、base64 尾随换行容忍、同 host 异 key → KeyChanged）。
+    #[test]
+    fn known_hosts_first_use_roundtrip() {
+        let dir = tempfile_dir();
+        let path = dir.join("known_hosts");
+        let k1: PublicKey = KEY1.parse().expect("parse key1");
+        let k2: PublicKey = KEY2.parse().expect("parse key2");
+
+        // 首次使用：记录并可用同 key 校验通过
+        record_known_host(&path, "ssh.example.com", 2222, &k1);
+        let got = russh::keys::check_known_hosts_path("ssh.example.com", 2222, &k1, &path)
+            .expect("check key1");
+        assert!(got, "recorded key should verify");
+
+        // 同 host 异 key：拒绝（KeyChanged）
+        let err = russh::keys::check_known_hosts_path("ssh.example.com", 2222, &k2, &path)
+            .expect_err("different key for known host must fail");
+        assert!(
+            matches!(err, russh::keys::Error::KeyChanged { .. }),
+            "expected KeyChanged, got {err:?}"
+        );
+
+        // 未记录 host：未知（TOFU 追加前的返回值）
+        assert!(
+            !russh::keys::check_known_hosts_path("other.example.com", 22, &k1, &path)
+                .expect("check unknown host")
+        );
+
+        // 22 端口裸 host 记录
+        record_known_host(&path, "db.example.com", 22, &k1);
+        assert!(
+            russh::keys::check_known_hosts_path("db.example.com", 22, &k1, &path)
+                .expect("check port22")
+        );
+
+        let content = std::fs::read_to_string(&path).expect("read file");
+        assert!(
+            content.contains("[ssh.example.com]:2222"),
+            "non-22 host field:\n{content}"
+        );
+        assert!(
+            content.contains("db.example.com ssh-"),
+            "port22 bare host field:\n{content}"
+        );
+    }
+
+    fn tempfile_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "polydb-knownhosts-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }

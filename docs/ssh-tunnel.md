@@ -10,8 +10,15 @@ host:port。所有驱动都走 `sql.Open(DSN)` 且无 dialer 钩子，这是唯�
 - 隧道目标为连接的主机/端口，端口缺省按驱动映射（PG 5432 / MySQL 3306 / MSSQL 1433 /
   Oracle 1521 / Redis 6379）。
 - 认证：私钥优先（`private_key_path`，可选口令），否则密码（`password`）。
-- 服务器主机密钥：两端都接受任意 key（Go `InsecureIgnoreHostKey`，Rust handler 返回
-  `Ok(true)`）；first-use known_hosts 验证留待后续。
+- SSH 端口缺省 22（配置 0/未填按 22；双端一致）。
+- 服务器主机密钥：**known_hosts 首用校验（TOFU，双端一致，见 spec/behavior.md §9）**。
+  文件在数据目录 `<data_dir>/known_hosts`（OpenSSH 兼容 `host keytype base64`，
+  22 端口裸 host、其余 `[host]:port`）：已知 host key 一致 → 接受；key 变更 →
+  拒绝（`POLYDB_ERR_SSH_TUNNEL_FAILED`，MITM 信号）；首次出现 → 追加条目并接受。
+  记簿失败不阻断连接。
+  - Go：`pkg/sshtunnel/knownhosts.go`（`HostKeyCallback`，`AppCore::SetKnownHostsPath` 注入路径）
+  - Rust：`app-core/src/sshtunnel.rs`（`TunnelHandler::check_server_key` + russh
+    `check_known_hosts_path` + `record_known_host` 追加）
 - 驱动打开失败时关闭已建立的隧道；`disconnect` 关闭驱动与隧道。
 - 错误码：`POLYDB_ERR_SSH_TUNNEL_FAILED`（可重试）；驱动错误 `POLYDB_ERR_CONNECTION_FAILED`（可重试）。
 

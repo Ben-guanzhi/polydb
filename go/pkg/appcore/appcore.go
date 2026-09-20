@@ -46,6 +46,9 @@ type AppCore struct {
 	// readOnly 记录已打开连接的只读标志（behavior.md §12.3）。
 	// Connect 时从 ConnectionInfo.read_only 快照，Disconnect 时清除。
 	readOnly map[string]bool
+	// knownHostsPath 为 SSH 主机密钥 known_hosts 文件（TOFU 首用校验，见 docs/ssh-tunnel.md）；
+	// 空则不校验主机密钥（M8 原行为）。由宿主（server/tui main）经 SetKnownHostsPath 注入。
+	knownHostsPath string
 }
 
 func New(db *sql.DB, kr keyring.Keyring) *AppCore {
@@ -58,6 +61,9 @@ func New(db *sql.DB, kr keyring.Keyring) *AppCore {
 		readOnly:    make(map[string]bool),
 	}
 }
+
+// SetKnownHostsPath 指定 SSH known_hosts 文件路径；传空串保持 M8 的不校验行为。
+func (a *AppCore) SetKnownHostsPath(path string) { a.knownHostsPath = path }
 
 // ─── 连接 CRUD ─────────────────────────────────────────────
 
@@ -135,7 +141,10 @@ func (a *AppCore) Connect(ctx context.Context, id string) error {
 		targetHost, targetPort := targetHostPort(info)
 		cfg := *info.SSHTunnel
 		cfg.PrivateKeyPassphrase = passphrase
-		tunnel, err = sshtunnel.Open(ctx, &cfg, targetHost, targetPort, sshPwd)
+		if cfg.Port == 0 {
+			cfg.Port = 22 // OpenSSH 默认端口（known_hosts 校验与拨号一致）
+		}
+		tunnel, err = sshtunnel.Open(ctx, &cfg, targetHost, targetPort, sshPwd, a.knownHostsPath)
 		if err != nil {
 			return &protocol.PolyDBError{Code: protocol.ErrSSHTunnelFailed, Message: err.Error(), Retryable: true}
 		}

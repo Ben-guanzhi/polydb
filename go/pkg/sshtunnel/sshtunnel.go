@@ -27,7 +27,9 @@ type Tunnel struct {
 
 // Open 按配置建立隧道：连 SSH 服务器，监听 127.0.0.1 随机端口并转发到 target。
 // password 为从 keyring 取回的 SSH 密码（未配置私钥时使用）。
-func Open(ctx context.Context, cfg *protocol.SshTunnelConfig, targetHost string, targetPort int, password string) (*Tunnel, error) {
+// knownHostsPath 为 SSH 主机密钥 known_hosts 文件（TOFU 首用校验，见 knownhosts.go）；
+// 传空则不校验主机密钥（M8 原行为）。
+func Open(ctx context.Context, cfg *protocol.SshTunnelConfig, targetHost string, targetPort int, password string, knownHostsPath string) (*Tunnel, error) {
 	auth, err := authMethods(cfg, password)
 	if err != nil {
 		return nil, err
@@ -36,7 +38,7 @@ func Open(ctx context.Context, cfg *protocol.SshTunnelConfig, targetHost string,
 		User:            cfg.Username,
 		Auth:            auth,
 		Timeout:         10 * time.Second,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO(M9): first-use known_hosts 校验
+		HostKeyCallback: HostKeyCallback(knownHostsPath, cfg.Host, cfg.Port),
 	}
 	sshHost := net.JoinHostPort(cfg.Host, itoa(cfg.Port))
 	client, err := ssh.Dial("tcp", sshHost, clientCfg)

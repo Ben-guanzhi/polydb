@@ -47,7 +47,9 @@ func main() {
 			slog.Error("open keyring", "error", err)
 			os.Exit(1)
 		}
-		client = transport.NewLocal(appcore.New(db, kr))
+		app := appcore.New(db, kr)
+		app.SetKnownHostsPath(filepath.Join(dataDir, "known_hosts"))
+		client = transport.NewLocal(app)
 	}
 
 	p := tea.NewProgram(tui.New(client))
