@@ -44,7 +44,9 @@
 
 > **进度（2026-09-20）**：M10–M15 已实现并全绿提交（见 git log：feat(M10)~feat(M15)）。
 > M14 核实后确认目标能力（参数面板 / EXPLAIN 树渲染 / 日志全文搜索）此前已存在，无需开发。
-> 横切还债「ImportModal 拆分」未动（持续并行）；
+> 横切还债「ImportModal 拆分」：Step1（粘贴/选择数据步 → `Step1Input`）已抽到 Parts
+> （ImportModal 14824→14382 行）；Step3(map)/Step4(preview) 步骤体（~1.8k/~3.2k 行、
+> 100+ 耦合标识符）留作后续专注重构（持续并行）。
 > 「TUI Redis 模式」「sshtunnel known_hosts 首用校验（TOFU）」「Rust Transport trait 补齐」
 > 「M16（ER 图 + 表结构编辑器）」「M17（AI 助手 + MCP server）」已实现
 > （transport KV 五方法 + TUI viewKV；Go `HostKeyCallback` + Rust `TunnelHandler::check_server_key`
@@ -171,7 +173,7 @@
 | TUI Redis 模式 | `transport.Client` 加 5 个 KV 方法（Local/Remote）+ TUI `viewKV`（M6 在 TUI 闭环） | ✅ |
 | 协议一致性 | `web/src/api/index.ts` 声称由 tools/genprotocol 生成而 Rust/Go 手工维护——落实三端生成器，或 CI 加「spec ↔ 三端字段一致性」校验脚本 | ✅（genprotocol `check` 已接入 CI） |
 | sshtunnel known_hosts | `go/pkg/sshtunnel` TODO(M9) → `HostKeyCallback`（Go）+ `TunnelHandler::check_server_key`（Rust）双端 TOFU，spec/behavior.md §9 + docs/ssh-tunnel.md 更新 | ✅ |
-| ImportModal 拆分 | 继续 Step3b+（14.8k 行 → 目标 <5k） | ⏳ 持续并行 |
+| ImportModal 拆分 | Step1(输入步→`Step1Input`) 已抽；继续 Step3(map)/Step4(preview)（14.8k→14.4k 行，目标 <5k） | ⏳ 持续并行 |
 
 ## 5. 依赖与排序
 
