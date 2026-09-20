@@ -46,9 +46,11 @@
 > M14 核实后确认目标能力（参数面板 / EXPLAIN 树渲染 / 日志全文搜索）此前已存在，无需开发。
 > 遗留可选项：M16（结构编辑器 + ER 图）、M17（AI 助手 + MCP server）；横切还债中
 > 「ImportModal 拆分」未动；「TUI Redis 模式」「sshtunnel known_hosts 首用校验（TOFU）」
-> 已实现（transport KV 五方法 + TUI viewKV；Go `HostKeyCallback` + Rust
-> `TunnelHandler::check_server_key` known_hosts 双端一致，spec/behavior.md §9 +
-> docs/ssh-tunnel.md 已更新，见 docs/frontends.md）。
+> 「Rust Transport trait 补齐（KV/事务/浏览）」已实现（transport KV 五方法 + TUI viewKV；
+> Go `HostKeyCallback` + Rust `TunnelHandler::check_server_key` known_hosts 双端一致，
+> spec/behavior.md §9 + docs/ssh-tunnel.md 已更新；Rust `Transport` trait 加
+> browse_rows(_count)/KV 六方法/事务四方法 + LocalTransport 委托 + 委托接线测试，
+> 见 docs/frontends.md）。
 
 ### M10 — 安全基线：服务端鉴权 + 连接级只读 【规模 S-M，前置必须】
 
@@ -148,7 +150,7 @@
 | 项 | 说明 | 状态 |
 |---|---|---|
 | 提交在途变更 | server tests + Dockerfile.server + go transport 先落库 | ✅ |
-| Rust `Transport` trait 补齐 | 增加 KV/事务/批量/取消，GUI 与 server 能力对齐；Go `transport.Client` 同步评估（Go 侧已补 KV，见下） | ⏳ |
+| Rust `Transport` trait 补齐 | 增加「浏览(KV)/事务」在进程内能力（KV 六方法 + 事务四方法 + browse_rows/_count），`LocalTransport` 委托 `AppCore`；批量/取消为**服务端**在途查询生命周期（axum/WS），不进进程内 transport | ✅ |
 | TUI Redis 模式 | `transport.Client` 加 5 个 KV 方法（Local/Remote）+ TUI `viewKV`（M6 在 TUI 闭环） | ✅ |
 | 协议一致性 | `web/src/api/index.ts` 声称由 tools/genprotocol 生成而 Rust/Go 手工维护——落实三端生成器，或 CI 加「spec ↔ 三端字段一致性」校验脚本 | ✅（genprotocol `check` 已接入 CI） |
 | sshtunnel known_hosts | `go/pkg/sshtunnel` TODO(M9) → `HostKeyCallback`（Go）+ `TunnelHandler::check_server_key`（Rust）双端 TOFU，spec/behavior.md §9 + docs/ssh-tunnel.md 更新 | ✅ |

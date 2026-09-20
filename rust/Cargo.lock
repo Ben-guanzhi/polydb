@@ -5024,7 +5024,10 @@ dependencies = [
  "polydb-app-core",
  "polydb-core",
  "polydb-protocol",
+ "polydb-storage",
+ "smol",
  "thiserror 2.0.20",
+ "uuid",
 ]
 
 [[package]]

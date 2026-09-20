@@ -3,9 +3,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use polydb_app_core::AppCore;
 use polydb_core::{
-    ColumnInfo, ConnectionId, ConnectionInfo, ConnectionStatus, CoreResult,
-    CreateConnectionRequest, ForeignKeyInfo, IndexInfo, QueryResult, SchemaInfo, TableInfo,
-    UpdateConnectionRequest, Value,
+    BeginTransactionRequest, ColumnInfo, ConnectionId, ConnectionInfo, ConnectionStatus,
+    CoreResult, CreateConnectionRequest, ForeignKeyInfo, IndexInfo, QueryResult, RedisKeyType,
+    RedisReply, RedisScanPage, RedisValue, SchemaInfo, TableInfo, TableRowsRequest,
+    TableRowsResult, TransactionInfo, UpdateConnectionRequest, Value,
 };
 
 #[async_trait]
@@ -55,6 +56,48 @@ pub trait Transport: Send + Sync {
         schema: &str,
         table: &str,
     ) -> CoreResult<String>;
+
+    // ─── 表数据浏览（M11）──────────────────────────────────
+    async fn browse_rows(
+        &self,
+        id: ConnectionId,
+        schema: &str,
+        table: &str,
+        req: &TableRowsRequest,
+    ) -> CoreResult<TableRowsResult>;
+    async fn browse_rows_count(
+        &self,
+        id: ConnectionId,
+        schema: &str,
+        table: &str,
+        req: &TableRowsRequest,
+    ) -> CoreResult<u64>;
+
+    // ─── Redis KV（M6）─────────────────────────────────────
+    async fn select_db(&self, id: ConnectionId, index: u32) -> CoreResult<()>;
+    async fn scan_keys(
+        &self,
+        id: ConnectionId,
+        cursor: u64,
+        pattern: &str,
+        count: u32,
+    ) -> CoreResult<RedisScanPage>;
+    async fn key_type(&self, id: ConnectionId, key: &str) -> CoreResult<RedisKeyType>;
+    async fn get_value(&self, id: ConnectionId, key: &str) -> CoreResult<RedisValue>;
+    async fn set_value(&self, id: ConnectionId, key: &str, value: RedisValue) -> CoreResult<()>;
+    async fn exec_command(&self, id: ConnectionId, args: &[String]) -> CoreResult<RedisReply>;
+
+    // ─── 事务（M25）────────────────────────────────────────
+    async fn begin_transaction(&self, req: &BeginTransactionRequest)
+        -> CoreResult<TransactionInfo>;
+    async fn execute_in_transaction(
+        &self,
+        txn_id: &str,
+        sql: &str,
+        params: &[Value],
+    ) -> CoreResult<QueryResult>;
+    async fn commit_transaction(&self, txn_id: &str) -> CoreResult<TransactionInfo>;
+    async fn rollback_transaction(&self, txn_id: &str) -> CoreResult<TransactionInfo>;
 }
 
 pub struct LocalTransport {
@@ -160,5 +203,82 @@ impl Transport for LocalTransport {
         table: &str,
     ) -> CoreResult<String> {
         self.app.create_table_sql(id, schema, table).await
+    }
+
+    // ─── 表数据浏览（M11）──────────────────────────────────
+    async fn browse_rows(
+        &self,
+        id: ConnectionId,
+        schema: &str,
+        table: &str,
+        req: &TableRowsRequest,
+    ) -> CoreResult<TableRowsResult> {
+        self.app.browse_rows(id, schema, table, req).await
+    }
+
+    async fn browse_rows_count(
+        &self,
+        id: ConnectionId,
+        schema: &str,
+        table: &str,
+        req: &TableRowsRequest,
+    ) -> CoreResult<u64> {
+        self.app.browse_rows_count(id, schema, table, req).await
+    }
+
+    // ─── Redis KV（M6）─────────────────────────────────────
+    async fn select_db(&self, id: ConnectionId, index: u32) -> CoreResult<()> {
+        self.app.select_db(id, index).await
+    }
+
+    async fn scan_keys(
+        &self,
+        id: ConnectionId,
+        cursor: u64,
+        pattern: &str,
+        count: u32,
+    ) -> CoreResult<RedisScanPage> {
+        self.app.scan_keys(id, cursor, pattern, count).await
+    }
+
+    async fn key_type(&self, id: ConnectionId, key: &str) -> CoreResult<RedisKeyType> {
+        self.app.key_type(id, key).await
+    }
+
+    async fn get_value(&self, id: ConnectionId, key: &str) -> CoreResult<RedisValue> {
+        self.app.get_value(id, key).await
+    }
+
+    async fn set_value(&self, id: ConnectionId, key: &str, value: RedisValue) -> CoreResult<()> {
+        self.app.set_value(id, key, value).await
+    }
+
+    async fn exec_command(&self, id: ConnectionId, args: &[String]) -> CoreResult<RedisReply> {
+        self.app.exec_command(id, args).await
+    }
+
+    // ─── 事务（M25）────────────────────────────────────────
+    async fn begin_transaction(
+        &self,
+        req: &BeginTransactionRequest,
+    ) -> CoreResult<TransactionInfo> {
+        self.app.begin_transaction(req).await
+    }
+
+    async fn execute_in_transaction(
+        &self,
+        txn_id: &str,
+        sql: &str,
+        params: &[Value],
+    ) -> CoreResult<QueryResult> {
+        self.app.execute_in_transaction(txn_id, sql, params).await
+    }
+
+    async fn commit_transaction(&self, txn_id: &str) -> CoreResult<TransactionInfo> {
+        self.app.commit_transaction(txn_id).await
+    }
+
+    async fn rollback_transaction(&self, txn_id: &str) -> CoreResult<TransactionInfo> {
+        self.app.rollback_transaction(txn_id).await
     }
 }
