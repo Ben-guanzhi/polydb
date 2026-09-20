@@ -5,6 +5,7 @@ import { KeyCode, KeyMod, Range } from 'monaco-editor';
 import type { QueryResult, ResultColumn } from '../api';
 import * as api from '../lib/api';
 import { ApiError } from '../lib/api';
+import * as exporters from '../lib/exporters';
 import * as ws from '../lib/ws';
 import { registerSqlCompletionGlobal, setSqlCompletionConnId } from '../lib/sqlCompletion';
 import { buildExplainSql, isExplainResult, renderExplain, type ExplainNode, type ExplainRender } from '../lib/explain';
@@ -1834,26 +1835,37 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
   const visibleRows = displayRows.map((entry) => ({ origIdx: entry.origIdx, cells: entry.row.filter((_, j) => !hiddenCols.has(j)) }));
   const exportRows = visibleRows.filter((entry) => selRows.size === 0 || selRows.has(entry.origIdx));
 
-  const doExport = (kind: 'csv' | 'json' | 'tsv') => {
+  const doExport = (kind: 'csv' | 'json' | 'tsv' | 'ndjson' | 'markdown' | 'sql-insert') => {
     if (!result || columns.length === 0) return;
     const cols = visibleColumns;
     const base = baseFilename();
-    if (kind === 'json') {
-      const obj = exportRows.map((entry) => {
-        const o: Record<string, unknown> = {};
-        for (let j = 0; j < cols.length; j++) o[cols[j].name] = entry.cells[j];
-        return o;
-      });
-      download(`${base}.json`, 'application/json', JSON.stringify(obj, null, 2));
-    } else if (kind === 'tsv') {
-      const sep = '\t';
-      const lines = [cols.map((c) => c.name).join(sep)];
-      for (const r of exportRows) lines.push(r.cells.map(tsEscape).join(sep));
-      download(`${base}.tsv`, 'text/tab-separated-values', lines.join('\n'));
-    } else {
-      const lines = [cols.map((c) => c.name).join(',')];
-      for (const r of exportRows) lines.push(r.cells.map(csvEscape).join(','));
-      download(`${base}.csv`, 'text/csv;charset=utf-8', '\uFEFF' + lines.join('\n'));
+    const colNames = cols.map((c) => c.name);
+    const cellRows = exportRows.map((entry) => entry.cells as unknown[]);
+    switch (kind) {
+      case 'json':
+        download(`${base}.json`, 'application/json', exporters.toJson(colNames, cellRows));
+        break;
+      case 'ndjson':
+        download(`${base}.ndjson`, 'application/x-ndjson', exporters.toNdjson(colNames, cellRows));
+        break;
+      case 'tsv':
+        download(`${base}.tsv`, 'text/tab-separated-values', exporters.toTsv(colNames, cellRows));
+        break;
+      case 'markdown':
+        download(`${base}.md`, 'text/markdown', exporters.toMarkdown(colNames, cellRows));
+        break;
+      case 'sql-insert': {
+        const qualified = contextTable
+          ? (contextSchema && contextSchema !== 'main' && contextSchema !== 'public'
+            ? `${contextSchema}.${contextTable}`
+            : contextTable)
+          : 'target_table';
+        download(`${base}.insert.sql`, 'text/plain',
+          exporters.toSqlInsert(connKindRef.current ?? 'sqlite', qualified, colNames, cellRows));
+        break;
+      }
+      default:
+        download(`${base}.csv`, 'text/csv;charset=utf-8', exporters.toCsv(colNames, cellRows));
     }
     setExportMenu(false);
   };
@@ -2555,6 +2567,30 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
       run: () => { doExport('tsv'); },
     }));
     unregs.push(registerCommand({
+      id: 'ws.export-ndjson',
+      label: '导出结果 → NDJSON',
+      category: '导出',
+      keywords: ['ndjson', 'json', 'export', 'download'],
+      enabled: () => hasResult && result.statement_type === 'select',
+      run: () => { doExport('ndjson'); },
+    }));
+    unregs.push(registerCommand({
+      id: 'ws.export-markdown',
+      label: '导出结果 → Markdown',
+      category: '导出',
+      keywords: ['markdown', 'md', 'export', 'table'],
+      enabled: () => hasResult && result.statement_type === 'select',
+      run: () => { doExport('markdown'); },
+    }));
+    unregs.push(registerCommand({
+      id: 'ws.export-sql-insert',
+      label: '导出结果 → SQL INSERT',
+      category: '导出',
+      keywords: ['insert', 'sql', 'export', 'import'],
+      enabled: () => hasResult && result.statement_type === 'select',
+      run: () => { doExport('sql-insert'); },
+    }));
+    unregs.push(registerCommand({
       id: 'ws.prev-history',
       label: '上一条查询历史',
       category: '编辑器',
@@ -3127,7 +3163,10 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
                       >
                         <button className="btn-ico" style={{ display: 'block', width: '100%', textAlign: 'left', margin: '1px 4px' }} onClick={() => doExport('csv')} title="下载 CSV（含 BOM，Excel 友好）">CSV</button>
                         <button className="btn-ico" style={{ display: 'block', width: '100%', textAlign: 'left', margin: '1px 4px' }} onClick={() => doExport('json')} title="下载 JSON">JSON</button>
+                        <button className="btn-ico" style={{ display: 'block', width: '100%', textAlign: 'left', margin: '1px 4px' }} onClick={() => doExport('ndjson')} title="下载 NDJSON（每行一对象）">NDJSON</button>
                         <button className="btn-ico" style={{ display: 'block', width: '100%', textAlign: 'left', margin: '1px 4px' }} onClick={() => doExport('tsv')} title="下载 TSV（制表符）">TSV</button>
+                        <button className="btn-ico" style={{ display: 'block', width: '100%', textAlign: 'left', margin: '1px 4px' }} onClick={() => doExport('markdown')} title="复制为 Markdown 表格片段">Markdown</button>
+                        <button className="btn-ico" style={{ display: 'block', width: '100%', textAlign: 'left', margin: '1px 4px' }} onClick={() => doExport('sql-insert')} title="导出为 SQL INSERT 语句">SQL INSERT</button>
                         <div style={{ height: 1, background: 'var(--border)', margin: '3px 4px' }} />
                         <div style={{ padding: '2px 6px', color: 'var(--muted)', fontSize: 11 }}>
                           {selRows.size > 0 ? `${selRows.size} 行` : `${rowCount} 行`} · {visibleColumns.length}/{columns.length} 列

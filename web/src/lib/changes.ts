@@ -151,6 +151,15 @@ export class ChangeQueue {
     this.changes.clear();
     this.undoStack = [];
   }
+
+  /** 丢弃某一行的全部变更（行操作按钮 ↩ 用，区别于按序 undo）。 */
+  discardRow(rowId: string): boolean {
+    let removed = false;
+    for (const type of ['update', 'delete', 'insert'] as const) {
+      if (this.changes.delete(keyOf(rowId, type))) removed = true;
+    }
+    return removed;
+  }
 }
 
 export function valuesEqual(a: Value, b: Value): boolean {

@@ -3,6 +3,7 @@ import type { DatabaseKind, FilterCondition, FilterOperator, SortDirection, Tabl
 import * as api from '../lib/api';
 import { ApiError } from '../lib/api';
 import { ChangeQueue, buildStatements, commitInTransaction, dialectFor, valuesEqual } from '../lib/changes';
+import { toCsv, toTsv, toJson, toNdjson, toMarkdown, toSqlInsert, toInClause, download } from '../lib/exporters';
 
 // ─── M11 表数据浏览器（behavior.md §13）：服务端分页/排序/过滤 ───
 
@@ -95,6 +96,7 @@ export default function TableDataView({ connId, kind, schema, table, onOpenSql }
   const [reviewOpen, setReviewOpen] = useState(false);
   const [committing, setCommitting] = useState(false);
   const [commitError, setCommitError] = useState<string | null>(null);
+  const [exportOpen, setExportOpen] = useState(false);
   const newSeq = useRef(0);
 
   const qualified = `${schema}.${table}`;
@@ -272,6 +274,36 @@ export default function TableDataView({ connId, kind, schema, table, onOpenSql }
     setRev((r) => r + 1);
   };
 
+  // ─── M13 导出 / 复制（遵循当前过滤/排序/列显示）─────────
+  const exportColNames = result ? result.columns.map((c) => c.name) : [];
+  const exportCellRows: Value[][] = result ? result.rows.map((r) => (r as Value[])) : [];
+  const qualifiedTable = `${schema}.${table}`;
+
+  const doTableExport = (fmt: 'csv' | 'json' | 'ndjson' | 'tsv' | 'markdown' | 'sql-insert') => {
+    if (!result) return;
+    const base = `${schema}_${table}`;
+    switch (fmt) {
+      case 'json': download(`${base}.json`, 'application/json', toJson(exportColNames, exportCellRows)); break;
+      case 'ndjson': download(`${base}.ndjson`, 'application/x-ndjson', toNdjson(exportColNames, exportCellRows)); break;
+      case 'tsv': download(`${base}.tsv`, 'text/tab-separated-values', toTsv(exportColNames, exportCellRows)); break;
+      case 'markdown': download(`${base}.md`, 'text/markdown', toMarkdown(exportColNames, exportCellRows)); break;
+      case 'sql-insert': download(`${base}.insert.sql`, 'text/plain', toSqlInsert(kind, qualifiedTable, exportColNames, exportCellRows)); break;
+      default: download(`${base}.csv`, 'text/csv;charset=utf-8', toCsv(exportColNames, exportCellRows));
+    }
+    setExportOpen(false);
+  };
+
+  const copyInClause = async () => {
+    if (pkCols.length === 0) return;
+    const pk = pkCols[0];
+    const idx = exportColNames.indexOf(pk);
+    if (idx < 0) return;
+    const vals = exportCellRows.map((r) => r[idx] ?? null);
+    const text = toInClause(kind, pk, vals as Value[]);
+    try { await navigator.clipboard?.writeText(text); } catch { /* ignore */ }
+  };
+
+
   // Ctrl/Cmd+Z 撤销最近一次编辑（输入框聚焦时不拦截）
   useEffect(() => {
     const h = (e: KeyboardEvent) => {
@@ -327,6 +359,27 @@ export default function TableDataView({ connId, kind, schema, table, onOpenSql }
         </button>
         <button style={btn} onClick={loadAndDiscard}>刷新</button>
         <button style={btn} onClick={() => onOpenSql(schema, table)}>在 SQL 中打开</button>
+        <div style={{ position: 'relative' }}>
+          <button style={btn} onClick={() => setExportOpen((v) => !v)}>导出 ▾</button>
+          {exportOpen && (
+            <div style={{ position: 'absolute', top: '100%', left: 0, background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 3, boxShadow: '0 2px 8px rgba(0,0,0,0.15)', padding: 2, zIndex: 30, minWidth: 130 }}>
+              {([
+                ['csv', 'CSV'], ['json', 'JSON'], ['ndjson', 'NDJSON'], ['tsv', 'TSV'],
+                ['markdown', 'Markdown'], ['sql-insert', 'SQL INSERT'],
+              ] as const).map(([k, label]) => (
+                <button key={k} className="btn-ico"
+                  style={{ display: 'block', width: '100%', textAlign: 'left', margin: '1px 4px' }}
+                  onClick={() => doTableExport(k)}>{label}</button>
+              ))}
+              <div style={{ height: 1, background: 'var(--border)', margin: '3px 4px' }} />
+              <button className="btn-ico" style={{ display: 'block', width: '100%', textAlign: 'left', margin: '1px 4px' }}
+                onClick={() => { void copyInClause(); setExportOpen(false); }}
+                disabled={pkCols.length === 0} title={pkCols.length ? `复制 ${pkCols[0]} 的 IN 子句` : '需主键'}>
+                复制 IN 子句
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* M12 变更跟踪工具条（有未保存修改时出现） */}
@@ -427,7 +480,7 @@ export default function TableDataView({ connId, kind, schema, table, onOpenSql }
                     {canEdit && (
                       <td style={{ ...cell, textAlign: 'center' }}>
                         {deleted ? (
-                          <button style={{ ...btn, padding: '0 6px' }} title="撤销删除" onClick={() => { queue.undo(); setRev((r) => r + 1); }}>↩</button>
+                          <button style={{ ...btn, padding: '0 6px' }} title="撤销删除" onClick={() => { queue.discardRow(rowId); setRev((r) => r + 1); }}>↩</button>
                         ) : (
                           <button style={{ ...btn, padding: '0 6px' }} title="删除行（加入待保存队列）" onClick={() => deleteRow(rowId)}>✕</button>
                         )}
@@ -475,7 +528,7 @@ export default function TableDataView({ connId, kind, schema, table, onOpenSql }
                     <tr key={c.rowId} style={{ background: 'rgba(76, 215, 115, 0.10)' }}>
                       {canEdit && (
                         <td style={{ ...cell, textAlign: 'center' }}>
-                          <button style={{ ...btn, padding: '0 6px' }} title="移除新行" onClick={() => { queue.undo(); setRev((r) => r + 1); }}>↩</button>
+                          <button style={{ ...btn, padding: '0 6px' }} title="移除新行" onClick={() => { queue.discardRow(c.rowId); setRev((r) => r + 1); }}>↩</button>
                         </td>
                       )}
                       {columns.map((col) => {
