@@ -3,7 +3,9 @@ import type { ColumnInfo, ForeignKeyInfo, IndexInfo, SchemaInfo, TableInfo } fro
 import * as api from '../lib/api';
 import CollapsiblePane from './CollapsiblePane';
 import ContextMenu, { type ContextMenuEntry } from './ContextMenu';
+import ERDiagram from './ERDiagram';
 import { ChevronIcon, RefreshIcon, SearchIcon, TableIcon, ViewIcon } from './Icons';
+import TableStructureEditor from './TableStructureEditor';
 
 interface TableDetail {
   columns: ColumnInfo[];
@@ -28,6 +30,14 @@ export default function SchemaBrowser({ connId, onSelectTable, onPreviewTable, o
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState('');
+  const [erMode, setErMode] = useState(false);
+  const [kind, setKind] = useState<string>('');
+
+  useEffect(() => {
+    let cancelled = false;
+    api.getConnection(connId).then((c) => { if (!cancelled) setKind(c.kind); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [connId]);
   const [expandedSchemas, setExpandedSchemas] = useState<Record<string, boolean>>({});
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; schema: string; table?: string } | null>(null);
 
@@ -183,6 +193,14 @@ export default function SchemaBrowser({ connId, onSelectTable, onPreviewTable, o
       <button className="btn-ico" title="刷新" onClick={() => void reload(true)}>
         <RefreshIcon />
       </button>
+      <button
+        className={`btn-ico ${erMode ? 'active' : ''}`}
+        title="ER 图（当前 schema 的表与外键关系）"
+        onClick={() => setErMode((v) => !v)}
+        disabled={selSchema == null}
+      >
+        🕸
+      </button>
     </>
   );
 
@@ -190,8 +208,21 @@ export default function SchemaBrowser({ connId, onSelectTable, onPreviewTable, o
     <CollapsiblePane title="库表结构" variant="md" actions={actions}>
       <div className="pane-body tree" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
         {error && <div className="error-box">{error}</div>}
-        {schemas.length === 0 && !loading && <div className="empty">无 schema 数据</div>}
-        {schemas.map((s) => {
+        {erMode && selSchema && (
+          <ERDiagram
+            connId={connId}
+            schema={selSchema}
+            tables={tablesBySchema[selSchema] ?? []}
+            onSelectTable={(t) => {
+              setErMode(false);
+              void openTable(t);
+            }}
+          />
+        )}
+        {erMode && !selSchema && <div className="empty">选择一个 schema 查看 ER 图</div>}
+        {!erMode && schemas.length === 0 && !loading && <div className="empty">无 schema 数据</div>}
+        {!erMode &&
+          schemas.map((s) => {
           const open = !!expandedSchemas[s.name];
           return (
             <div key={s.name}>
@@ -294,6 +325,21 @@ export default function SchemaBrowser({ connId, onSelectTable, onPreviewTable, o
                 <div className="muted mono" style={{ padding: '0 8px' }}>
                   {detail.fks.map((fk) => `${fk.name}: ${fk.columns.join(', ')} → ${fk.referenced_schema}.${fk.referenced_table}(${fk.referenced_columns.join(', ')})`).join('\n')}
                 </div>
+              </>
+            )}
+            {kind && (
+              <>
+                <div className="group" style={{ paddingTop: 6 }}>结构编辑</div>
+                <TableStructureEditor
+                  connId={connId}
+                  kind={kind}
+                  schema={selSchema ?? ''}
+                  table={selTable}
+                  columns={detail.columns ?? []}
+                  indexes={detail.indexes ?? []}
+                  fks={detail.fks ?? []}
+                  onApplied={() => { void openTable(selTable); }}
+                />
               </>
             )}
             <div className="group" style={{ paddingTop: 6 }}>DDL</div>

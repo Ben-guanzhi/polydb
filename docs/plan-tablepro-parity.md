@@ -44,13 +44,14 @@
 
 > **进度（2026-09-20）**：M10–M15 已实现并全绿提交（见 git log：feat(M10)~feat(M15)）。
 > M14 核实后确认目标能力（参数面板 / EXPLAIN 树渲染 / 日志全文搜索）此前已存在，无需开发。
-> 遗留可选项：M16（结构编辑器 + ER 图）、M17（AI 助手 + MCP server）；横切还债中
-> 「ImportModal 拆分」未动；「TUI Redis 模式」「sshtunnel known_hosts 首用校验（TOFU）」
-> 「Rust Transport trait 补齐（KV/事务/浏览）」已实现（transport KV 五方法 + TUI viewKV；
-> Go `HostKeyCallback` + Rust `TunnelHandler::check_server_key` known_hosts 双端一致，
-> spec/behavior.md §9 + docs/ssh-tunnel.md 已更新；Rust `Transport` trait 加
-> browse_rows(_count)/KV 六方法/事务四方法 + LocalTransport 委托 + 委托接线测试，
-> 见 docs/frontends.md）。
+> 遗留可选项：M17（AI 助手 + MCP server）；横切还债中「ImportModal 拆分」未动；
+> 「TUI Redis 模式」「sshtunnel known_hosts 首用校验（TOFU）」「Rust Transport trait 补齐」
+> 「M16（ER 图 + 表结构编辑器）」已实现（transport KV 五方法 + TUI viewKV；Go `HostKeyCallback`
+> + Rust `TunnelHandler::check_server_key` known_hosts 双端一致，spec/behavior.md §9 +
+> docs/ssh-tunnel.md 已更新；Rust `Transport` trait 加 browse/KV/事务 + 委托接线测试；
+> M16：`lib/erDiagram`（确定性网格布局）+ `ERDiagram.tsx`（SVG，SchemaBrowser 🕸 开关）、
+> `lib/alterSql`（方言 DDL 生成，SQLite/Oracle 限制明确拒绝）+ `TableStructureEditor.tsx`
+> （表详情内「结构编辑」，事务内执行、失败回滚），见 docs/frontends.md）。
 
 ### M10 — 安全基线：服务端鉴权 + 连接级只读 【规模 S-M，前置必须】
 
@@ -133,7 +134,13 @@
 - **连接分组/标签/颜色**：storage 迁移（connections 表 `ALTER TABLE ADD COLUMN group_name/tags/color`，向后兼容）；spec `ConnectionInfo` 增可选字段（non-breaking）；ConnectionList 分组渲染 + 颜色点 + 折叠；连接复制；连接配置导出/导入（**不含明文密码**，`password_ref` 保留——已有 m8 红线测试兜底）。
 - **应用级主题**：`data-theme="light|dark"` + CSS 变量（现有样式已用 `var(--danger)` 等）；与编辑器主题合并为一个外观设置；`app.theme-cycle` 命令升级。
 
-### M16 — 结构编辑器 + ER 图 【规模 L，后置可选】
+### M16 — 结构编辑器 + ER 图 【规模 L，后置可选】✅ 已实现（2026-09-20）
+
+> 实现落点：`web/src/lib/erDiagram.ts`（确定性网格布局）+ `ERDiagram.tsx`（纯 SVG，无第三方
+> 图形库，SchemaBrowser 🕸 开关）；`web/src/lib/alterSql.ts`（方言 DDL 生成，SQLite/Oracle
+> 能力限制用 `UnsupportedAlterError` 明确拒绝）+ `TableStructureEditor.tsx`（表详情「结构编辑」，
+> 事务内执行、失败回滚）。覆盖 sqlite/postgres/mysql/mssql/oracle 五方言（超出计划的
+> SQLite+PG）。单测：erDiagram 6 + alterSql 18。
 
 - 结构编辑：list_columns/indexes/fks → 表单 → 前端按方言生成 `ALTER TABLE` 预览 → 确认执行（走 executeQuery）。先 SQLite + PG。spec 不变。
 - ER 图：`list_foreign_keys` 关系渲染（SVG/Canvas，评估 react-flow 依赖——纯 UI 库允许）。只读关系图，不做逆向同步。

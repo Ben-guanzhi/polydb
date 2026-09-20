@@ -324,11 +324,6 @@ function download(filename: string, mime: string, content: string) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function tsEscape(v: unknown): string {
-  if (v === null || v === undefined) return '';
-  return String(v).replace(/\t/g, ' ').replace(/\n/g, ' ');
-}
-
 function baseFilename(): string {
   const d = new Date();
   const pad = (n: number) => String(n).padStart(2, '0');

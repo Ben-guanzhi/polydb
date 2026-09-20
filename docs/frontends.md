@@ -8,7 +8,10 @@ polydb 有多个前端，均遵守 AGENTS.md 铁律：**只经 `app-core`（进�
 - 技术栈：Vite 6 + React 18 + TypeScript，`@msgpack/msgpack` 编解码 msgpack 控制面
 - 入口：`web/src/App.tsx`；HTTP 客户端唯一出口 `web/src/lib/api.ts`（基于 spec/openapi.yaml 的 REST 控制面）
 - 运行：`cd web && npm run dev`（Vite 代理 `/api` → `POLYDB_SERVER_URL || http://127.0.0.1:8080`）
-- 组件：ConnectionList（连接 CRUD/测试）、SchemaBrowser（schemas→tables→columns/indexes/fks/DDL）、QueryWorkspace（Monaco + 结果表格）
+- 组件：ConnectionList（连接 CRUD/测试）、SchemaBrowser（schemas→tables→columns/indexes/fks/DDL，
+  🕸 开关切 ER 图，表详情内「结构编辑」ALTER 表单）、ERDiagram（M16，纯 SVG 只读关系图）、
+  TableStructureEditor（M16，按方言生成 DDL，事务内执行失败回滚）、
+  QueryWorkspace（Monaco + 结果表格 + 变更跟踪编辑/导出）、RedisBrowser（Redis 键浏览/命令）
 
 ## TUI（M4，Go + bubbletea）
 
