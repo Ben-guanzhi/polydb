@@ -42,6 +42,11 @@
 
 ## 3. 里程碑
 
+> **进度（2026-09-20）**：M10–M15 已实现并全绿提交（见 git log：feat(M10)~feat(M15)）。
+> M14 核实后确认目标能力（参数面板 / EXPLAIN 树渲染 / 日志全文搜索）此前已存在，无需开发。
+> 遗留可选项：M16（结构编辑器 + ER 图）、M17（AI 助手 + MCP server）；横切还债中
+> 「TUI Redis 模式」「ImportModal 拆分」「sshtunnel known_hosts」未动。
+
 ### M10 — 安全基线：服务端鉴权 + 连接级只读 【规模 S-M，前置必须】
 
 **spec 变更（均 non-breaking）**
