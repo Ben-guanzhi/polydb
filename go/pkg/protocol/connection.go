@@ -17,6 +17,9 @@ type CreateConnectionRequest struct {
 	// ReadOnly 为 true 时 app-core 拒绝写语句与 KV 写（behavior.md §12.3）。
 	// 用指针保证缺省即 false 且线上不编码（与 Rust Option<bool> 对齐）。
 	ReadOnly *bool `json:"read_only,omitempty" msgpack:"read_only,omitempty"`
+	// Group/Color 是 UI 组织字段（M15）：分组名与颜色点，不参与任何查询行为。
+	Group *string `json:"group,omitempty" msgpack:"group,omitempty"`
+	Color *string `json:"color,omitempty" msgpack:"color,omitempty"`
 }
 
 type UpdateConnectionRequest struct {
@@ -31,6 +34,8 @@ type UpdateConnectionRequest struct {
 	SSHTunnel     *SshTunnelConfig  `json:"ssh_tunnel,omitempty" msgpack:"ssh_tunnel,omitempty"`
 	DefaultSchema *string           `json:"default_schema,omitempty" msgpack:"default_schema,omitempty"`
 	ReadOnly      *bool             `json:"read_only,omitempty" msgpack:"read_only,omitempty"`
+	Group         *string           `json:"group,omitempty" msgpack:"group,omitempty"`
+	Color         *string           `json:"color,omitempty" msgpack:"color,omitempty"`
 }
 
 type ConnectionInfo struct {
@@ -45,6 +50,8 @@ type ConnectionInfo struct {
 	SSHTunnel     *SshTunnelConfig  `json:"ssh_tunnel,omitempty" msgpack:"ssh_tunnel,omitempty"`
 	DefaultSchema string            `json:"default_schema,omitempty" msgpack:"default_schema,omitempty"`
 	ReadOnly      *bool             `json:"read_only,omitempty" msgpack:"read_only,omitempty"`
+	Group         *string           `json:"group,omitempty" msgpack:"group,omitempty"`
+	Color         *string           `json:"color,omitempty" msgpack:"color,omitempty"`
 	CreatedAt     time.Time         `json:"created_at" msgpack:"created_at"`
 	UpdatedAt     time.Time         `json:"updated_at" msgpack:"updated_at"`
 }

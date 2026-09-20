@@ -43,6 +43,8 @@ impl Storage {
                 ssh_tunnel TEXT,
                 default_schema TEXT,
                 read_only INTEGER NOT NULL DEFAULT 0,
+                \"group\" TEXT,
+                \"color\" TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );",
@@ -54,6 +56,15 @@ impl Storage {
         ) {
             if !e.to_string().contains("duplicate column") {
                 return Err(CoreError::Storage(format!("migrate read_only failed: {e}")));
+            }
+        }
+        // M15 迁移：老库没有 group/color 列。
+        for col in ["\"group\"", "color"] {
+            let stmt = format!("ALTER TABLE connections ADD COLUMN {col} TEXT;");
+            if let Err(e) = conn.execute_batch(&stmt) {
+                if !e.to_string().contains("duplicate column") {
+                    return Err(CoreError::Storage(format!("migrate {col} failed: {e}")));
+                }
             }
         }
         Ok(())

@@ -11,6 +11,19 @@
   --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
 }
 
+/* M15 应用级暗色主题（<html data-theme="dark">）：只覆盖变量，组件零改动。 */
+:root[data-theme='dark'] {
+  --bg: #0f1115;
+  --panel: #1a1d24;
+  --border: #2c313c;
+  --text: #d7dbe4;
+  --muted: #8a93a6;
+  --accent: #4f8ef7;
+  --accent-dim: #16283f;
+  --danger: #f8717a;
+  --ok: #4ade80;
+}
+
 * { box-sizing: border-box; }
 
 body {

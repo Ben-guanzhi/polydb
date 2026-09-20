@@ -32,8 +32,8 @@ impl ConnectionRepository {
         let kind_str = req.kind.to_string();
 
         conn.execute(
-            "INSERT INTO connections (id, name, kind, host, port, database, username, password_ref, options, ssh_tunnel, default_schema, read_only, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            "INSERT INTO connections (id, name, kind, host, port, database, username, password_ref, options, ssh_tunnel, default_schema, read_only, \"group\", color, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             rusqlite::params![
                 id.to_string(),
                 req.name,
@@ -47,6 +47,8 @@ impl ConnectionRepository {
                 ssh_json,
                 req.default_schema,
                 req.read_only.unwrap_or(false),
+                req.group.as_deref(),
+                req.color.as_deref(),
                 now.to_rfc3339(),
                 now.to_rfc3339(),
             ],
@@ -64,6 +66,8 @@ impl ConnectionRepository {
             ssh_tunnel: req.ssh_tunnel.clone(),
             default_schema: req.default_schema.clone(),
             read_only: req.read_only,
+            group: req.group.clone(),
+            color: req.color.clone(),
             created_at: now,
             updated_at: now,
         })
@@ -72,7 +76,7 @@ impl ConnectionRepository {
     pub fn list(&self) -> CoreResult<Vec<ConnectionInfo>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, name, kind, host, port, database, username, options, ssh_tunnel, default_schema, read_only, created_at, updated_at FROM connections ORDER BY created_at"
+            "SELECT id, name, kind, host, port, database, username, options, ssh_tunnel, default_schema, read_only, \"group\", color, created_at, updated_at FROM connections ORDER BY created_at"
         ).map_err(|e| CoreError::Storage(format!("list connections prepare: {e}")))?;
 
         let rows = stmt
@@ -88,8 +92,10 @@ impl ConnectionRepository {
                 let ssh_json: Option<String> = row.get(8)?;
                 let default_schema: Option<String> = row.get(9)?;
                 let read_only: i64 = row.get(10)?;
-                let created_at_str: String = row.get(11)?;
-                let updated_at_str: String = row.get(12)?;
+                let group: Option<String> = row.get(11)?;
+                let color: Option<String> = row.get(12)?;
+                let created_at_str: String = row.get(13)?;
+                let updated_at_str: String = row.get(14)?;
                 Ok((
                     id_str,
                     name,
@@ -102,6 +108,8 @@ impl ConnectionRepository {
                     ssh_json,
                     default_schema,
                     read_only,
+                    group,
+                    color,
                     created_at_str,
                     updated_at_str,
                 ))
@@ -122,6 +130,8 @@ impl ConnectionRepository {
                 ssh_json,
                 default_schema,
                 read_only,
+                group,
+                color,
                 created_at_str,
                 updated_at_str,
             ) = row.map_err(|e| CoreError::Storage(format!("row: {e}")))?;
@@ -156,6 +166,8 @@ impl ConnectionRepository {
                 ssh_tunnel,
                 default_schema,
                 read_only: bool_from_stored(read_only),
+                group,
+                color,
                 created_at,
                 updated_at,
             });
@@ -166,7 +178,7 @@ impl ConnectionRepository {
     pub fn get(&self, id: ConnectionId) -> CoreResult<Option<ConnectionInfo>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, name, kind, host, port, database, username, options, ssh_tunnel, default_schema, read_only, created_at, updated_at FROM connections WHERE id = ?1"
+            "SELECT id, name, kind, host, port, database, username, options, ssh_tunnel, default_schema, read_only, \"group\", color, created_at, updated_at FROM connections WHERE id = ?1"
         ).map_err(|e| CoreError::Storage(format!("get connection prepare: {e}")))?;
 
         let result = stmt.query_row(rusqlite::params![id.to_string()], |row| {
@@ -181,8 +193,10 @@ impl ConnectionRepository {
             let ssh_json: Option<String> = row.get(8)?;
             let default_schema: Option<String> = row.get(9)?;
             let read_only: i64 = row.get(10)?;
-            let created_at_str: String = row.get(11)?;
-            let updated_at_str: String = row.get(12)?;
+            let group: Option<String> = row.get(11)?;
+            let color: Option<String> = row.get(12)?;
+            let created_at_str: String = row.get(13)?;
+            let updated_at_str: String = row.get(14)?;
             Ok((
                 id_str,
                 name,
@@ -195,6 +209,8 @@ impl ConnectionRepository {
                 ssh_json,
                 default_schema,
                 read_only,
+                group,
+                color,
                 created_at_str,
                 updated_at_str,
             ))
@@ -213,6 +229,8 @@ impl ConnectionRepository {
                 ssh_json,
                 default_schema,
                 read_only,
+                group,
+                color,
                 created_at_str,
                 updated_at_str,
             )) => {
@@ -246,6 +264,8 @@ impl ConnectionRepository {
                     ssh_tunnel,
                     default_schema,
                     read_only: bool_from_stored(read_only),
+                    group,
+                    color,
                     created_at,
                     updated_at,
                 }))
@@ -290,6 +310,8 @@ impl ConnectionRepository {
             .as_ref()
             .or(existing.default_schema.as_ref());
         let read_only = req.read_only.or(existing.read_only);
+        let group = req.group.clone().or(existing.group.clone());
+        let color = req.color.clone().or(existing.color.clone());
 
         let options_json = serde_json::to_string(options)
             .map_err(|e| CoreError::Storage(format!("serialize options: {e}")))?;
@@ -299,7 +321,7 @@ impl ConnectionRepository {
             .map_err(|e| CoreError::Storage(format!("serialize ssh: {e}")))?;
 
         conn.execute(
-            "UPDATE connections SET name=?1, host=?2, port=?3, database=?4, username=?5, password_ref=?6, options=?7, ssh_tunnel=?8, default_schema=?9, read_only=?10, updated_at=?11 WHERE id=?12",
+            "UPDATE connections SET name=?1, host=?2, port=?3, database=?4, username=?5, password_ref=?6, options=?7, ssh_tunnel=?8, default_schema=?9, read_only=?10, \"group\"=?11, color=?12, updated_at=?13 WHERE id=?14",
             rusqlite::params![
                 name,
                 host,
@@ -311,6 +333,8 @@ impl ConnectionRepository {
                 ssh_json,
                 default_schema,
                 read_only.unwrap_or(false),
+                group.as_deref(),
+                color.as_deref(),
                 now.to_rfc3339(),
                 id.to_string(),
             ],
@@ -328,6 +352,8 @@ impl ConnectionRepository {
             ssh_tunnel: ssh_tunnel.cloned(),
             default_schema: default_schema.cloned(),
             read_only,
+            group,
+            color,
             created_at: existing.created_at,
             updated_at: now,
         }))

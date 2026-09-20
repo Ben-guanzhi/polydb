@@ -185,7 +185,8 @@ func TestContractReadOnlyConnection(t *testing.T) {
 			// 默认（非只读）连接不受影响
 			status, created2, err := c.Do("POST", "/api/connections",
 				map[string]any{"name": "rw-sqlite-" + fmt.Sprintf("%d", time.Now().UnixNano()),
-					"kind": "sqlite", "database": ":memory:"})
+					"kind": "sqlite", "database": ":memory:",
+					"group": "dev", "color": "#123456"})
 			if err != nil || status != 201 {
 				t.Fatalf("%s: create rw conn: status=%d err=%v", b.name, status, err)
 			}
@@ -193,6 +194,9 @@ func TestContractReadOnlyConnection(t *testing.T) {
 			if !ok || id2 == "" {
 				t.Fatalf("%s: no rw conn id: %v", b.name, created2)
 			}
+			// M15：group/color 随 ConnectionInfo 回显（双端一致）
+			r.step("get rw conn echoes group/color", "GET", "/api/connections/"+id2, nil, 200,
+				map[string]any{"group": "dev", "color": "#123456"}, keep("group", "color"))
 			r.step("rw create table allowed", "POST", "/api/connections/"+id2+"/query",
 				map[string]any{"sql": "CREATE TABLE t(a INTEGER)"},
 				200, map[string]any{"statement_type": "ddl"}, keep("statement_type"))

@@ -39,6 +39,16 @@
           "type": "boolean",
           "default": false,
           "description": "When true, the server rejects write statements (INSERT/UPDATE/DELETE/DDL) and KV writes on this connection with POLYDB_ERR_READ_ONLY (behavior.md §12)"
+        },
+        "group": {
+          "type": "string",
+          "maxLength": 64,
+          "description": "User-defined group/folder name for organizing connections in the UI"
+        },
+        "color": {
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "description": "Connection accent color (hex, e.g. #2d68c8), rendered as a dot in the UI"
         }
       }
     },
@@ -58,7 +68,9 @@
         "options": { "type": "object", "additionalProperties": { "type": "string" } },
         "ssh_tunnel": { "$ref": "common.json#/definitions/SshTunnelConfig" },
         "default_schema": { "type": "string" },
-        "read_only": { "type": "boolean", "default": false }
+        "read_only": { "type": "boolean", "default": false },
+        "group": { "type": "string", "maxLength": 64 },
+        "color": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" }
       }
     },
     "ConnectionInfo": {
@@ -76,6 +88,8 @@
         "ssh_tunnel": { "$ref": "common.json#/definitions/SshTunnelConfig" },
         "default_schema": { "type": "string" },
         "read_only": { "type": "boolean", "default": false },
+        "group": { "type": "string" },
+        "color": { "type": "string" },
         "created_at": { "type": "string", "format": "date-time" },
         "updated_at": { "type": "string", "format": "date-time" }
       },

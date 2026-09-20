@@ -50,6 +50,10 @@ export interface CreateConnectionRequest {
   default_schema?: string;
   /** When true, the server rejects write statements (INSERT/UPDATE/DELETE/DDL) and KV writes on this connection with POLYDB_ERR_READ_ONLY (behavior.md §12) */
   read_only?: boolean;
+  /** User-defined group/folder name for organizing connections in the UI */
+  group?: string;
+  /** Connection accent color (hex, e.g. #2d68c8), rendered as a dot in the UI */
+  color?: string;
 }
 
 export interface UpdateConnectionRequest {
@@ -65,6 +69,8 @@ export interface UpdateConnectionRequest {
   ssh_tunnel?: SshTunnelConfig;
   default_schema?: string;
   read_only?: boolean;
+  group?: string;
+  color?: string;
 }
 
 export interface ConnectionInfo {
@@ -79,6 +85,8 @@ export interface ConnectionInfo {
   ssh_tunnel?: SshTunnelConfig;
   default_schema?: string;
   read_only?: boolean;
+  group?: string;
+  color?: string;
   created_at: string;
   updated_at: string;
 }

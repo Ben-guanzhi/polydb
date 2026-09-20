@@ -126,6 +126,9 @@ export default function SettingsPanel({ open, onClose }: Props) {
         </div>
         <div style={{ flex: 1, overflow: 'auto', padding: '0 14px' }} onKeyDown={(e) => { if (e.key === 'Escape') { e.preventDefault(); onClose(); } }}>
           <div style={groupStyle}>外观</div>
+          <SelectRow label="应用主题" desc="整体界面亮/暗（与编辑器配色独立）" value={s.appTheme}
+            options={[{ value: 'light', label: '亮色' }, { value: 'dark', label: '暗色' }]}
+            onChange={(v) => patch({ appTheme: v })} width={120} />
           <SelectRow label="主题" desc="编辑器配色方案" value={s.theme} options={THEME_OPTIONS} onChange={(v) => patch({ theme: v })} width={180} />
 
           <div style={groupStyle}>编辑器</div>

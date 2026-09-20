@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS connections (
 	ssh_tunnel    TEXT,
 	default_schema TEXT,
 	read_only     INTEGER NOT NULL DEFAULT 0,
+	"group"       TEXT,
+	color         TEXT,
 	created_at    TEXT NOT NULL,
 	updated_at    TEXT NOT NULL
 );`
@@ -69,6 +71,12 @@ CREATE TABLE IF NOT EXISTS connections (
 	// M10 迁移：老库没有 read_only 列。列已存在时报错属预期，忽略。
 	if _, err := db.Exec("ALTER TABLE connections ADD COLUMN read_only INTEGER NOT NULL DEFAULT 0"); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 		return fmt.Errorf("migrate read_only: %w", err)
+	}
+	// M15 迁移：老库没有 group/color 列。
+	for _, col := range []string{`"group" TEXT`, "color TEXT"} {
+		if _, err := db.Exec("ALTER TABLE connections ADD COLUMN " + col); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return fmt.Errorf("migrate %s: %w", col, err)
+		}
 	}
 	return nil
 }

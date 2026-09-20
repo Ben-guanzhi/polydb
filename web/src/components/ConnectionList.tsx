@@ -80,6 +80,8 @@ export default function ConnectionList({ serverOk, selectedId, onSelect }: Props
       database: c.database ?? '',
       username: c.username ?? '',
       password: '',
+      group: c.group,
+      color: c.color,
       sshEnabled: !!c.ssh_tunnel,
       sshHost: c.ssh_tunnel?.host,
       sshPort: c.ssh_tunnel?.port,
@@ -108,6 +110,8 @@ export default function ConnectionList({ serverOk, selectedId, onSelect }: Props
           database: form.database?.trim() || undefined,
           username: form.username?.trim() || undefined,
           password: form.password?.trim() || undefined,
+          group: form.group?.trim() || undefined,
+          color: form.color || undefined,
         };
         req.ssh_tunnel = form.sshEnabled
           ? {
@@ -129,6 +133,8 @@ export default function ConnectionList({ serverOk, selectedId, onSelect }: Props
           database: form.database?.trim() || undefined,
           username: form.username?.trim() || undefined,
           password: form.password?.trim() || undefined,
+          group: form.group?.trim() || undefined,
+          color: form.color || undefined,
         };
         if (form.sshEnabled) {
           req.ssh_tunnel = {
@@ -178,6 +184,23 @@ export default function ConnectionList({ serverOk, selectedId, onSelect }: Props
 
   const set = (k: keyof FormState, v: unknown) => setForm((f) => ({ ...f, [k]: v as never }));
 
+  // M15 分组：任一连接有 group 时按组渲染（「未分组」兜底放最后），否则平铺。
+  const groups: { label: string; items: ConnectionInfo[] }[] = (() => {
+    if (!conns.some((c) => (c.group ?? '').trim())) {
+      return [{ label: '', items: conns }];
+    }
+    const m = new Map<string, ConnectionInfo[]>();
+    for (const c of conns) {
+      const g = (c.group ?? '').trim() || '未分组';
+      const arr = m.get(g);
+      if (arr) arr.push(c);
+      else m.set(g, [c]);
+    }
+    return [...m.entries()]
+      .map(([label, items]) => ({ label, items }))
+      .sort((a, b) => (a.label === '未分组' ? 1 : b.label === '未分组' ? -1 : 0));
+  })();
+
   const actions = (
     <button className="primary" onClick={() => (showForm ? closeForm() : startCreate())}>
       {showForm ? '取消' : (<><PlusIcon /> <span>新建</span></>)}
@@ -198,6 +221,21 @@ export default function ConnectionList({ serverOk, selectedId, onSelect }: Props
                 <option key={k} value={k}>{k}</option>
               ))}
             </select>
+            <div className="row">
+              <div style={{ flex: 2 }}>
+                <label>分组（可选）</label>
+                <input value={form.group ?? ''} onChange={(e) => set('group', e.target.value)} placeholder="prod / staging / dev" />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label>颜色（可选）</label>
+                <input
+                  type="color"
+                  value={form.color ?? '#2d68c8'}
+                  onChange={(e) => set('color', e.target.value)}
+                  style={{ height: 28, padding: 0, cursor: 'pointer' }}
+                />
+              </div>
+            </div>
             {form.kind !== 'sqlite' && (
               <>
                 <div className="row">
@@ -310,46 +348,61 @@ export default function ConnectionList({ serverOk, selectedId, onSelect }: Props
           </div>
         )}
         {conns.length === 0 && <div className="empty">暂无连接，点击「新建」创建。</div>}
-        {conns.map((c) => {
-          const st = testResults[c.id];
-          return (
-            <div key={c.id}>
-              <div
-                className={`conn-row ${selectedId === c.id ? 'active' : ''}`}
-                onClick={() => onSelect(selectedId === c.id ? null : c)}
-              >
-                <DbIcon kind={c.kind} size={16} />
-                <div style={{ minWidth: 0, flex: 1 }}>
-                  <div className="conn-name">{c.name}</div>
-                  <div className="conn-meta mono">
-                    {c.database ? `${c.database} · ` : ''}{c.kind}
-                    {st && (
-                      <span className={`status-dot ${st.connected ? 'ok' : 'err'}`} style={{ marginLeft: 6 }} />
-                    )}
-                  </div>
-                </div>
-                <div className="conn-actions">
-                  <button className="btn-ico" title="测试连接" disabled={testingId === c.id} onClick={(e) => { e.stopPropagation(); void test(c); }}>
-                    {testingId === c.id ? '…' : '测试'}
-                  </button>
-                  <button className="btn-ico" title="修改" onClick={(e) => { e.stopPropagation(); startEdit(c); }}>
-                    <PencilIcon />
-                  </button>
-                  <button className="btn-ico" title="删除" style={{ color: 'var(--danger)' }} onClick={(e) => { e.stopPropagation(); void remove(c); }}>
-                    <TrashIcon />
-                  </button>
-                </div>
+        {groups.map((g) => (
+          <div key={g.label || '__flat'}>
+            {g.label !== '' && (
+              <div className="muted" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.8, padding: '8px 8px 2px' }}>
+                {g.label}
               </div>
-              {st && (
-                <div className="muted" style={{ fontSize: 11, padding: '0 8px 6px' }}>
-                  {st.connected
-                    ? `已连接${st.latency_ms != null ? ` · ${st.latency_ms.toFixed(1)} ms` : ''}${st.server_version ? ` · ${st.server_version}` : ''}`
-                    : `连接失败: ${st.error ?? 'unknown'}`}
+            )}
+            {g.items.map((c) => {
+              const st = testResults[c.id];
+              return (
+                <div key={c.id}>
+                  <div
+                    className={`conn-row ${selectedId === c.id ? 'active' : ''}`}
+                    onClick={() => onSelect(selectedId === c.id ? null : c)}
+                  >
+                    {c.color ? (
+                      <span
+                        style={{ width: 8, height: 8, borderRadius: '50%', background: c.color, flexShrink: 0, alignSelf: 'center', marginRight: 2 }}
+                        title={c.color}
+                      />
+                    ) : null}
+                    <DbIcon kind={c.kind} size={16} />
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div className="conn-name">{c.name}</div>
+                      <div className="conn-meta mono">
+                        {c.database ? `${c.database} · ` : ''}{c.kind}
+                        {st && (
+                          <span className={`status-dot ${st.connected ? 'ok' : 'err'}`} style={{ marginLeft: 6 }} />
+                        )}
+                      </div>
+                    </div>
+                    <div className="conn-actions">
+                      <button className="btn-ico" title="测试连接" disabled={testingId === c.id} onClick={(e) => { e.stopPropagation(); void test(c); }}>
+                        {testingId === c.id ? '…' : '测试'}
+                      </button>
+                      <button className="btn-ico" title="修改" onClick={(e) => { e.stopPropagation(); startEdit(c); }}>
+                        <PencilIcon />
+                      </button>
+                      <button className="btn-ico" title="删除" style={{ color: 'var(--danger)' }} onClick={(e) => { e.stopPropagation(); void remove(c); }}>
+                        <TrashIcon />
+                      </button>
+                    </div>
+                  </div>
+                  {st && (
+                    <div className="muted" style={{ fontSize: 11, padding: '0 8px 6px' }}>
+                      {st.connected
+                        ? `已连接${st.latency_ms != null ? ` · ${st.latency_ms.toFixed(1)} ms` : ''}${st.server_version ? ` · ${st.server_version}` : ''}`
+                        : `连接失败: ${st.error ?? 'unknown'}`}
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-          );
-        })}
+              );
+            })}
+          </div>
+        ))}
       </div>
     </CollapsiblePane>
   );

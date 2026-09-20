@@ -24,6 +24,8 @@ fn sqlite_req(name: &str) -> CreateConnectionRequest {
         ssh_tunnel: None,
         default_schema: None,
         read_only: None,
+        group: None,
+        color: None,
     }
 }
 

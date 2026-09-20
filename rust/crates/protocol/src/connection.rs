@@ -28,6 +28,12 @@ pub struct CreateConnectionRequest {
     /// 只读连接（behavior.md §12.3）：为 true 时 app-core 拒绝写语句与 KV 写。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_only: Option<bool>,
+    /// 分组名（M15，纯 UI 组织字段）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// 颜色点（M15，纯 UI 组织字段，hex）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -54,6 +60,12 @@ pub struct UpdateConnectionRequest {
     pub default_schema: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_only: Option<bool>,
+    /// 分组名（M15，纯 UI 组织字段）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// 颜色点（M15，纯 UI 组织字段，hex）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +89,12 @@ pub struct ConnectionInfo {
     pub default_schema: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_only: Option<bool>,
+    /// 分组名（M15，纯 UI 组织字段）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// 颜色点（M15，纯 UI 组织字段，hex）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

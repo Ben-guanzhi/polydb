@@ -19,6 +19,7 @@ import { startDragResize } from './lib/dragResize';
 import type { ConnectionInfo } from './api';
 import * as api from './lib/api';
 import { loadStats, saveStats } from './lib/runStats';
+import { loadSettings, applyAppTheme } from './lib/settings';
 import type { RunStat } from './lib/runStats';
 
 self.MonacoEnvironment = {
@@ -134,6 +135,7 @@ export default function App() {
   }, [refreshConnections]);
 
   useEffect(() => {
+    applyAppTheme(loadSettings().appTheme);
     void checkHealth();
     const t = setInterval(() => void checkHealth(), 15_000);
     return () => clearInterval(t);

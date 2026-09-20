@@ -15,7 +15,7 @@ type ConnectionRepository struct {
 	db *sql.DB
 }
 
-const connColumns = "id, name, kind, host, port, database, username, options, ssh_tunnel, default_schema, read_only, created_at, updated_at"
+const connColumns = "id, name, kind, host, port, database, username, options, ssh_tunnel, default_schema, read_only, \"group\", color, created_at, updated_at"
 
 func NewConnectionRepository(db *sql.DB) *ConnectionRepository {
 	return &ConnectionRepository{db: db}
@@ -36,11 +36,12 @@ func (r *ConnectionRepository) Create(req *protocol.CreateConnectionRequest) (pr
 		}
 	}
 	_, err = r.db.Exec(
-		`INSERT INTO connections (id, name, kind, host, port, database, username, password_ref, options, ssh_tunnel, default_schema, read_only, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO connections (id, name, kind, host, port, database, username, password_ref, options, ssh_tunnel, default_schema, read_only, "group", color, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, req.Name, string(req.Kind), nullStr(req.Host), nullInt(req.Port),
 		nullStr(req.Database), nullStr(req.Username), nullStr(req.PasswordRef),
 		string(optionsJSON), nullBytes(sshJSON), nullStr(req.DefaultSchema), boolInt(req.ReadOnly),
+		nullStr(derefStr(req.Group)), nullStr(derefStr(req.Color)),
 		now.Format(time.RFC3339), now.Format(time.RFC3339),
 	)
 	if err != nil {
@@ -58,6 +59,8 @@ func (r *ConnectionRepository) Create(req *protocol.CreateConnectionRequest) (pr
 		SSHTunnel:     req.SSHTunnel,
 		DefaultSchema: req.DefaultSchema,
 		ReadOnly:      req.ReadOnly,
+		Group:         req.Group,
+		Color:         req.Color,
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}, nil
@@ -116,6 +119,8 @@ func (r *ConnectionRepository) Update(id string, req *protocol.UpdateConnectionR
 	ssh := existing.SSHTunnel
 	defSchema := existing.DefaultSchema
 	readOnly := existing.ReadOnly
+	group := existing.Group
+	color := existing.Color
 
 	if req.Name != nil {
 		name = *req.Name
@@ -144,6 +149,12 @@ func (r *ConnectionRepository) Update(id string, req *protocol.UpdateConnectionR
 	if req.ReadOnly != nil {
 		readOnly = req.ReadOnly
 	}
+	if req.Group != nil {
+		group = req.Group
+	}
+	if req.Color != nil {
+		color = req.Color
+	}
 
 	optionsJSON, err := json.Marshal(options)
 	if err != nil {
@@ -157,9 +168,10 @@ func (r *ConnectionRepository) Update(id string, req *protocol.UpdateConnectionR
 		}
 	}
 	_, err = r.db.Exec(
-		`UPDATE connections SET name=?, host=?, port=?, database=?, username=?, password_ref=?, options=?, ssh_tunnel=?, default_schema=?, read_only=?, updated_at=? WHERE id=?`,
+		`UPDATE connections SET name=?, host=?, port=?, database=?, username=?, password_ref=?, options=?, ssh_tunnel=?, default_schema=?, read_only=?, "group"=?, color=?, updated_at=? WHERE id=?`,
 		name, nullStr(host), nullInt(port), nullStr(database), nullStr(username),
 		nullStr(passwordRef), string(optionsJSON), nullBytes(sshJSON), nullStr(defSchema), boolInt(readOnly),
+		nullStr(derefStr(group)), nullStr(derefStr(color)),
 		now.Format(time.RFC3339), id,
 	)
 	if err != nil {
@@ -177,6 +189,8 @@ func (r *ConnectionRepository) Update(id string, req *protocol.UpdateConnectionR
 		SSHTunnel:     ssh,
 		DefaultSchema: defSchema,
 		ReadOnly:      readOnly,
+		Group:         group,
+		Color:         color,
 		CreatedAt:     existing.CreatedAt,
 		UpdatedAt:     now,
 	}, nil
@@ -217,9 +231,10 @@ func scanConnection(s rowScanner) (protocol.ConnectionInfo, error) {
 		sshJSON                       sql.NullString
 		defSchema                     sql.NullString
 		readOnly                      int
+		group, color                  sql.NullString
 	)
 	err := s.Scan(&id, &name, &kind, &host, &port, &database, &username,
-		&optionsJSON, &sshJSON, &defSchema, &readOnly, &created, &updated)
+		&optionsJSON, &sshJSON, &defSchema, &readOnly, &group, &color, &created, &updated)
 	if err != nil {
 		return protocol.ConnectionInfo{}, err
 	}
@@ -251,6 +266,8 @@ func scanConnection(s rowScanner) (protocol.ConnectionInfo, error) {
 		SSHTunnel:     ssh,
 		DefaultSchema: defSchema.String,
 		ReadOnly:      ro,
+		Group:         nullStrPtr(group),
+		Color:         nullStrPtr(color),
 		CreatedAt:     createdAt,
 		UpdatedAt:     updatedAt,
 	}, nil
@@ -283,6 +300,20 @@ func boolInt(v *bool) int {
 		return 1
 	}
 	return 0
+}
+
+func derefStr(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
+}
+
+func nullStrPtr(v sql.NullString) *string {
+	if !v.Valid {
+		return nil
+	}
+	return &v.String
 }
 
 var readOnlyFlag = true
