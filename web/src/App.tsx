@@ -412,6 +412,7 @@ export default function App() {
                   {mainMode === 'data' && tableCtx ? (
                     <TableDataView
                       connId={conn.id}
+                      kind={conn.kind}
                       schema={tableCtx.schema}
                       table={tableCtx.table}
                       onOpenSql={(s, t) => { handleSelectTable(s, t); }}
