@@ -88,7 +88,7 @@ func (c *Conn) executeIn(ctx context.Context, exec dbcore.SQLTx, sql string, arg
 			}
 			rowVals := make([]protocol.Value, len(raw))
 			for i, r := range raw {
-				rowVals[i] = dbcore.DriverToValue(*(r.(*any)))
+				rowVals[i] = dbcore.DriverToValueTyped(*(r.(*any)), columns[i].DataType)
 			}
 			resultRows = append(resultRows, rowVals)
 		}

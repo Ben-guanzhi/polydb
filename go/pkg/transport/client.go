@@ -43,6 +43,9 @@ type Client interface {
 	// Execute 执行一条 SQL。args 为空时不携带参数。
 	Execute(ctx context.Context, id, sql string, args ...protocol.Value) (*protocol.QueryResult, error)
 
+	// BrowseRows 按表浏览行数据（服务端分页；M11 数据面，只读操作）。
+	BrowseRows(ctx context.Context, id, schema, table string, req *protocol.TableRowsRequest) (*protocol.TableRowsResult, error)
+
 	// Redis KV（M6 前端 Redis 模式；读写受连接 read_only 约束，见 app-core）。
 	SelectDB(ctx context.Context, id string, index int) error
 	ScanKeys(ctx context.Context, id string, cursor uint64, pattern string, count int) (*protocol.RedisScanPage, error)

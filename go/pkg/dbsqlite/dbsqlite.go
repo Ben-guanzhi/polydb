@@ -98,7 +98,7 @@ func (c *Conn) executeIn(ctx context.Context, exec dbcore.SQLTx, sql string, arg
 			}
 			rowVals := make([]protocol.Value, len(raw))
 			for i, r := range raw {
-				rowVals[i] = dbcore.DriverToValue(*(r.(*any)))
+				rowVals[i] = dbcore.DriverToValueTyped(*(r.(*any)), columns[i].DataType)
 			}
 			resultRows = append(resultRows, rowVals)
 		}
@@ -200,24 +200,40 @@ func (c *Conn) ListIndexes(ctx context.Context, schema, table string) ([]protoco
 	if err != nil {
 		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
 	}
-	var indexes = []protocol.IndexInfo{}
+	type idxMeta struct {
+		name   string
+		unique bool
+	}
+	var metas []idxMeta
 	for rows.Next() {
 		var seq int
 		var name string
 		var unique int
-		if err := rows.Scan(&seq, &name, &unique); err != nil {
+		var origin string
+		var partial int // PRAGMA index_list 自 SQLite 3.8.9/3.8.11 起为 5 列（origin/partial）
+		if err := rows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		cols, err := c.indexColumns(ctx, name)
-		if err != nil {
-			rows.Close()
-			return nil, err
-		}
-		indexes = append(indexes, protocol.IndexInfo{Name: name, Unique: unique != 0, Columns: cols})
+		_ = origin
+		_ = partial
+		metas = append(metas, idxMeta{name: name, unique: unique != 0})
 	}
-	rows.Close()
-	return indexes, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close() // 先释放连接：:memory: 库池上限 1，边迭代边嵌套查询会死锁
+
+	indexes := []protocol.IndexInfo{}
+	for _, m := range metas {
+		cols, err := c.indexColumns(ctx, m.name)
+		if err != nil {
+			return nil, err
+		}
+		indexes = append(indexes, protocol.IndexInfo{Name: m.name, Unique: m.unique, Columns: cols})
+	}
+	return indexes, nil
 }
 
 func (c *Conn) indexColumns(ctx context.Context, index string) ([]protocol.IndexColumn, error) {
@@ -255,9 +271,11 @@ func (c *Conn) ListForeignKeys(ctx context.Context, schema, table string) ([]pro
 		var id, seq int
 		var refTable, from, to string
 		var onUpdate, onDelete string
-		if err := rows.Scan(&id, &seq, &refTable, &from, &to, &onUpdate, &onDelete); err != nil {
+		var match string // SQLite >=3.38 PRAGMA foreign_key_list 第 8 列（MATCH 类型，多为空）
+		if err := rows.Scan(&id, &seq, &refTable, &from, &to, &onUpdate, &onDelete, &match); err != nil {
 			return nil, err
 		}
+		_ = match
 		if _, ok := agg[id]; !ok {
 			agg[id] = &fkAgg{refTable: refTable}
 			order = append(order, id)

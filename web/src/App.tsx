@@ -6,16 +6,20 @@ import ConnectionList from './components/ConnectionList';
 import RedisBrowser from './components/RedisBrowser';
 import SchemaBrowser from './components/SchemaBrowser';
 import QueryWorkspace from './components/QueryWorkspace';
-import TableDataView from './components/TableDataView';
+import ObjectTabStrip from './components/ObjectTabStrip';
+import TableTab from './components/TableTab';
 import QueryLogPanel from './components/QueryLogPanel';
+import StartScreen from './components/StartScreen';
 import CollapsiblePane from './components/CollapsiblePane';
 import CommandPalette from './components/CommandPalette';
+import QuickSwitcher from './components/QuickSwitcher';
 import ShortcutPanel from './components/ShortcutPanel';
 import StatusBar from './components/StatusBar';
 import SettingsPanel from './components/SettingsPanel';
 import ActivityBar, { type ViewId } from './components/ActivityBar';
 import { onCommands, registerCommand } from './lib/commandRegistry';
 import { startDragResize } from './lib/dragResize';
+import { clearTableTabPreset, closeOpenTab, loadOpenTabs, openTableTab, saveOpenTabs, WORKBENCH_ID, type OpenTabsState, type TableFilterPreset } from './lib/openTabs';
 import type { ConnectionInfo } from './api';
 import * as api from './lib/api';
 import { loadStats, saveStats } from './lib/runStats';
@@ -65,11 +69,21 @@ export default function App() {
   const [connections, setConnections] = useState<ConnectionInfo[]>([]);
   const [context, setContext] = useState<{ sql: string; label: string; schema: string; table: string } | null>(null);
   const [autoRunToken, setAutoRunToken] = useState(0);
-  // M11 表数据浏览：主区模式切换。tableCtx 记录当前浏览的表；'data' 模式渲染 TableDataView。
-  const [tableCtx, setTableCtx] = useState<{ schema: string; table: string } | null>(null);
-  const [mainMode, setMainMode] = useState<'sql' | 'data'>('sql');
+  // U1 对象标签壳层：workbench 常驻 + 每表一 tab（TablePro 式）。
+  const [openState, setOpenState] = useState<OpenTabsState>({ tabs: [{ id: WORKBENCH_ID, kind: 'workbench' }], activeId: WORKBENCH_ID });
+  const connId = conn?.id ?? '';
+  useEffect(() => {
+    setOpenState(connId ? loadOpenTabs(connId) : { tabs: [{ id: WORKBENCH_ID, kind: 'workbench' }], activeId: WORKBENCH_ID });
+  }, [connId]);
+  useEffect(() => {
+    if (connId) saveOpenTabs(connId, openState);
+  }, [connId, openState]);
+  const mutateOpenTabs = useCallback((fn: (s: OpenTabsState) => OpenTabsState) => {
+    setOpenState((prev) => fn(prev));
+  }, []);
   const [stats, setStats] = useState<RunStat[]>(() => loadStats());
   const [cmdOpen, setCmdOpen] = useState(false);
+  const [qsOpen, setQsOpen] = useState(false);
   const [shortcutOpen, setShortcutOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [commands, setCommands] = useState<import('./lib/commandRegistry').CommandItem[]>([]);
@@ -92,6 +106,9 @@ export default function App() {
       if (mod && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setCmdOpen((v) => !v);
+      } else if (mod && !e.shiftKey && e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        setQsOpen((v) => !v);
       } else if (mod && e.key === ',') {
         e.preventDefault();
         setSettingsOpen((v) => !v);
@@ -110,13 +127,14 @@ export default function App() {
         e.preventDefault();
         setShortcutOpen((v) => !v);
       } else if (e.key === 'Escape') {
-        if (settingsOpen) setSettingsOpen(false);
+        if (qsOpen) setQsOpen(false);
+        else if (settingsOpen) setSettingsOpen(false);
         else if (shortcutOpen) setShortcutOpen(false);
       }
     };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
-  }, [shortcutOpen, settingsOpen, setView]);
+  }, [shortcutOpen, settingsOpen, qsOpen, setView]);
 
   const refreshConnections = useCallback(async () => {
     try { setConnections(await api.listConnections()); } catch { /* ignore */ }
@@ -152,30 +170,52 @@ export default function App() {
     setContext(null);
   };
 
-  const handleSelectTable = (schema: string, table: string) => {
-    setTableCtx({ schema, table });
-    setMainMode('sql');
-    setContext({
-      sql: `SELECT * FROM ${schema}.${table}\nLIMIT 100;`,
-      label: `${schema}.${table}`,
-      schema,
-      table,
-    });
+  // U4 活动连接心跳（参考 TablePro ConnectionHealthMonitor）：30s ping，常显延迟/断线。
+  const [connHealth, setConnHealth] = useState<{ ok: boolean | null; latency?: number; error?: string }>({ ok: null });
+  useEffect(() => {
+    setConnHealth({ ok: null });
+    const cid = conn?.id;
+    if (!cid || !serverOk) return;
+    let alive = true;
+    const ping = async () => {
+      try {
+        const st = await api.testConnection(cid);
+        if (alive) setConnHealth({ ok: !!st.connected, latency: st.latency_ms, error: st.error });
+      } catch (e) {
+        if (alive) setConnHealth({ ok: false, error: e instanceof Error ? e.message : String(e) });
+      }
+    };
+    void ping();
+    const t = setInterval(ping, 30_000);
+    return () => { alive = false; clearInterval(t); };
+  }, [conn?.id, serverOk]);
+
+  const handleOpenTable = (schema: string, table: string) => {
+    mutateOpenTabs((s) => openTableTab(s, schema, table).state);
   };
 
-  const handlePreviewTable = (schema: string, table: string) => {
-    // M11：双击/预览 → 表数据浏览器（服务端分页），不再拼一次性 SQL。
-    setTableCtx({ schema, table });
-    setMainMode('data');
+  // U6.2 打开目标表 tab 并带入等值过滤（FK 🔗 跳转）。
+  const handleOpenTableFiltered = (schema: string, table: string, cond: TableFilterPreset) => {
+    mutateOpenTabs((s) => openTableTab(s, schema, table, cond).state);
+  };
+
+  const handlePresetConsumed = (tabId: string) => {
+    mutateOpenTabs((s) => clearTableTabPreset(s, tabId));
+  };
+
+  const handleOpenInQuery = (sql: string) => {
+    setContext({ sql, label: '', schema: '', table: '' });
+    mutateOpenTabs((s) => ({ ...s, activeId: WORKBENCH_ID }));
   };
 
   const handlePrefillSql = (sql: string) => {
-    setContext({ sql, label: '', schema: '', table: '' });
+    handleOpenInQuery(sql);
   };
 
   const handleLogPick = (targetConnId: string, sql: string) => {
     setContext({ sql, label: '', schema: '', table: '' });
     setAutoRunToken((n) => n + 1);
+    mutateOpenTabs((s) => ({ ...s, activeId: WORKBENCH_ID }));
     if (conn?.id === targetConnId) return;
     const cached = connections.find((c) => c.id === targetConnId);
     if (cached) { setConn(cached); return; }
@@ -268,6 +308,14 @@ export default function App() {
       },
     }));
     unregs.push(registerCommand({
+      id: 'app.quick-switcher',
+      label: 'Quick Switcher · 搜索表 / 切换连接',
+      category: '导航',
+      hotkey: 'Ctrl+P',
+      keywords: ['quick', 'switcher', 'search', 'table', 'goto', 'jump', '搜表', '跳转', '定位'],
+      run: () => setQsOpen(true),
+    }));
+    unregs.push(registerCommand({
       id: 'app.shortcuts',
       label: '显示键盘快捷键',
       category: '帮助',
@@ -309,15 +357,36 @@ export default function App() {
     <div className="app">
       <div className="app-header">
         <h1>PolyDB</h1>
-        <span className="muted">Web · msgpack 控制面</span>
+        {conn && (
+          <span className="conn-chip" title={`${conn.kind}${conn.host ? ` · ${conn.host}` : ''}${conn.database ? ` · ${conn.database}` : ''}${connHealth.error ? `\n最近心跳失败：${connHealth.error}` : ''}`}>
+            <span className="dot" style={{ background: conn.color ?? 'var(--accent)' }} />
+            <span className="name">{conn.name}</span>
+            <span className={`badge ${conn.kind}`}>{conn.kind}</span>
+            {conn.read_only && <span title="只读（安全）模式：写语句将被服务端拒绝">🛡</span>}
+            <span className={`status-dot ${connHealth.ok === true ? 'ok' : connHealth.ok === false ? 'err' : serverOk ? 'ok' : 'off'}`} style={{ marginRight: 0 }} />
+            {connHealth.ok === true && connHealth.latency != null && (
+              <span className="muted mono" style={{ fontSize: 10 }}>{connHealth.latency.toFixed(0)}ms</span>
+            )}
+          </span>
+        )}
+        <button
+          className="btn-ico"
+          style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+          onClick={() => setQsOpen(true)}
+          title="Quick Switcher · 搜索表直达数据视图 (Ctrl+P)"
+        >
+          <span>🔍</span>
+          <span className="muted">搜索表</span>
+          <kbd style={{ fontFamily: 'monospace', fontSize: 10, color: 'var(--muted)', background: 'var(--bg-alt)', border: '1px solid var(--border)', borderRadius: 3, padding: '1px 5px' }}>Ctrl+P</kbd>
+        </button>
         <button
           className="btn-ico"
           style={{ display: 'flex', alignItems: 'center', gap: 6 }}
           onClick={() => setCmdOpen(true)}
-          title="命令面板 (Ctrl+K / ?)"
+          title="命令面板 (Ctrl+K)"
         >
           <span>命令</span>
-          <kbd style={{ fontFamily: 'monospace', fontSize: 10, color: 'var(--muted)', background: 'var(--bg-alt, rgba(0,0,0,0.15))', border: '1px solid var(--border)', borderRadius: 3, padding: '1px 5px' }}>Ctrl+K</kbd>
+          <kbd style={{ fontFamily: 'monospace', fontSize: 10, color: 'var(--muted)', background: 'var(--bg-alt)', border: '1px solid var(--border)', borderRadius: 3, padding: '1px 5px' }}>Ctrl+K</kbd>
         </button>
         <span style={{ marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
           <span className={`status-dot ${serverOk ? 'ok' : serverOk === false ? 'err' : 'off'}`} />
@@ -358,8 +427,7 @@ export default function App() {
             {conn && conn.kind !== 'redis' ? (
               <SchemaBrowser
                 connId={conn.id}
-                onSelectTable={handleSelectTable}
-                onPreviewTable={handlePreviewTable}
+                onOpenTable={handleOpenTable}
                 onPrefillSql={handlePrefillSql}
               />
             ) : conn && conn.kind === 'redis' ? (
@@ -391,58 +459,71 @@ export default function App() {
               <RedisBrowser connId={conn.id} />
             ) : (
               <>
-                {/* 查询/数据 模式切换（有选表上下文时） */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '4px 10px 0', borderBottom: '1px solid var(--border)' }}>
-                  {(['sql', 'data'] as const).map((m) => (
-                    <button
-                      key={m}
-                      onClick={() => setMainMode(m)}
-                      disabled={m === 'data' && !tableCtx}
-                      style={{
-                        fontFamily: 'inherit', fontSize: 12, padding: '4px 12px', cursor: 'pointer',
-                        background: mainMode === m ? 'var(--bg)' : 'transparent',
-                        color: mainMode === m ? 'var(--fg)' : 'var(--muted)',
-                        border: '1px solid var(--border)', borderBottom: mainMode === m ? '1px solid var(--bg)' : '1px solid var(--border)',
-                        borderRadius: '4px 4px 0 0',
-                      }}
-                    >
-                      {m === 'sql' ? 'SQL 查询' : `数据${tableCtx ? ` · ${tableCtx.schema}.${tableCtx.table}` : ''}`}
-                    </button>
-                  ))}
-                </div>
-                <div style={{ flex: 1, minHeight: 0 }}>
-                  {mainMode === 'data' && tableCtx ? (
-                    <TableDataView
-                      connId={conn.id}
-                      kind={conn.kind}
-                      schema={tableCtx.schema}
-                      table={tableCtx.table}
-                      onOpenSql={(s, t) => { handleSelectTable(s, t); }}
-                    />
-                  ) : (
-                    <QueryWorkspace
-                      connId={conn.id}
-                      prefillSql={context?.sql}
-                      contextLabel={context?.label}
-                      contextSchema={context?.schema}
-                      contextTable={context?.table}
-                      autoRunToken={autoRunToken}
-                      onClearContext={context ? () => setContext(null) : undefined}
-                    />
-                  )}
+                <ObjectTabStrip
+                  state={openState}
+                  onSelect={(id) => mutateOpenTabs((s) => ({ ...s, activeId: id }))}
+                  onClose={(id) => mutateOpenTabs((s) => closeOpenTab(s, id))}
+                  onMutate={mutateOpenTabs}
+                  onOpenInQuery={handleOpenInQuery}
+                />
+                <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
+                  {(() => {
+                    const activeTab = openState.tabs.find((t) => t.id === openState.activeId);
+                    const wbVisible = !activeTab || activeTab.kind === 'workbench';
+                    return (
+                      <>
+                        {/* workbench 常挂载，display:none 保状态（M17 惯例）；表 tab 卸载非活动体省内存 */}
+                        <div style={{ height: '100%', display: wbVisible ? 'block' : 'none' }}>
+                          <QueryWorkspace
+                            connId={conn.id}
+                            prefillSql={context?.sql}
+                            contextLabel={context?.label}
+                            contextSchema={context?.schema}
+                            contextTable={context?.table}
+                            autoRunToken={autoRunToken}
+                            onClearContext={context ? () => setContext(null) : undefined}
+                          />
+                        </div>
+                        {!wbVisible && activeTab && activeTab.kind === 'table' && (
+                          <TableTab
+                            key={activeTab.id}
+                            connId={conn.id}
+                            kind={conn.kind}
+                            schema={activeTab.schema}
+                            table={activeTab.table}
+                            onNavigateTable={handleOpenTable}
+                            onOpenInQuery={handleOpenInQuery}
+                            readOnly={!!conn.read_only}
+                            preset={activeTab.preset ?? null}
+                            onPresetConsumed={() => handlePresetConsumed(activeTab.id)}
+                            onOpenFiltered={handleOpenTableFiltered}
+                          />
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
               </>
             )
           ) : (
-            <CollapsiblePane title="工作区" variant="main">
-              <div className="pane-body">
-                <div className="empty">从左侧选择或新建一个连接后开始浏览与查询。</div>
-              </div>
-            </CollapsiblePane>
+            <StartScreen
+              connections={connections}
+              serverOk={serverOk === true}
+              onSelect={(c) => { setConn(c); setContext(null); }}
+              onManage={() => setView('explorer')}
+            />
           )}
         </div>
       </div>
       <CommandPalette open={cmdOpen} onClose={() => setCmdOpen(false)} commands={commands} />
+      <QuickSwitcher
+        open={qsOpen}
+        onClose={() => setQsOpen(false)}
+        conn={conn}
+        connections={connections}
+        onOpenTable={handleOpenTable}
+        onSwitchConn={(c) => { setConn(c); setContext(null); }}
+      />
       <ShortcutPanel open={shortcutOpen} onClose={() => setShortcutOpen(false)} />
       <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <StatusBar serverOk={serverOk} serverInfo={serverInfo} conn={conn} statsCount={stats.length} />

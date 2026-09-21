@@ -3,6 +3,8 @@
 package tui
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -64,12 +66,40 @@ func pad(s string, n int) string {
 
 // resultTable 把查询结果渲染成对齐的文本表格，超宽列截断、超行数截断。
 func resultTable(cols []protocol.ResultColumn, rows [][]protocol.Value, maxWidth, maxRows int) string {
+	return renderTable(cols, rows, maxWidth, maxRows, 0, -1, -1)
+}
+
+// cellFullText 单元格完整值：对象/数组字面量自动美化 JSON（与 Web tryParseJson 对齐）。
+func cellFullText(v protocol.Value) string {
+	s := cellString(v)
+	t := strings.TrimSpace(s)
+	if !strings.HasPrefix(t, "{") && !strings.HasPrefix(t, "[") {
+		return s
+	}
+	var buf bytes.Buffer
+	if err := json.Indent(&buf, []byte(t), "", "  "); err != nil {
+		return s
+	}
+	return buf.String()
+}
+
+// headerLabel 表头单元格：列名 + 类型徽标（与 Web/Rust 预览头 "name (type)" 对齐）。
+func headerLabel(c protocol.ResultColumn) string {
+	if c.DataType == "" {
+		return c.Name
+	}
+	return c.Name + " (" + c.DataType + ")"
+}
+
+// renderTable 表格渲染核心：startRow 起窗口渲染 maxRows 行，
+// (curRow, curCol) 单元格反显高亮（-1 表示无光标）。
+func renderTable(cols []protocol.ResultColumn, rows [][]protocol.Value, maxWidth, maxRows, startRow, curRow, curCol int) string {
 	if len(cols) == 0 {
 		return "（无结果集）"
 	}
 	widths := make([]int, len(cols))
 	for i, c := range cols {
-		widths[i] = runewidth.StringWidth(c.Name)
+		widths[i] = runewidth.StringWidth(headerLabel(c))
 	}
 	for _, row := range rows {
 		for i, v := range row {
@@ -110,34 +140,38 @@ func resultTable(cols []protocol.ResultColumn, rows [][]protocol.Value, maxWidth
 	}
 
 	var b strings.Builder
-	line := func(cells []string) string {
+	line := func(cells []string, ri int) string {
 		var sb strings.Builder
 		sb.WriteString(" ")
 		for i, c := range cells {
 			if i > 0 {
 				sb.WriteString(" │ ")
 			}
-			sb.WriteString(pad(truncate(c, widths[i]), widths[i]))
+			s := pad(truncate(c, widths[i]), widths[i])
+			if ri == curRow && i == curCol {
+				s = "\x1b[7m" + s + "\x1b[0m"
+			}
+			sb.WriteString(s)
 		}
 		return sb.String()
 	}
 	headers := make([]string, len(cols))
 	for i, c := range cols {
-		headers[i] = c.Name
+		headers[i] = headerLabel(c)
 	}
-	b.WriteString(line(headers))
+	b.WriteString(line(headers, -1))
 	b.WriteString("\n")
 	sep := make([]string, len(cols))
 	for i := range cols {
 		sep[i] = strings.Repeat("─", widths[i])
 	}
-	b.WriteString(line(sep))
+	b.WriteString(line(sep, -2))
 	b.WriteString("\n")
-	n := len(rows)
-	if n > maxRows {
-		n = maxRows
+	if startRow > len(rows) {
+		startRow = len(rows)
 	}
-	for i := 0; i < n; i++ {
+	end := min(startRow+maxRows, len(rows))
+	for i := startRow; i < end; i++ {
 		cells := make([]string, len(cols))
 		for j := range cols {
 			if j < len(rows[i]) {
@@ -146,13 +180,20 @@ func resultTable(cols []protocol.ResultColumn, rows [][]protocol.Value, maxWidth
 				cells[j] = ""
 			}
 		}
-		b.WriteString(line(cells))
-		if i < n-1 {
+		b.WriteString(line(cells, i))
+		if i < end-1 {
 			b.WriteString("\n")
 		}
 	}
-	if len(rows) > maxRows {
-		fmt.Fprintf(&b, "\n… 仅显示前 %d 行（共 %d 行）", maxRows, len(rows))
+	if startRow > 0 {
+		fmt.Fprintf(&b, "\n… 上方还有 %d 行", startRow)
+	}
+	if len(rows) > end {
+		if startRow == 0 {
+			fmt.Fprintf(&b, "\n… 仅显示前 %d 行（共 %d 行）", maxRows, len(rows))
+		} else {
+			fmt.Fprintf(&b, "\n… 下方还有 %d 行（共 %d 行）", len(rows)-end, len(rows))
+		}
 	}
 	return b.String()
 }

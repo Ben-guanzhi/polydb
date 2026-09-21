@@ -4,6 +4,8 @@ import * as api from '../lib/api';
 import { ApiError } from '../lib/api';
 import { ChangeQueue, buildStatements, commitInTransaction, dialectFor, valuesEqual } from '../lib/changes';
 import { toCsv, toTsv, toJson, toNdjson, toMarkdown, toSqlInsert, toInClause, download } from '../lib/exporters';
+import ContextMenu, { type ContextMenuEntry } from './ContextMenu';
+import CellPreviewPanel from './CellPreview';
 
 // ─── M11 表数据浏览器（behavior.md §13）：服务端分页/排序/过滤 ───
 
@@ -72,9 +74,16 @@ interface Props {
   schema: string;
   table: string;
   onOpenSql: (schema: string, table: string) => void;
+  /** U4 只读闭环：true 时隐藏全部写入口（服务端仍强制拒绝，双保险） */
+  readOnly?: boolean;
+  /** U6.2 FK 跳转带入的一次性等值过滤；消费后回调清除 */
+  initialCond?: { column: string; op: 'eq'; value: string | number } | null;
+  onInitialCondConsumed?: () => void;
+  /** 打开目标表 tab 并附带等值过滤（FK 单元格 🔗 跳转） */
+  onOpenFiltered?: (schema: string, table: string, cond: { column: string; op: 'eq'; value: string | number }) => void;
 }
 
-export default function TableDataView({ connId, kind, schema, table, onOpenSql }: Props) {
+export default function TableDataView({ connId, kind, schema, table, onOpenSql, readOnly, initialCond, onInitialCondConsumed, onOpenFiltered }: Props) {
   const [pageSize, setPageSize] = useState(200);
   const [offset, setOffset] = useState(0);
   const [sortKey, setSortKey] = useState<{ column: string; dir: SortDirection } | null>(null);
@@ -97,11 +106,44 @@ export default function TableDataView({ connId, kind, schema, table, onOpenSql }
   const [committing, setCommitting] = useState(false);
   const [commitError, setCommitError] = useState<string | null>(null);
   const [exportOpen, setExportOpen] = useState(false);
+  // 单元格右键菜单 + 预览面板（JSON/文本/HEX/时间）
+  const [cellMenu, setCellMenu] = useState<{ x: number; y: number; ri: number; ci: number } | null>(null);
+  const [cellPreview, setCellPreview] = useState<{ ri: number; ci: number } | null>(null);
   const newSeq = useRef(0);
 
   const qualified = `${schema}.${table}`;
   const queue = queueRef.current;
-  const canEdit = pkCols.length > 0;
+  const canEdit = pkCols.length > 0 && !readOnly;
+
+  // U6.2 单列 FK 映射：列名 → 引用目标（单元格 🔗 跳转用）。
+  const [fkTargets, setFkTargets] = useState<Map<string, { schema: string; table: string; column: string }>>(new Map());
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .listForeignKeys(connId, schema, table)
+      .then((fks) => {
+        if (cancelled) return;
+        const m = new Map<string, { schema: string; table: string; column: string }>();
+        for (const fk of fks) {
+          if (fk.columns.length === 1 && fk.referenced_columns.length === 1) {
+            m.set(fk.columns[0], { schema: fk.referenced_schema, table: fk.referenced_table, column: fk.referenced_columns[0] });
+          }
+        }
+        setFkTargets(m);
+      })
+      .catch(() => { if (!cancelled) setFkTargets(new Map()); });
+    return () => { cancelled = true; };
+  }, [connId, schema, table]);
+
+  // U6.2 消费 tab 带入的一次性等值过滤。
+  useEffect(() => {
+    if (!initialCond) return;
+    setConds([{ column: initialCond.column, op: 'eq', value: String(initialCond.value), second: '', values: '' }]);
+    setOffset(0);
+    setShowFilter(true);
+    onInitialCondConsumed?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialCond?.column, initialCond?.value]);
 
   const buildReq = useCallback(() => {
     const conditions = conds.map(condToWire).filter((c): c is FilterCondition => c !== null);
@@ -118,6 +160,8 @@ export default function TableDataView({ connId, kind, schema, table, onOpenSql }
     const seq = ++reqSeq.current;
     setLoading(true);
     setError(null);
+    setCellMenu(null);
+    setCellPreview(null);
     try {
       const res = await api.browseRows(connId, schema, table, buildReq());
       if (seq === reqSeq.current) setResult(res);
@@ -344,7 +388,7 @@ export default function TableDataView({ connId, kind, schema, table, onOpenSql }
       {/* 工具栏 */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderBottom: '1px solid var(--border)', flexWrap: 'wrap' }}>
         <strong style={{ fontSize: 13 }}>{qualified}</strong>
-        <span style={{ fontSize: 11, color: 'var(--muted)' }}>表数据浏览 · 双击单元格编辑</span>
+        <span style={{ fontSize: 11, color: 'var(--muted)' }}>表数据浏览 · 双击单元格编辑 · 右键预览/复制</span>
         {canEdit && queue.size > 0 && (
           <span style={{ fontSize: 11, color: 'var(--accent, #2d68c8)' }} data-rev={rev}>
             ● {queue.size} 条待保存
@@ -490,11 +534,13 @@ export default function TableDataView({ connId, kind, schema, table, onOpenSql }
                       const base = row[ci] ?? null;
                       const val = displayValue(rowId, colName, base);
                       const isPk = pkCols.includes(colName);
+                      const fk = fkTargets.get(colName);
                       const changed = change?.type === 'update' && change.cellChanges.some((c) => c.column === colName && !valuesEqual(c.newValue, base));
                       const isEditing = editing !== null && editing.rowId === rowId && editing.column === colName;
                       return (
                         <td key={ci} style={{ ...cell, background: changed ? 'rgba(255, 213, 79, 0.18)' : undefined }}
                           title={val === null ? 'NULL' : String(val)}
+                          onContextMenu={(e) => { e.preventDefault(); setCellMenu({ x: e.clientX, y: e.clientY, ri, ci }); }}
                           onDoubleClick={canEdit && !deleted ? () => startEdit(rowId, colName, val) : undefined}>
                           {isEditing ? (
                             <input
@@ -513,7 +559,23 @@ export default function TableDataView({ connId, kind, schema, table, onOpenSql }
                               {isPk ? 'DEFAULT' : 'NULL'}
                             </span>
                           ) : (
-                            formatCell(val)
+                            <>
+                              {formatCell(val)}
+                              {fk && onOpenFiltered && (
+                                <button
+                                  className="btn-ico"
+                                  style={{ marginLeft: 4, fontSize: 11 }}
+                                  title={`查看 ${fk.schema}.${fk.table} 中 ${fk.column}=${String(val)} 的行`}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    const v: string | number = typeof val === 'number' ? val : String(val);
+                                    onOpenFiltered(fk.schema, fk.table, { column: fk.column, op: 'eq', value: v });
+                                  }}
+                                >
+                                  🔗
+                                </button>
+                              )}
+                            </>
                           )}
                         </td>
                       );
@@ -565,6 +627,15 @@ export default function TableDataView({ connId, kind, schema, table, onOpenSql }
           </table>
         )}
       </div>
+
+      {/* 单元格预览面板（JSON 值自动进 JSON 页签） */}
+      {cellPreview && result && rows[cellPreview.ri] && (
+        <CellPreviewPanel
+          label={<>单元格预览 · 行 {cellPreview.ri + 1} · 列 <code>{columns[cellPreview.ci]?.name}</code> (<code>{columns[cellPreview.ci]?.type}</code>)</>}
+          value={rows[cellPreview.ri]?.[cellPreview.ci] ?? null}
+          onClose={() => setCellPreview(null)}
+        />
+      )}
 
       {/* 分页栏 */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderTop: '1px solid var(--border)', fontSize: 12, flexWrap: 'wrap' }}>
@@ -621,6 +692,16 @@ export default function TableDataView({ connId, kind, schema, table, onOpenSql }
           </div>
         </div>
       )}
+      {cellMenu && result && rows[cellMenu.ri] && (() => {
+        const col = columns[cellMenu.ci];
+        const cellVal = rows[cellMenu.ri]?.[cellMenu.ci] ?? null;
+        const items: ContextMenuEntry[] = [
+          { header: `${col?.name ?? ''} (${col?.type ?? ''})` },
+          { key: 'preview', label: '预览单元格', icon: '🔍', onClick: () => { setCellPreview({ ri: cellMenu.ri, ci: cellMenu.ci }); setCellMenu(null); } },
+          { key: 'copy', label: '复制单元格内容', icon: '⧉', onClick: () => { void navigator.clipboard?.writeText(formatCell(cellVal)); setCellMenu(null); } },
+        ];
+        return <ContextMenu x={cellMenu.x} y={cellMenu.y} items={items} onClose={() => setCellMenu(null)} width={220} />;
+      })()}
     </div>
   );
 }

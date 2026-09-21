@@ -206,3 +206,13 @@ M10（安全） ──→ M11（表数据浏览） ──→ M12（变更跟踪�
 2. `test/contract` 新场景两端全绿；`make contract-test` + 三语言门禁过。
 3. 行为变化写入 `spec/behavior.md` 对应章节。
 4. 前端改动有 Vitest 覆盖（`npm run check && npm run build`）。
+
+## 8. 进度注记（2026-09-21）
+
+M10–M30.x 及第二阶段 **U1–U6（界面重设计，见 `docs/plan-ui-tablepro-redesign.md`）全部完成**：
+对象标签页壳层 + TableTab 四 rails（概览/数据/结构/关系）、设计 token 暗色体系 + 启动卡片屏 + 连接 chip、
+Ctrl+P Quick Switcher、只读安全模式闭环 + 30s 心跳、tab 右键菜单、连接过滤、
+数据网格 FK 🔗 关联跳转（带等值过滤）、列画像（NULL/完整度/DISTINCT/MIN·MAX·AVG，超出 TablePro Inspector 能力）。
+过程中修复 Go dbsqlite 两处真实 bug：PRAGMA 列宽 Scan 不匹配（foreign_key_list=8 / index_list=5）与
+`:memory:` 单连接池上 `ListIndexes` 嵌套查询死锁（改两段式），均有回归测试。
+许可红线持续满足：仅参考 TablePro（AGPLv3）交互设计，未移植任何代码。

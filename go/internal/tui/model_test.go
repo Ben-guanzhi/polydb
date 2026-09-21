@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,47 @@ import (
 )
 
 // ─── 渲染辅助 ───────────────────────────────────────────────
+
+// TestMain 关闭心跳：自续的 tea.Tick 命令链会让 drive() 直接调用 Update 的
+// 测试阻塞 30s/跳；心跳逻辑由 TestHeartbeatArming 单独覆盖。
+func TestMain(t *testing.M) {
+	heartbeatDisabled = true
+	os.Exit(t.Run())
+}
+
+// TestHeartbeatArming 验证心跳开关与挂起/续表行为（不依赖真实定时器）。
+func TestHeartbeatArming(t *testing.T) {
+	defer func() { heartbeatDisabled = true }()
+
+	// 关闭态：armHB 返回 nil。
+	heartbeatDisabled = true
+	m := New(nil)
+	if m.armHB() != nil {
+		t.Fatalf("disabled heartbeat should arm nil")
+	}
+	// 开启态：armHB 返回可执行命令（不运行它）。
+	heartbeatDisabled = false
+	if m.armHB() == nil {
+		t.Fatalf("enabled heartbeat should arm cmd")
+	}
+	// tick 到达且有活动连接：续表 + 发起 ping（批量命令）。
+	m.selectedID = "x"
+	var mm tea.Model = m
+	res, cmd := mm.Update(hbTickMsg{})
+	if cmd == nil {
+		t.Fatalf("tick with active conn should return cmd")
+	}
+	if md2, ok := res.(*model); !ok || md2.selectedID != "x" {
+		t.Fatalf("tick should preserve state")
+	}
+	// 无活动连接：只续表不 ping。
+	m2 := New(nil)
+	res2, cmd2 := m2.Update(hbTickMsg{})
+	_ = res2
+	if cmd2 == nil {
+		t.Fatalf("tick should re-arm even without connection")
+	}
+}
 
 func TestCellString(t *testing.T) {
 	cases := []struct {
@@ -62,6 +104,80 @@ func TestResultTable(t *testing.T) {
 	out = resultTable(cols, rows, 80, 1)
 	if !strings.Contains(out, "仅显示前 1 行") {
 		t.Errorf("resultTable truncation hint missing:\n%s", out)
+	}
+}
+
+func TestCellFullText(t *testing.T) {
+	// JSON 对象/数组字面量自动美化
+	if got := cellFullText(protocol.NewStringValue(`{"a":1}`)); !strings.Contains(got, "\n") || !strings.Contains(got, `"a": 1`) {
+		t.Errorf("object not pretty-printed:\n%s", got)
+	}
+	if got := cellFullText(protocol.NewStringValue("[1,2]")); !strings.Contains(got, "\n") {
+		t.Errorf("array not pretty-printed:\n%s", got)
+	}
+	// 非 JSON 原样返回；伪 JSON（无法解析）也原样
+	if got := cellFullText(protocol.NewStringValue("plain")); got != "plain" {
+		t.Errorf("plain = %q", got)
+	}
+	if got := cellFullText(protocol.NewStringValue(`{bad`)); got != "{bad" {
+		t.Errorf("invalid JSON = %q, want as-is", got)
+	}
+	if got := cellFullText(protocol.NewNullValue()); got != "NULL" {
+		t.Errorf("NULL = %q", got)
+	}
+	if got := cellFullText(protocol.NewIntValue(7)); got != "7" {
+		t.Errorf("int = %q", got)
+	}
+}
+
+func TestRenderTableCursorAndWindow(t *testing.T) {
+	cols := []protocol.ResultColumn{{Name: "id"}, {Name: "name"}}
+	rows := [][]protocol.Value{
+		{protocol.NewIntValue(1), protocol.NewStringValue("alice")},
+		{protocol.NewIntValue(2), protocol.NewStringValue("bob")},
+		{protocol.NewIntValue(3), protocol.NewStringValue("carol")},
+	}
+	// 无光标（resultTable 包装）不出现反显转义
+	if out := resultTable(cols, rows, 80, 10); strings.Contains(out, "\x1b[7m") {
+		t.Errorf("no-cursor render should not highlight:\n%s", out)
+	}
+	// 有光标：绝对行 1 第 0 列反显
+	out := renderTable(cols, rows, 80, 10, 0, 1, 0)
+	if !strings.Contains(out, "\x1b[7m") {
+		t.Errorf("cursor highlight missing:\n%s", out)
+	}
+	// 窗口化：从第 1 行起、每页 1 行 → 上方还有 + 下方还有提示
+	out = renderTable(cols, rows, 80, 1, 1, 1, 0)
+	if !strings.Contains(out, "上方还有 1 行") || !strings.Contains(out, "下方还有 1 行") {
+		t.Errorf("window hints missing:\n%s", out)
+	}
+	if strings.Contains(out, "仅显示前") {
+		t.Errorf("windowed render should not say 仅显示前:\n%s", out)
+	}
+	// startRow 越界钳制不 panic
+	if out := renderTable(cols, rows, 80, 2, 10, 10, 0); out == "" {
+		t.Error("clamped startRow render empty")
+	}
+}
+
+func TestHeaderLabelAndStatusColor(t *testing.T) {
+	cols := []protocol.ResultColumn{
+		{Name: "id", DataType: "INTEGER"},
+		{Name: "name"},
+	}
+	rows := [][]protocol.Value{{protocol.NewIntValue(1), protocol.NewStringValue("a")}}
+	out := renderTable(cols, rows, 120, 10, 0, -1, -1)
+	if !strings.Contains(out, "id (INTEGER)") {
+		t.Errorf("header type badge missing:\n%s", out)
+	}
+	if strings.Contains(out, "name (") {
+		t.Errorf("empty DataType header should stay bare:\n%s", out)
+	}
+	if got := colorStatus("查询失败: x"); !strings.HasPrefix(got, "\x1b[31m") {
+		t.Errorf("failure status not red: %q", got)
+	}
+	if got := colorStatus("已连接"); got != "已连接" {
+		t.Errorf("normal status altered: %q", got)
 	}
 }
 
@@ -303,6 +419,144 @@ func TestModelQueryAutocomplete(t *testing.T) {
 	m, _ = m.Update(key(tea.KeyEsc))
 	if md(m).view != viewQuery || len(md(m).acCandidates) != 0 {
 		t.Fatalf("after esc: view=%v cands=%v", md(m).view, md(m).acCandidates)
+	}
+}
+
+// TestModelResultsNavigation 验证 F6 结果导航视图：进入、光标语义、完整值面板、Esc 两段返回。
+func TestModelResultsNavigation(t *testing.T) {
+	app, _ := setupApp(t)
+	var m tea.Model = New(transport.NewLocal(app))
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = drive(t, m, m.Init())
+	var cmd tea.Cmd
+	m, cmd = m.Update(key(tea.KeyEnter)) // 打开连接 → tables
+	m = drive(t, m, cmd)
+	m, cmd = m.Update(key(tea.KeyEnter)) // tables → detail
+	m = drive(t, m, cmd)
+	m, _ = m.Update(runeKey('q'))
+	if md(m).view != viewQuery {
+		t.Fatalf("setup: view=%v", md(m).view)
+	}
+	// 无结果时 F6 不进入
+	m, _ = m.Update(key(tea.KeyF6))
+	if md(m).view != viewQuery {
+		t.Fatalf("F6 without result should stay in query view: %v", md(m).view)
+	}
+	// 执行 SELECT 后 F6 进入导航
+	m, cmd = m.Update(key(tea.KeyF5))
+	m = drive(t, m, cmd)
+	if md(m).queryResult == nil {
+		t.Fatalf("query produced no result: %v", md(m).queryErr)
+	}
+	m, _ = m.Update(key(tea.KeyF6))
+	mm := md(m)
+	if mm.view != viewResults || mm.resRow != 0 || mm.resCol != 0 || mm.cellFull {
+		t.Fatalf("after F6: view=%v row=%d col=%d full=%v", mm.view, mm.resRow, mm.resCol, mm.cellFull)
+	}
+	// 渲染含光标定位行头与高亮
+	v := m.View()
+	if !strings.Contains(v, "行 1/1") || !strings.Contains(v, "\x1b[7m") {
+		t.Errorf("results view missing header/highlight:\n%s", v)
+	}
+	// 只有 1 行 × 2 列：边界钳制
+	m, _ = m.Update(key(tea.KeyDown))
+	m, _ = m.Update(key(tea.KeyRight))
+	mm = md(m)
+	if mm.resRow != 0 || mm.resCol != 1 {
+		t.Fatalf("clamped move: row=%d col=%d", mm.resRow, mm.resCol)
+	}
+	m, _ = m.Update(key(tea.KeyRight))
+	if md(m).resCol != 1 {
+		t.Fatalf("col should clamp at last column: %d", md(m).resCol)
+	}
+	// Enter 打开完整值面板（name=hello 非 JSON，原样显示）
+	m, _ = m.Update(key(tea.KeyEnter))
+	mm = md(m)
+	if !mm.cellFull {
+		t.Fatalf("Enter should open full-value panel")
+	}
+	if v := m.View(); !strings.Contains(v, "完整值") || !strings.Contains(v, "hello") {
+		t.Errorf("full value panel missing:\n%s", v)
+	}
+	// Esc 第一段只关面板
+	m, _ = m.Update(key(tea.KeyEsc))
+	if md(m).cellFull || md(m).view != viewResults {
+		t.Fatalf("esc should close panel only: full=%v view=%v", md(m).cellFull, md(m).view)
+	}
+	// Esc 第二段回查询视图
+	m, _ = m.Update(key(tea.KeyEsc))
+	if md(m).view != viewQuery {
+		t.Fatalf("second esc should return to query: %v", md(m).view)
+	}
+	// 重新执行查询后光标复位
+	m, cmd = m.Update(key(tea.KeyF6))
+	_ = cmd
+	m, cmd = m.Update(key(tea.KeyF5))
+	m = drive(t, m, cmd)
+	m, _ = m.Update(key(tea.KeyF6))
+	if mm := md(m); mm.resRow != 0 || mm.resCol != 0 {
+		t.Fatalf("cursor should reset after new query: row=%d col=%d", mm.resRow, mm.resCol)
+	}
+}
+
+func TestModelBrowseNavigation(t *testing.T) {
+	app, _ := setupApp(t)
+	var m tea.Model = New(transport.NewLocal(app))
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = drive(t, m, m.Init())
+	var cmd tea.Cmd
+	m, cmd = m.Update(key(tea.KeyEnter)) // 打开连接 → tables
+	m = drive(t, m, cmd)
+	if md(m).view != viewTables {
+		t.Fatalf("setup: view=%v", md(m).view)
+	}
+	// F7 进入数据浏览（表 t：1 行 id/name）
+	m, cmd = m.Update(key(tea.KeyF7))
+	if md(m).view != viewBrowse || md(m).busy == "" {
+		t.Fatalf("F7: view=%v busy=%q", md(m).view, md(m).busy)
+	}
+	m = drive(t, m, cmd)
+	mm := md(m)
+	if mm.brErr != nil || mm.brRes == nil {
+		t.Fatalf("browse failed: err=%v", mm.brErr)
+	}
+	if mm.brTable != "t" || mm.brOffset != 0 || len(mm.brRes.Rows) != 1 {
+		t.Fatalf("browse page: table=%q offset=%d rows=%d", mm.brTable, mm.brOffset, len(mm.brRes.Rows))
+	}
+	v := m.View()
+	if !strings.Contains(v, "浏览 main.t") || !strings.Contains(v, "行 1–1") {
+		t.Errorf("browse view missing header:\n%s", v)
+	}
+	if !strings.Contains(v, "\x1b[7m") {
+		t.Errorf("browse view missing cursor highlight:\n%s", v)
+	}
+	// 单页 1 行：↓ 钳制、→ 无下一页不动
+	m, _ = m.Update(key(tea.KeyDown))
+	m, _ = m.Update(key(tea.KeyRight))
+	mm = md(m)
+	if mm.brRow != 0 || mm.brOffset != 0 {
+		t.Fatalf("clamped: row=%d offset=%d", mm.brRow, mm.brOffset)
+	}
+	// Shift+Right 移到 name 列，Enter 打开完整值面板
+	m, _ = m.Update(key(tea.KeyShiftRight))
+	if md(m).brCol != 1 {
+		t.Fatalf("Shift+Right should move column: %d", md(m).brCol)
+	}
+	m, _ = m.Update(key(tea.KeyEnter))
+	if !md(m).brFull {
+		t.Fatalf("Enter should open full-value panel")
+	}
+	if v := m.View(); !strings.Contains(v, "完整值") || !strings.Contains(v, "hello") {
+		t.Errorf("browse full-value panel missing:\n%s", v)
+	}
+	// Esc 两段：先关面板，再回 tables（未经表详情，tableDetail==nil）
+	m, _ = m.Update(key(tea.KeyEsc))
+	if md(m).brFull || md(m).view != viewBrowse {
+		t.Fatalf("esc should close panel only: full=%v view=%v", md(m).brFull, md(m).view)
+	}
+	m, _ = m.Update(key(tea.KeyEsc))
+	if md(m).view != viewTables {
+		t.Fatalf("second esc should return to tables: %v", md(m).view)
 	}
 }
 

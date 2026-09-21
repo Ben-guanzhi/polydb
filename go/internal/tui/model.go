@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -20,15 +21,33 @@ const (
 	viewTable
 	viewQuery
 	viewKV
+	viewResults
+	viewBrowse
 )
 
+// 心跳：每 30s ping 当前连接；测试经 TestMain 置 heartbeatDisabled，
+// 避免 drive() 跟随自续的 tea.Tick 命令链而阻塞。
+const heartbeatEvery = 30 * time.Second
+
+var heartbeatDisabled bool
+
+// armHB 安排下一跳心跳（测试态返回 nil）。
+func (m *model) armHB() tea.Cmd {
+	if heartbeatDisabled {
+		return nil
+	}
+	return heartbeatCmd()
+}
+
 var viewTitles = map[view]string{
-	viewConns:  "连接",
-	viewForm:   "新建连接",
-	viewTables: "库表结构",
-	viewTable:  "表详情",
-	viewQuery:  "查询",
-	viewKV:     "Redis 键",
+	viewConns:   "连接",
+	viewForm:    "新建连接",
+	viewTables:  "库表结构",
+	viewTable:   "表详情",
+	viewQuery:   "查询",
+	viewKV:      "Redis 键",
+	viewResults: "结果导航",
+	viewBrowse:  "数据浏览",
 }
 
 type model struct {
@@ -60,6 +79,22 @@ type model struct {
 	queryResult *protocol.QueryResult
 	queryErr    error
 	querySQL    string
+
+	// 结果单元格导航（viewResults）：光标位置 + 完整值面板开关。
+	resRow   int
+	resCol   int
+	cellFull bool
+
+	// 数据浏览（viewBrowse）：F7 服务端分页浏览表数据。
+	brSchema string
+	brTable  string
+	brOffset uint64
+	brLimit  uint32
+	brRes    *protocol.TableRowsResult
+	brErr    error
+	brRow    int
+	brCol    int
+	brFull   bool
 
 	// autocomplete 状态：在查询视图中 Ctrl+Space 触发，↑/↓ 选择，Enter/Tab 接受，Esc 关闭。
 	acWord       string
@@ -119,6 +154,30 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+	case tea.BatchMsg:
+		// 测试/直连场景兜底：bubbletea 运行时会自行展开 BatchMsg，
+		// 直接调用 Update 时在此顺序展开，避免消息被丢弃。
+		var pending []tea.Cmd
+		for _, c := range msg {
+			if c == nil {
+				continue
+			}
+			mm, cmd := m.Update(c())
+			self, ok := mm.(*model)
+			if !ok {
+				return mm, cmd
+			}
+			m = self
+			if cmd != nil {
+				pending = append(pending, cmd)
+			}
+		}
+		return m, tea.Batch(pending...)
+	case hbTickMsg:
+		if m.selectedID == "" || m.busy != "" {
+			return m, m.armHB()
+		}
+		return m, tea.Batch(testCmd(m.app, m.selectedID), m.armHB())
 	case connsLoadedMsg:
 		m.busy = ""
 		if msg.err != nil {
@@ -172,7 +231,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.schemas = msg.schemas
 		m.schemaIdx = 0
 		m.view = viewTables
-		return m, tablesCmd(m.app, msg.id, m.schemas[0].Name)
+		return m, tea.Batch(tablesCmd(m.app, msg.id, m.schemas[0].Name), m.armHB())
 	case tablesMsg:
 		m.busy = ""
 		if msg.err != nil {
@@ -205,8 +264,22 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.queryResult = msg.res
 			m.queryErr = nil
 			m.querySQL = ""
+			m.resRow, m.resCol, m.cellFull = 0, 0, false
 		}
 		m.view = viewQuery
+		return m, nil
+	case browseMsg:
+		m.busy = ""
+		if msg.err != nil {
+			m.brRes = nil
+			m.brErr = msg.err
+			m.status = "浏览失败: " + msg.err.Error()
+		} else {
+			m.brRes = msg.res
+			m.brErr = nil
+			m.brOffset = msg.offset
+			m.brRow, m.brCol, m.brFull = 0, 0, false
+		}
 		return m, nil
 	case columnsLoadedMsg:
 		if msg.err != nil {
@@ -320,6 +393,10 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.queryKey(msg)
 	case viewKV:
 		return m.kvKey(msg)
+	case viewResults:
+		return m.resultsKey(msg)
+	case viewBrowse:
+		return m.browseKey(msg)
 	}
 	return m, nil
 }
@@ -450,6 +527,8 @@ func (m *model) tablesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.busy = "加载详情 …"
 			return m, detailCmd(m.app, m.selectedID, m.schemas[m.schemaIdx].Name, t.Name)
 		}
+	case tea.KeyF7:
+		return m.startBrowse()
 	case tea.KeyRunes:
 		switch string(msg.Runes) {
 		case "k":
@@ -515,6 +594,8 @@ func (m *model) tableKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m.gotoQuery(sql)
 			}
 		}
+	case tea.KeyF7:
+		return m.startBrowse()
 	}
 	return m, nil
 }
@@ -526,6 +607,7 @@ func (m *model) gotoQuery(prefill string) (tea.Model, tea.Cmd) {
 	m.querySQL = prefill
 	m.queryResult = nil
 	m.queryErr = nil
+	m.resRow, m.resCol, m.cellFull = 0, 0, false
 	m.acWord = ""
 	m.acCandidates = nil
 	m.acIdx = 0
@@ -558,6 +640,15 @@ func (m *model) queryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyF5, tea.KeyCtrlE:
 		return m.runQuery()
+	case tea.KeyF6:
+		if m.queryResult != nil && len(m.queryResult.Columns) > 0 {
+			m.resRow, m.resCol, m.cellFull = 0, 0, false
+			m.queryInput.Blur()
+			m.view = viewResults
+		} else {
+			m.status = "无结果集可导航（先 F5 执行查询）"
+		}
+		return m, nil
 	}
 	if len(m.acCandidates) > 0 {
 		switch msg.Type {
@@ -592,6 +683,235 @@ func (m *model) queryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.queryInput, cmd = m.queryInput.Update(msg)
 	return m, cmd
+}
+
+// ─── 结果单元格导航（viewResults）────────────────────────────
+
+func (m *model) resultsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	r := m.queryResult
+	if r == nil || len(r.Columns) == 0 {
+		m.view = viewQuery
+		m.queryInput.Focus()
+		return m, nil
+	}
+	switch msg.Type {
+	case tea.KeyCtrlC:
+		m.quit = true
+		return m, tea.Quit
+	case tea.KeyEsc:
+		if m.cellFull {
+			m.cellFull = false
+			return m, nil
+		}
+		m.view = viewQuery
+		m.queryInput.Focus()
+		return m, nil
+	case tea.KeyEnter:
+		m.cellFull = true
+	case tea.KeyUp:
+		if m.resRow > 0 {
+			m.resRow--
+		}
+	case tea.KeyDown:
+		if m.resRow < len(r.Rows)-1 {
+			m.resRow++
+		}
+	case tea.KeyLeft:
+		if m.resCol > 0 {
+			m.resCol--
+		}
+	case tea.KeyRight:
+		if m.resCol < len(r.Columns)-1 {
+			m.resCol++
+		}
+	}
+	return m, nil
+}
+
+// resultsView 渲染带光标高亮的结果表格 + 可选的完整值面板（JSON 自动美化）。
+func (m *model) resultsView() string {
+	r := m.queryResult
+	var b strings.Builder
+	maxRows := max(3, m.height-20)
+	start := 0
+	if m.resRow >= maxRows {
+		start = m.resRow - maxRows/2
+	}
+	if start+maxRows > len(r.Rows) {
+		start = max(0, len(r.Rows)-maxRows)
+	}
+	col := r.Columns[m.resCol]
+	b.WriteString(fmt.Sprintf("行 %d/%d · 列 %s (%s)\n", m.resRow+1, len(r.Rows), col.Name, col.DataType))
+	b.WriteString(renderTable(r.Columns, r.Rows, max(m.width-4, 20), maxRows, start, m.resRow, m.resCol))
+	b.WriteString("\n")
+	if m.cellFull {
+		var v protocol.Value
+		if m.resRow < len(r.Rows) && m.resCol < len(r.Rows[m.resRow]) {
+			v = r.Rows[m.resRow][m.resCol]
+		}
+		text := cellFullText(v)
+		lines := strings.Split(text, "\n")
+		capN := max(3, m.height-28)
+		if len(lines) > capN {
+			lines = append(lines[:capN], "…（内容过长，已截断显示）")
+		}
+		b.WriteString("\n── 完整值 ─────────────────────────\n")
+		b.WriteString(strings.Join(lines, "\n"))
+	}
+	return b.String()
+}
+
+// ─── 数据浏览（viewBrowse，F7）────────────────────────────────
+
+// startBrowse 对当前表发起服务端分页浏览（第一页）。
+func (m *model) startBrowse() (tea.Model, tea.Cmd) {
+	if m.selectedID == "" || len(m.tables) == 0 {
+		m.status = "无表可浏览"
+		return m, nil
+	}
+	m.brSchema = m.schemas[m.schemaIdx].Name
+	m.brTable = m.tables[m.tableCur].Name
+	m.brOffset = 0
+	m.brLimit = 200
+	m.brRes = nil
+	m.brErr = nil
+	m.brRow, m.brCol, m.brFull = 0, 0, false
+	m.view = viewBrowse
+	m.busy = "加载数据 …"
+	return m, browseCmd(m.app, m.selectedID, m.brSchema, m.brTable, m.brOffset, m.brLimit)
+}
+
+// browsePage 拉取上一页/下一页（dir<0 回退，>0 前进，首页不回退）。
+func (m *model) browsePage(dir int) (tea.Model, tea.Cmd) {
+	var off uint64
+	if dir > 0 {
+		off = m.brOffset + uint64(m.brLimit)
+	} else {
+		if m.brOffset == 0 {
+			return m, nil
+		}
+		if m.brOffset < uint64(m.brLimit) {
+			off = 0
+		} else {
+			off = m.brOffset - uint64(m.brLimit)
+		}
+	}
+	m.busy = "加载数据 …"
+	m.brRow, m.brCol, m.brFull = 0, 0, false
+	return m, browseCmd(m.app, m.selectedID, m.brSchema, m.brTable, off, m.brLimit)
+}
+
+// browseKey 数据浏览键位：↑/↓ 行 · ←/→ 翻页 · Shift←/→ 列 · Enter 完整值 · r 刷新 · Esc 返回。
+func (m *model) browseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	r := m.brRes
+	switch msg.Type {
+	case tea.KeyCtrlC:
+		m.quit = true
+		return m, tea.Quit
+	case tea.KeyEsc:
+		if m.brFull {
+			m.brFull = false
+			return m, nil
+		}
+		if m.tableDetail != nil {
+			m.view = viewTable
+		} else {
+			m.view = viewTables
+		}
+		return m, nil
+	case tea.KeyEnter:
+		m.brFull = true
+		return m, nil
+	case tea.KeyUp:
+		if m.brRow > 0 {
+			m.brRow--
+		}
+	case tea.KeyDown:
+		if r != nil && m.brRow < len(r.Rows)-1 {
+			m.brRow++
+		}
+	case tea.KeyLeft:
+		return m.browsePage(-1)
+	case tea.KeyRight:
+		if r != nil && r.HasMore {
+			return m.browsePage(1)
+		}
+	case tea.KeyShiftLeft:
+		if m.brCol > 0 {
+			m.brCol--
+		}
+	case tea.KeyShiftRight:
+		if r != nil && m.brCol < len(r.Columns)-1 {
+			m.brCol++
+		}
+	case tea.KeyRunes:
+		switch string(msg.Runes) {
+		case "k":
+			if m.brRow > 0 {
+				m.brRow--
+			}
+		case "j":
+			if r != nil && m.brRow < len(r.Rows)-1 {
+				m.brRow++
+			}
+		case "h":
+			return m.browsePage(-1)
+		case "l":
+			if r != nil && r.HasMore {
+				return m.browsePage(1)
+			}
+		case "r":
+			m.busy = "加载数据 …"
+			return m, browseCmd(m.app, m.selectedID, m.brSchema, m.brTable, m.brOffset, m.brLimit)
+		}
+	}
+	return m, nil
+}
+
+// browseView 渲染当前页数据表格（带行/列光标）+ 可选完整值面板。
+func (m *model) browseView() string {
+	var b strings.Builder
+	head := fmt.Sprintf("浏览 %s.%s", m.brSchema, m.brTable)
+	if m.brErr != nil {
+		return head + "\n浏览失败: " + m.brErr.Error()
+	}
+	r := m.brRes
+	if r == nil {
+		return head + "\n（无数据）"
+	}
+	maxRows := max(3, m.height-20)
+	start := 0
+	if m.brRow >= maxRows {
+		start = m.brRow - maxRows/2
+	}
+	if start+maxRows > len(r.Rows) {
+		start = max(0, len(r.Rows)-maxRows)
+	}
+	hdr := fmt.Sprintf("%s · 行 %d–%d", head, m.brOffset+1, m.brOffset+uint64(len(r.Rows)))
+	if r.TotalEstimate != nil {
+		hdr += fmt.Sprintf(" / 共约 %d", *r.TotalEstimate)
+	}
+	if r.HasMore {
+		hdr += " · 有下一页"
+	}
+	b.WriteString(hdr + "\n")
+	b.WriteString(renderTable(r.Columns, r.Rows, max(m.width-4, 20), maxRows, start, m.brRow, m.brCol))
+	if m.brFull && len(r.Columns) > 0 && m.brRow < len(r.Rows) {
+		col := min(m.brCol, len(r.Columns)-1)
+		var v protocol.Value
+		if col < len(r.Rows[m.brRow]) {
+			v = r.Rows[m.brRow][col]
+		}
+		text := cellFullText(v)
+		lines := strings.Split(text, "\n")
+		capN := max(3, m.height-28)
+		if len(lines) > capN {
+			lines = append(lines[:capN], "…（内容过长，已截断显示）")
+		}
+		b.WriteString(fmt.Sprintf("\n── 完整值 · 列 %s (%s) ─────────\n", r.Columns[col].Name, r.Columns[col].DataType))
+		b.WriteString(strings.Join(lines, "\n"))
+	}
+	return b.String()
 }
 
 // triggerAutocomplete 生成表名候选（无 . 前缀）或列名候选（含 . 前缀）。
@@ -1033,6 +1353,10 @@ func (m *model) View() string {
 		body = m.queryView()
 	case viewKV:
 		body = m.kvView()
+	case viewResults:
+		body = m.resultsView()
+	case viewBrowse:
+		body = m.browseView()
 	}
 	return m.frame(body)
 }
@@ -1050,11 +1374,19 @@ func (m *model) frame(body string) string {
 	if m.busy != "" {
 		b.WriteString(m.busy)
 	} else if m.status != "" {
-		b.WriteString(m.status)
+		b.WriteString(colorStatus(m.status))
 	} else {
 		b.WriteString(m.footer())
 	}
 	return b.String()
+}
+
+// colorStatus 状态行着色：含「失败」标红（与 Rust GUI status_color 语义一致）。
+func colorStatus(s string) string {
+	if strings.Contains(s, "失败") {
+		return "\x1b[31m" + s + "\x1b[0m"
+	}
+	return s
 }
 
 func (m *model) footer() string {
@@ -1064,14 +1396,14 @@ func (m *model) footer() string {
 	case viewForm:
 		return "Tab 切换字段 · ←/→ 切换类型 · Enter 提交 · Esc 返回"
 	case viewTables:
-		return "↑/↓ 选择 · Enter 详情 · s 切换 schema · q 查询 · Esc 返回"
+		return "↑/↓ 选择 · Enter 详情 · s 切换 schema · q 查询 · F7 浏览数据 · Esc 返回"
 	case viewTable:
-		return "↑/↓ 切换表 · q 查询该表 · Esc 返回"
+		return "↑/↓ 切换表 · q 查询该表 · F7 浏览数据 · Esc 返回"
 	case viewQuery:
 		if len(m.acCandidates) > 0 {
 			return "↑/↓ 选择 · Enter 接受 · Esc 关闭 · F5 执行"
 		}
-		return "Tab 补全表/列 · F5 / Ctrl+E 执行 · Esc 返回"
+		return "Tab 补全表/列 · F5 / Ctrl+E 执行 · F6 导航结果 · Esc 返回"
 	case viewKV:
 		if m.kvFilterOn {
 			return "输入模式 · Enter 应用 · Esc 取消"
@@ -1080,6 +1412,16 @@ func (m *model) footer() string {
 			return "输入命令 · Enter 执行 · Esc 返回列表"
 		}
 		return "↑/↓ 键 · Enter 值 · / 过滤 · g 更多 · b 换db · c 命令 · r 刷新 · Esc 返回"
+	case viewResults:
+		if m.cellFull {
+			return "Enter 刷新全值 · Esc 关闭全值（再按返回查询）"
+		}
+		return "↑/↓/←/→ 移动 · Enter 完整值（JSON 自动美化）· Esc 返回查询"
+	case viewBrowse:
+		if m.brFull {
+			return "Enter 刷新全值 · Esc 关闭全值（再按返回列表）"
+		}
+		return "↑/↓ 行 · ←/→ 翻页 · Shift←/→ 列 · Enter 完整值 · r 刷新 · Esc 返回"
 	}
 	return ""
 }
@@ -1095,6 +1437,9 @@ func (m *model) connsView() string {
 			marker = "▸ "
 		}
 		line := marker + c.Name + "  " + c.Database + " · " + string(c.Kind)
+		if c.ReadOnly != nil && *c.ReadOnly {
+			line += " · 只读"
+		}
 		if st, ok := m.connStatus[c.ID]; ok {
 			if st.Connected {
 				line += fmt.Sprintf("  \x1b[32m●\x1b[0m %.1f ms", st.LatencyMs)

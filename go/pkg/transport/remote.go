@@ -247,6 +247,16 @@ func (r *Remote) Execute(ctx context.Context, id, sql string, args ...protocol.V
 	return &out, nil
 }
 
+// BrowseRows 远程走 POST rows/query（msgpack 数据面，spec browseTableRows）。
+func (r *Remote) BrowseRows(ctx context.Context, id, schema, table string, req *protocol.TableRowsRequest) (*protocol.TableRowsResult, error) {
+	var out protocol.TableRowsResult
+	path := "/api/connections/" + url.PathEscape(id) + "/schemas/" + url.PathEscape(schema) + "/tables/" + url.PathEscape(table) + "/rows/query"
+	if err := r.do(http.MethodPost, path, req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // ─── Redis KV ──────────────────────────────────────────────
 
 func (r *Remote) SelectDB(ctx context.Context, id string, index int) error {

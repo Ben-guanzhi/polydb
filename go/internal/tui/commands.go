@@ -46,6 +46,13 @@ type (
 		err     error
 		elapsed time.Duration
 	}
+	browseMsg struct {
+		schema string
+		table  string
+		offset uint64
+		res    *protocol.TableRowsResult
+		err    error
+	}
 	columnsLoadedMsg struct {
 		table   string
 		columns []protocol.ColumnInfo
@@ -70,6 +77,7 @@ type (
 		index int
 		err   error
 	}
+	hbTickMsg struct{} // 30s 心跳定时：ping 当前连接
 )
 
 // tableDetail 聚合一张表的列、索引、外键与 DDL。
@@ -99,6 +107,11 @@ func testCmd(a transport.Client, id string) tea.Cmd {
 		st.LatencyMs = float64(time.Since(start).Microseconds()) / 1000.0
 		return statusMsg{id: id, st: st}
 	}
+}
+
+// heartbeatCmd 心跳：定期 ping 当前活动连接（状态行显示存活/延迟）。
+func heartbeatCmd() tea.Cmd {
+	return tea.Tick(heartbeatEvery, func(time.Time) tea.Msg { return hbTickMsg{} })
 }
 
 func createCmd(a transport.Client, req *protocol.CreateConnectionRequest) tea.Cmd {
@@ -175,6 +188,17 @@ func queryCmd(a transport.Client, id, sql string) tea.Cmd {
 		start := time.Now()
 		res, err := a.Execute(context.Background(), id, sql)
 		return queryMsg{res: res, err: err, elapsed: time.Since(start)}
+	}
+}
+
+// browseCmd 拉取一页表数据（服务端分页；M11 数据浏览）。
+func browseCmd(a transport.Client, id, schema, table string, offset uint64, limit uint32) tea.Cmd {
+	return func() tea.Msg {
+		res, err := a.BrowseRows(context.Background(), id, schema, table, &protocol.TableRowsRequest{
+			Offset: offset,
+			Limit:  limit,
+		})
+		return browseMsg{schema: schema, table: table, offset: offset, res: res, err: err}
 	}
 }
 

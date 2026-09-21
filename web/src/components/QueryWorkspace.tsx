@@ -25,6 +25,7 @@ import type { ParamItem, ParamType } from '../lib/tabStore';
 import { genId, loadTabState, nextTabTitle, saveTabState, type EditorTab } from '../lib/tabStore';
 import CollapsiblePane from './CollapsiblePane';
 import ContextMenu, { type ContextMenuEntry } from './ContextMenu';
+import CellPreviewPanel from './CellPreview';
 import TabStrip from './TabStrip';
 import { PlayIcon, StopIcon } from './Icons';
 
@@ -130,34 +131,6 @@ function sqlLiteral(v: unknown): string {
   const s = String(v).replace(/'/g, "''");
   return `'${s}'`;
 }
-function bytesToHex(s: string, chunk = 16): string {
-  const bytes: number[] = [];
-  for (let i = 0; i < s.length; i++) {
-    const code = s.charCodeAt(i);
-    if (code < 128) bytes.push(code);
-    else if (code < 2048) { bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f)); }
-    else { bytes.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f)); }
-  }
-  const hexBytes = (b: number) => b.toString(16).padStart(2, '0');
-  const printable = (b: number) => (b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : '·');
-  const lines: string[] = [];
-  for (let i = 0; i < bytes.length; i += chunk) {
-    const slice = bytes.slice(i, i + chunk);
-    const hex = slice.map(hexBytes).join(' ');
-    const text = slice.map(printable).join('');
-    lines.push(`${i.toString(16).padStart(8, '0')}  ${hex.padEnd(chunk * 3 - 1)}  |${text}|`);
-  }
-  return lines.length > 0 ? lines.join('\n') : '(empty)';
-}
-
-function tryParseJson(v: unknown): string | null {
-  if (v === null || v === undefined) return null;
-  if (typeof v === 'object') return JSON.stringify(v, null, 2);
-  const s = String(v).trim();
-  if (!s.startsWith('{') && !s.startsWith('[')) return null;
-  try { return JSON.stringify(JSON.parse(s), null, 2); } catch { return null; }
-}
-
 function cellClass(v: unknown, col?: ResultColumn): CellClass {
   if (v === null || v === undefined) return 'null';
   const t = col?.type?.toLowerCase() ?? '';
@@ -3891,69 +3864,13 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
           )}
         </div>
         {cellPreview && previewTarget && (
-          <div style={{ padding: '6px 10px', borderTop: '1px solid var(--border)', background: 'var(--bg)', maxWidth: '100%' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-              <strong style={{ fontSize: 12, color: 'var(--muted)' }}>
-                单元格预览 · 行 {cellPreview.row + 1} · 列 <code>{previewTarget.col.name}</code> (<code>{previewTarget.col.type}</code>)
-              </strong>
-              <div style={{ display: 'flex', gap: 2 }}>
-                {(['text', 'json', 'hex', 'time'] as const).map((t) => (
-                  <button
-                    key={t}
-                    className="btn-ico"
-                    onClick={() => setPreviewTab(t)}
-                    style={{
-                      padding: '2px 8px',
-                      fontSize: 11,
-                      background: previewTab === t ? 'var(--accent-dim)' : 'transparent',
-                      color: previewTab === t ? 'var(--fg)' : 'var(--muted)',
-                      border: '1px solid var(--border)',
-                      borderRadius: 2,
-                    }}
-                  >
-                    {t === 'text' ? '文本' : t === 'json' ? 'JSON' : t === 'hex' ? 'HEX' : '时间'}
-                  </button>
-                ))}
-              </div>
-              <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--muted)' }}>
-                {previewTarget.value === null ? 'NULL' : `${String(previewTarget.value).length} 字符`}
-              </span>
-              <button className="btn-ico" onClick={() => setCellPreview(null)} title="关闭预览" style={{ fontSize: 11 }}>×</button>
-            </div>
-            <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 4 }}>
-              {previewTab === 'json' && !tryParseJson(previewTarget.value) && '(无法解析为 JSON)'}
-              {previewTab === 'time' && !(typeof previewTarget.value === 'string' || typeof previewTarget.value === 'number') && '(仅支持字符串/数字时间)'}
-            </div>
-            <pre
-              style={{
-                margin: 0,
-                padding: 8,
-                background: 'var(--bg-alt, rgba(0,0,0,0.15))',
-                border: '1px solid var(--border)',
-                borderRadius: 3,
-                fontFamily: 'monospace',
-                fontSize: 12,
-                maxHeight: 240,
-                overflow: 'auto',
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-all',
-                color: 'var(--fg)',
-              }}
-            >
-              {previewTab === 'text' ? (previewTarget.value === null ? 'NULL' : String(previewTarget.value))
-                : previewTab === 'json' ? (tryParseJson(previewTarget.value) ?? String(previewTarget.value))
-                : previewTab === 'hex' ? (previewTarget.value === null ? 'NULL' : bytesToHex(String(previewTarget.value)))
-                : (() => {
-                    if (previewTarget.value === null) return 'NULL';
-                    const s = String(previewTarget.value);
-                    const out: string[] = [];
-                    try { const d = new Date(s); out.push(`Parsed (local): ${d.toString()}`); out.push(`ISO 8601: ${d.toISOString()}`); } catch { /* not date */ }
-                    try { const d = new Date(Number(s)); if (!Number.isNaN(d.getTime()) && s.match(/^\d+$/)) { out.push(`Unix ${s.length <= 10 ? 's' : 'ms'} (local): ${d.toString()}`); out.push(`Unix ${s.length <= 10 ? 's' : 'ms'} (ISO): ${d.toISOString()}`); } } catch { /* not number */ }
-                    if (out.length === 0) out.push('非可解析的时间值');
-                    return out.join('\n');
-                  })()}
-            </pre>
-          </div>
+          <CellPreviewPanel
+            label={<>单元格预览 · 行 {cellPreview.row + 1} · 列 <code>{previewTarget.col.name}</code> (<code>{previewTarget.col.type}</code>)</>}
+            value={previewTarget.value}
+            tab={previewTab}
+            onTabChange={setPreviewTab}
+            onClose={() => setCellPreview(null)}
+          />
         )}
         {ctxMenu && (
           <ContextMenu

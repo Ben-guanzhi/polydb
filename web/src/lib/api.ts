@@ -94,7 +94,10 @@ function toApiError(status: number, data: unknown): ApiError {
   if (data && typeof data === 'object') {
     const pe = data as PolyDBError;
     if (typeof pe.code === 'string' && typeof pe.message === 'string') {
-      return new ApiError(status, pe.code, pe.message, pe.detail);
+      const msg = pe.code === 'POLYDB_ERR_READ_ONLY'
+        ? '连接处于只读（安全）模式：写语句/KV 写已被服务端拒绝（behavior.md §12）'
+        : pe.message;
+      return new ApiError(status, pe.code, msg, pe.detail);
     }
   }
   return new ApiError(status, 'POLYDB_ERR_UNKNOWN', `HTTP ${status}`);

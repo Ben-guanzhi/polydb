@@ -1,43 +1,26 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { ColumnInfo, ForeignKeyInfo, IndexInfo, SchemaInfo, TableInfo } from '../api';
+import type { SchemaInfo, TableInfo } from '../api';
 import * as api from '../lib/api';
 import CollapsiblePane from './CollapsiblePane';
 import ContextMenu, { type ContextMenuEntry } from './ContextMenu';
-import ERDiagram from './ERDiagram';
 import { ChevronIcon, RefreshIcon, SearchIcon, TableIcon, ViewIcon } from './Icons';
-import TableStructureEditor from './TableStructureEditor';
 
-interface TableDetail {
-  columns: ColumnInfo[];
-  indexes: IndexInfo[];
-  fks: ForeignKeyInfo[];
-  ddl: string;
-}
+// U1 起侧栏瘦身为纯导航：表详情改由主区 TableTab（数据/结构/关系 rails）承载。
 
 interface Props {
   connId: string;
-  onSelectTable?: (schema: string, table: string) => void;
-  onPreviewTable?: (schema: string, table: string) => void;
+  onOpenTable: (schema: string, table: string) => void;
   onPrefillSql?: (sql: string) => void;
 }
 
-export default function SchemaBrowser({ connId, onSelectTable, onPreviewTable, onPrefillSql }: Props) {
+export default function SchemaBrowser({ connId, onOpenTable, onPrefillSql }: Props) {
   const [schemas, setSchemas] = useState<SchemaInfo[]>([]);
   const [tablesBySchema, setTablesBySchema] = useState<Record<string, TableInfo[]>>({});
   const [selSchema, setSelSchema] = useState<string | null>(null);
   const [selTable, setSelTable] = useState<string | null>(null);
-  const [detail, setDetail] = useState<TableDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState('');
-  const [erMode, setErMode] = useState(false);
-  const [kind, setKind] = useState<string>('');
-
-  useEffect(() => {
-    let cancelled = false;
-    api.getConnection(connId).then((c) => { if (!cancelled) setKind(c.kind); }).catch(() => {});
-    return () => { cancelled = true; };
-  }, [connId]);
   const [expandedSchemas, setExpandedSchemas] = useState<Record<string, boolean>>({});
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; schema: string; table?: string } | null>(null);
 
@@ -45,10 +28,6 @@ export default function SchemaBrowser({ connId, onSelectTable, onPreviewTable, o
     const isOpen = !!expandedSchemas[name];
     if (isOpen) {
       setExpandedSchemas((m) => ({ ...m, [name]: false }));
-      if (selSchema === name) {
-        setSelTable(null);
-        setDetail(null);
-      }
     } else {
       setExpandedSchemas((m) => ({ ...m, [name]: true }));
       setSelSchema(name);
@@ -62,16 +41,14 @@ export default function SchemaBrowser({ connId, onSelectTable, onPreviewTable, o
   const collapseAll = () => {
     setExpandedSchemas({});
     setSelTable(null);
-    setDetail(null);
   };
 
   const reload = async (keepSel = true) => {
+    setTablesBySchema({});
     if (!keepSel) {
       setSchemas([]);
-      setTablesBySchema({});
       setSelSchema(null);
       setSelTable(null);
-      setDetail(null);
       setExpandedSchemas({});
     }
     setError(null);
@@ -112,28 +89,6 @@ export default function SchemaBrowser({ connId, onSelectTable, onPreviewTable, o
     };
   }, [connId, selSchema, tablesBySchema]);
 
-  const openTable = async (table: string) => {
-    if (!selSchema) return;
-    setSelTable(table);
-    setDetail(null);
-    setError(null);
-    setLoading(true);
-    onSelectTable?.(selSchema, table);
-    try {
-      const [columns, indexes, fks, ddlRes] = await Promise.all([
-        api.listColumns(connId, selSchema, table),
-        api.listIndexes(connId, selSchema, table),
-        api.listForeignKeys(connId, selSchema, table),
-        api.getDDL(connId, selSchema, table).catch(() => ({ sql: '' })),
-      ]);
-      setDetail({ columns, indexes, fks, ddl: ddlRes.sql });
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const filteredTables = useMemo(() => {
     if (!selSchema) return [];
     const tables = tablesBySchema[selSchema] ?? [];
@@ -148,7 +103,7 @@ export default function SchemaBrowser({ connId, onSelectTable, onPreviewTable, o
       const q = `${m.schema}.${t}`;
       return [
         { header: `${m.schema}.${t}` },
-        { key: 'preview', label: '预览数据', icon: '🔍', onClick: () => onPreviewTable?.(m.schema, t) },
+        { key: 'open', label: '打开表', icon: '📋', onClick: () => onOpenTable(m.schema, t) },
         '---',
         {
           key: 'gen',
@@ -193,14 +148,6 @@ export default function SchemaBrowser({ connId, onSelectTable, onPreviewTable, o
       <button className="btn-ico" title="刷新" onClick={() => void reload(true)}>
         <RefreshIcon />
       </button>
-      <button
-        className={`btn-ico ${erMode ? 'active' : ''}`}
-        title="ER 图（当前 schema 的表与外键关系）"
-        onClick={() => setErMode((v) => !v)}
-        disabled={selSchema == null}
-      >
-        🕸
-      </button>
     </>
   );
 
@@ -208,21 +155,8 @@ export default function SchemaBrowser({ connId, onSelectTable, onPreviewTable, o
     <CollapsiblePane title="库表结构" variant="md" actions={actions}>
       <div className="pane-body tree" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
         {error && <div className="error-box">{error}</div>}
-        {erMode && selSchema && (
-          <ERDiagram
-            connId={connId}
-            schema={selSchema}
-            tables={tablesBySchema[selSchema] ?? []}
-            onSelectTable={(t) => {
-              setErMode(false);
-              void openTable(t);
-            }}
-          />
-        )}
-        {erMode && !selSchema && <div className="empty">选择一个 schema 查看 ER 图</div>}
-        {!erMode && schemas.length === 0 && !loading && <div className="empty">无 schema 数据</div>}
-        {!erMode &&
-          schemas.map((s) => {
+        {!loading && schemas.length === 0 && <div className="empty">无 schema 数据</div>}
+        {schemas.map((s) => {
           const open = !!expandedSchemas[s.name];
           return (
             <div key={s.name}>
@@ -262,15 +196,17 @@ export default function SchemaBrowser({ connId, onSelectTable, onPreviewTable, o
                       filteredTables.map((t) => (
                         <div
                           key={t.name}
-                          className={`leaf ${selTable === t.name ? 'selected' : ''}`}
-                          onClick={() => void openTable(t.name)}
-                          onDoubleClick={() => { void openTable(t.name); onPreviewTable?.(selSchema!, t.name); }}
+                          className={`leaf ${selSchema === s.name && selTable === t.name ? 'selected' : ''}`}
+                          onClick={() => { setSelSchema(s.name); setSelTable(t.name); }}
+                          onDoubleClick={() => onOpenTable(s.name, t.name)}
+                          onKeyDown={(e) => { if (e.key === 'Enter') onOpenTable(s.name, t.name); }}
+                          tabIndex={0}
                           onContextMenu={(e) => {
                             e.preventDefault();
                             e.stopPropagation();
-                            setCtxMenu({ x: e.clientX, y: e.clientY, schema: selSchema!, table: t.name });
+                            setCtxMenu({ x: e.clientX, y: e.clientY, schema: s.name, table: t.name });
                           }}
-                          title={`${t.type} · ${t.name}\n单击选中，双击预览数据，右键菜单`}
+                          title={`${t.type} · ${t.name}\n单击选中，双击打开表，右键菜单`}
                         >
                           {t.type === 'view' ? <ViewIcon /> : <TableIcon />}
                           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.name}</span>
@@ -286,68 +222,6 @@ export default function SchemaBrowser({ connId, onSelectTable, onPreviewTable, o
             </div>
           );
         })}
-        {selTable && detail && (
-          <div style={{ borderTop: '1px solid var(--border)', marginTop: 8, paddingTop: 8 }}>
-            <div className="group" style={{ display: 'flex', alignItems: 'center', gap: 6, textTransform: 'none', letterSpacing: 0, cursor: 'default' }}>
-              <TableIcon /> {selTable}
-            </div>
-            <div className="group" style={{ paddingTop: 4 }}>列</div>
-            <table className="detail-table">
-              <thead>
-                <tr><th>列</th><th>类型</th><th>可空</th><th>默认值</th><th>键</th></tr>
-              </thead>
-              <tbody>
-                {(detail.columns ?? []).map((c) => (
-                  <tr key={c.name}>
-                    <td className="mono">{c.name}</td>
-                    <td className="mono">{c.data_type}</td>
-                    <td>{c.nullable ? '✓' : ''}</td>
-                    <td className="mono">{c.default_value ?? ''}</td>
-                    <td>
-                      {c.is_primary_key ? 'PK ' : ''}
-                      {c.is_auto_increment ? '+AI' : ''}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {(detail.indexes ?? []).length > 0 && (
-              <>
-                <div className="group" style={{ paddingTop: 6 }}>索引</div>
-                <div className="muted mono" style={{ padding: '0 8px' }}>
-                  {detail.indexes.map((i) => `${i.name}${i.unique ? ' (unique)' : ''}: ${i.columns.map((c) => c.name).join(', ')}`).join('\n')}
-                </div>
-              </>
-            )}
-            {(detail.fks ?? []).length > 0 && (
-              <>
-                <div className="group" style={{ paddingTop: 6 }}>外键</div>
-                <div className="muted mono" style={{ padding: '0 8px' }}>
-                  {detail.fks.map((fk) => `${fk.name}: ${fk.columns.join(', ')} → ${fk.referenced_schema}.${fk.referenced_table}(${fk.referenced_columns.join(', ')})`).join('\n')}
-                </div>
-              </>
-            )}
-            {kind && (
-              <>
-                <div className="group" style={{ paddingTop: 6 }}>结构编辑</div>
-                <TableStructureEditor
-                  connId={connId}
-                  kind={kind}
-                  schema={selSchema ?? ''}
-                  table={selTable}
-                  columns={detail.columns ?? []}
-                  indexes={detail.indexes ?? []}
-                  fks={detail.fks ?? []}
-                  onApplied={() => { void openTable(selTable); }}
-                />
-              </>
-            )}
-            <div className="group" style={{ paddingTop: 6 }}>DDL</div>
-            <pre className="mono" style={{ fontSize: 11, margin: '0 8px', overflow: 'auto', maxHeight: 160, whiteSpace: 'pre-wrap' }}>
-              {detail.ddl || '（无 DDL 信息）'}
-            </pre>
-          </div>
-        )}
         {ctxMenu && (
           <ContextMenu
             x={ctxMenu.x}
@@ -360,4 +234,3 @@ export default function SchemaBrowser({ connId, onSelectTable, onPreviewTable, o
     </CollapsiblePane>
   );
 }
-

@@ -9,6 +9,20 @@
   --danger: #dc2626;
   --ok: #16a34a;
   --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+
+  /* U2 设计 token（TablePro 式完整 light/dark 覆盖） */
+  --fg: var(--text);
+  --bg-alt: rgba(0, 0, 0, 0.05);
+  --hover: #f0f2f5;
+  --input-bg: #ffffff;
+  --grid-head-bg: #fafafa;
+  --stripe: #fcfcfc;
+  --row-hover: #eef4ff;
+  --accent-strong: #1d4ed8;
+  --danger-bg: #fef2f2;
+  --danger-border: #fecaca;
+  --danger-text: #b91c1c;
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
 
 /* M15 应用级暗色主题（<html data-theme="dark">）：只覆盖变量，组件零改动。 */
@@ -22,6 +36,18 @@
   --accent-dim: #16283f;
   --danger: #f8717a;
   --ok: #4ade80;
+
+  --bg-alt: rgba(255, 255, 255, 0.06);
+  --hover: #232833;
+  --input-bg: #14171d;
+  --grid-head-bg: #1e222b;
+  --stripe: #171a21;
+  --row-hover: #1c2a42;
+  --accent-strong: #3b76d9;
+  --danger-bg: #2b1416;
+  --danger-border: #5c2126;
+  --danger-text: #f0a3a7;
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.5);
 }
 
 * { box-sizing: border-box; }
@@ -147,7 +173,7 @@ button {
   cursor: pointer;
 }
 
-button:hover:not(:disabled) { background: #f0f2f5; }
+button:hover:not(:disabled) { background: var(--hover); }
 button:disabled { opacity: 0.5; cursor: default; }
 
 button.primary {
@@ -156,7 +182,7 @@ button.primary {
   color: #fff;
 }
 
-button.primary:hover:not(:disabled) { background: #1d4ed8; }
+button.primary:hover:not(:disabled) { background: var(--accent-strong); }
 button.danger { color: var(--danger); }
 button.link {
   border: none;
@@ -171,7 +197,7 @@ input, select, textarea {
   border: 1px solid var(--border);
   border-radius: 6px;
   width: 100%;
-  background: #fff;
+  background: var(--input-bg);
 }
 
 label {
@@ -194,7 +220,7 @@ label {
   border: 1px solid transparent;
 }
 
-.list-item:hover { background: #f0f2f5; }
+.list-item:hover { background: var(--hover); }
 .list-item.active { background: var(--accent-dim); border-color: var(--accent); }
 
 .list-item .meta { font-size: 11px; color: var(--muted); }
@@ -227,7 +253,7 @@ label {
   align-items: center;
   gap: 6px;
 }
-.tree .leaf:hover { background: #f0f2f5; }
+.tree .leaf:hover { background: var(--hover); }
 .tree .leaf.selected { background: var(--accent-dim); }
 .tree .group { font-weight: 600; color: var(--muted); padding: 6px 8px 2px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
 
@@ -261,19 +287,19 @@ table.grid th, table.grid td {
   white-space: nowrap;
 }
 table.grid th {
-  background: #fafafa;
+  background: var(--grid-head-bg);
   position: sticky;
   top: 0;
   font-family: var(--mono);
   font-weight: 600;
 }
 table.grid td { font-family: var(--mono); }
-tr:nth-child(even) td { background: #fcfcfc; }
+tr:nth-child(even) td { background: var(--stripe); }
 
 .error-box {
-  background: #fef2f2;
-  border: 1px solid #fecaca;
-  color: #b91c1c;
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  color: var(--danger-text);
   padding: 8px 12px;
   border-radius: 6px;
   margin: 8px;
@@ -320,10 +346,10 @@ table.grid.wrap td {
 table.grid.wrap th {
   white-space: normal !important;
 }
-table.grid tbody tr:hover td { background: #eef4ff; }
+table.grid tbody tr:hover td { background: var(--row-hover); }
 table.grid tbody tr.selected td { background: var(--accent-dim); }
 table.grid td.rownum {
-  background: #fafafa;
+  background: var(--grid-head-bg);
   color: var(--muted);
   font-family: var(--mono);
   width: 1%;
@@ -367,7 +393,7 @@ table.grid td.editable {
   cursor: cell;
 }
 table.grid td.editable:hover {
-  background: #eaf2ff !important;
+  background: var(--row-hover) !important;
   box-shadow: inset 0 -2px 0 var(--accent);
 }
 /* M23: 编辑草稿（未提交）高亮 */
@@ -399,7 +425,7 @@ table.grid td.flash-err { animation: cell-flash-err 0.8s ease-out; }
 /* M23: 编辑输入框校验失败红框 */
 .cell-editor-input.invalid {
   border-color: var(--danger) !important;
-  background: #fee2e2 !important;
+  background: var(--danger-bg) !important;
 }
 
 /* M30.92: Step 3 映射行跳转后短暂 accent 闪烁高亮 */
@@ -428,7 +454,7 @@ th.type-badge {
   font-size: 9px;
   padding: 1px 5px;
   border-radius: 3px;
-  background: #eef0f3;
+  background: var(--bg-alt);
   color: var(--muted);
   font-weight: 500;
   text-transform: lowercase;
@@ -481,7 +507,7 @@ th.type-badge {
   display: inline-flex;
   align-items: center;
 }
-.btn-ico:hover:not(:disabled) { background: #f0f2f5; color: var(--text); }
+.btn-ico:hover:not(:disabled) { background: var(--hover); color: var(--text); }
 .btn-ico:disabled { opacity: 0.4; cursor: default; }
 
 /* 搜索框 */
@@ -509,7 +535,7 @@ th.type-badge {
   cursor: pointer;
   border: 1px solid transparent;
 }
-.conn-row:hover { background: #f0f2f5; }
+.conn-row:hover { background: var(--hover); }
 .conn-row.active { background: var(--accent-dim); border-color: var(--accent); }
 .conn-row .conn-name {
   font-weight: 600;
@@ -562,7 +588,7 @@ th.type-badge {
   user-select: none;
 }
 .pane-collapse-strip:hover {
-  background: #f0f2f5;
+  background: var(--hover);
 }
 .pane-collapse-strip .pane-title {
   writing-mode: vertical-rl;
@@ -615,3 +641,51 @@ th.type-badge {
   border-radius: 3px;
   outline: 1px solid rgba(37, 99, 235, 0.35);
 }
+
+
+/* U2 kind 徽章暗色适配 */
+:root[data-theme='dark'] .badge.sqlite { background: #0c2f42; color: #7cc7ef; }
+:root[data-theme='dark'] .badge.postgres { background: #0d2a17; color: #7fdca0; }
+:root[data-theme='dark'] .badge.mysql { background: #2f2608; color: #f0c35a; }
+:root[data-theme='dark'] .badge.mssql { background: #2f0e0e; color: #f09a9a; }
+:root[data-theme='dark'] .badge.oracle { background: #2f0e22; color: #ef9ac8; }
+:root[data-theme='dark'] .badge.redis { background: #220e3a; color: #c99af0; }
+
+/* U2 顶栏连接 chip（TablePro 式常显连接身份） */
+.conn-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel);
+  font-size: 12px;
+  box-shadow: var(--shadow-sm);
+  max-width: 340px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.conn-chip .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.conn-chip .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+
+/* U2 启动卡片屏 */
+.start-screen { padding: 28px 32px; overflow: auto; height: 100%; }
+.start-screen h2 { font-size: 16px; margin: 0 0 4px; }
+.start-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px; margin-top: 14px; }
+.start-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 14px;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+  position: relative;
+  overflow: hidden;
+  transition: border-color 120ms ease, transform 120ms ease;
+}
+.start-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+.start-card .bar { position: absolute; left: 0; top: 0; bottom: 0; width: 4px; }
+.start-card .title { font-weight: 600; font-size: 13px; display: flex; align-items: center; gap: 6px; }
+.start-card .meta { font-size: 11px; color: var(--muted); margin-top: 6px; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.start-group-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 18px 0 0; }

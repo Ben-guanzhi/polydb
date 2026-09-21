@@ -14,6 +14,7 @@ interface Props {
 }
 
 type FormState = CreateConnectionRequest & {
+  readOnly?: boolean;
   sshEnabled?: boolean;
   sshHost?: string;
   sshPort?: number;
@@ -37,6 +38,8 @@ export default function ConnectionList({ serverOk, selectedId, onSelect }: Props
   const [saving, setSaving] = useState(false);
   const [testResults, setTestResults] = useState<Record<string, ConnectionStatus>>({});
   const [testingId, setTestingId] = useState<string | null>(null);
+  // U6.4 连接过滤（名称/分组/类型/库名，模糊子串匹配）
+  const [connFilter, setConnFilter] = useState('');
 
   const load = async () => {
     try {
@@ -82,6 +85,7 @@ export default function ConnectionList({ serverOk, selectedId, onSelect }: Props
       password: '',
       group: c.group,
       color: c.color,
+      readOnly: !!c.read_only,
       sshEnabled: !!c.ssh_tunnel,
       sshHost: c.ssh_tunnel?.host,
       sshPort: c.ssh_tunnel?.port,
@@ -112,6 +116,7 @@ export default function ConnectionList({ serverOk, selectedId, onSelect }: Props
           password: form.password?.trim() || undefined,
           group: form.group?.trim() || undefined,
           color: form.color || undefined,
+          read_only: form.readOnly || undefined,
         };
         req.ssh_tunnel = form.sshEnabled
           ? {
@@ -135,6 +140,7 @@ export default function ConnectionList({ serverOk, selectedId, onSelect }: Props
           password: form.password?.trim() || undefined,
           group: form.group?.trim() || undefined,
           color: form.color || undefined,
+          read_only: form.readOnly || undefined,
         };
         if (form.sshEnabled) {
           req.ssh_tunnel = {
@@ -185,12 +191,16 @@ export default function ConnectionList({ serverOk, selectedId, onSelect }: Props
   const set = (k: keyof FormState, v: unknown) => setForm((f) => ({ ...f, [k]: v as never }));
 
   // M15 分组：任一连接有 group 时按组渲染（「未分组」兜底放最后），否则平铺。
+  const q = connFilter.trim().toLowerCase();
+  const visible = q
+    ? conns.filter((c) => `${c.name} ${c.group ?? ''} ${c.kind} ${c.database ?? ''} ${c.host ?? ''}`.toLowerCase().includes(q))
+    : conns;
   const groups: { label: string; items: ConnectionInfo[] }[] = (() => {
-    if (!conns.some((c) => (c.group ?? '').trim())) {
-      return [{ label: '', items: conns }];
+    if (!visible.some((c) => (c.group ?? '').trim())) {
+      return [{ label: '', items: visible }];
     }
     const m = new Map<string, ConnectionInfo[]>();
-    for (const c of conns) {
+    for (const c of visible) {
       const g = (c.group ?? '').trim() || '未分组';
       const arr = m.get(g);
       if (arr) arr.push(c);
@@ -221,6 +231,14 @@ export default function ConnectionList({ serverOk, selectedId, onSelect }: Props
                 <option key={k} value={k}>{k}</option>
               ))}
             </select>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', marginTop: 8 }}>
+              <input
+                type="checkbox"
+                checked={!!form.readOnly}
+                onChange={(e) => set('readOnly', e.target.checked)}
+              />
+              只读安全模式（服务端拒绝写语句 / KV 写，可随时切换）
+            </label>
             <div className="row">
               <div style={{ flex: 2 }}>
                 <label>分组（可选）</label>
@@ -348,6 +366,19 @@ export default function ConnectionList({ serverOk, selectedId, onSelect }: Props
           </div>
         )}
         {conns.length === 0 && <div className="empty">暂无连接，点击「新建」创建。</div>}
+        {conns.length > 0 && (
+          <div className="search" style={{ marginBottom: 6 }}>
+            <input
+              value={connFilter}
+              onChange={(e) => setConnFilter(e.target.value)}
+              placeholder="过滤连接（名称/分组/类型）"
+              style={{ fontSize: 12, padding: '3px 8px' }}
+            />
+          </div>
+        )}
+        {conns.length > 0 && visible.length === 0 && (
+          <div className="muted" style={{ padding: '4px 8px', fontSize: 12 }}>（无匹配连接）</div>
+        )}
         {groups.map((g) => (
           <div key={g.label || '__flat'}>
             {g.label !== '' && (
@@ -371,7 +402,10 @@ export default function ConnectionList({ serverOk, selectedId, onSelect }: Props
                     ) : null}
                     <DbIcon kind={c.kind} size={16} />
                     <div style={{ minWidth: 0, flex: 1 }}>
-                      <div className="conn-name">{c.name}</div>
+                      <div className="conn-name">
+                        {c.name}
+                        {c.read_only && <span title="只读安全模式" style={{ marginLeft: 4, fontSize: 11 }}>🛡</span>}
+                      </div>
                       <div className="conn-meta mono">
                         {c.database ? `${c.database} · ` : ''}{c.kind}
                         {st && (

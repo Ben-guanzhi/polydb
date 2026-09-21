@@ -81,6 +81,11 @@ func (l *Local) Execute(ctx context.Context, id, sql string, args ...protocol.Va
 	return l.app.Execute(ctx, id, sql, args...)
 }
 
+// BrowseRows 进程内委托 app-core（零序列化）。
+func (l *Local) BrowseRows(ctx context.Context, id, schema, table string, req *protocol.TableRowsRequest) (*protocol.TableRowsResult, error) {
+	return l.app.BrowseRows(ctx, id, schema, table, req)
+}
+
 // ─── Redis KV ───────────────────────────────────────────────
 
 func (l *Local) SelectDB(ctx context.Context, id string, index int) error {

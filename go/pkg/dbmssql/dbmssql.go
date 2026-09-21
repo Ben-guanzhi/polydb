@@ -110,7 +110,7 @@ func queryResult(rows *sql.Rows, stmtType protocol.StatementType, start float64)
 		}
 		rowVals := make([]protocol.Value, len(raw))
 		for i, r := range raw {
-			rowVals[i] = dbcore.DriverToValue(*(r.(*any)))
+			rowVals[i] = dbcore.DriverToValueTyped(*(r.(*any)), columns[i].DataType)
 		}
 		resultRows = append(resultRows, rowVals)
 	}

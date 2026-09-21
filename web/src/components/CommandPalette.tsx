@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { fuzzyScore } from '../lib/tableSearch';
 
 export interface CommandItem {
   id: string;
@@ -16,26 +17,6 @@ interface Props {
   onClose: () => void;
   commands: CommandItem[];
   placeholder?: string;
-}
-
-function fuzzyScore(query: string, target: string): number {
-  if (!query) return 1;
-  const q = query.toLowerCase();
-  const t = target.toLowerCase();
-  let qi = 0;
-  let score = 0;
-  let streak = 0;
-  for (let ti = 0; ti < t.length && qi < q.length; ti++) {
-    if (t[ti] === q[qi]) {
-      qi++;
-      streak++;
-      score += 1 + streak * 2;
-      if (ti === 0 || t[ti - 1] === ' ' || t[ti - 1] === '-' || t[ti - 1] === '/') score += 6;
-    } else {
-      streak = 0;
-    }
-  }
-  return qi === q.length ? score : -1;
 }
 
 function isCmdEnabled(c: CommandItem): boolean {
