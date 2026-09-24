@@ -801,3 +801,89 @@ func TestKVViewNavigation(t *testing.T) {
 		t.Fatalf("kv view missing content:\n%s", v)
 	}
 }
+
+// ─── Quick-open（Ctrl+P 跨 schema 搜表）──────────────────────
+
+func TestQuickFilter(t *testing.T) {
+	items := []quickItem{
+		{"main", "users"},
+		{"main", "orders"},
+		{"public", "user_roles"},
+	}
+	if got := quickFilter(items, ""); len(got) != 3 {
+		t.Fatalf("empty query should return all, got %d", len(got))
+	}
+	// 大小写不敏感 + 命中 schema.table 子串
+	got := quickFilter(items, "USER")
+	if len(got) != 2 || got[0].table != "users" || got[1].table != "user_roles" {
+		t.Fatalf("filter USER = %+v, want users+user_roles", got)
+	}
+	// schema 前缀命中
+	got = quickFilter(items, "public.")
+	if len(got) != 1 || got[0].table != "user_roles" {
+		t.Fatalf("filter 'public.' = %+v, want [user_roles]", got)
+	}
+	if got = quickFilter(items, "zzz"); len(got) != 0 {
+		t.Fatalf("no match should be empty, got %+v", got)
+	}
+}
+
+func TestModelQuickOpenFlow(t *testing.T) {
+	app, _ := setupApp(t)
+	var m tea.Model = New(transport.NewLocal(app))
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = drive(t, m, m.Init())
+
+	// 打开连接 → viewTables
+	var cmd tea.Cmd
+	m, cmd = m.Update(key(tea.KeyEnter))
+	m = drive(t, m, cmd)
+	if md(m).view != viewTables {
+		t.Fatalf("setup: view=%v, want viewTables (status=%s)", md(m).view, md(m).status)
+	}
+
+	// Ctrl+P 进入 Quick-open，加载全部表
+	m, cmd = m.Update(key(tea.KeyCtrlP))
+	if md(m).view != viewQuickOpen {
+		t.Fatalf("after Ctrl+P: view=%v, want viewQuickOpen", md(m).view)
+	}
+	m = drive(t, m, cmd)
+	if md(m).busy != "" {
+		t.Fatalf("after allTables loaded: busy=%q, want empty", md(m).busy)
+	}
+	// 渲染冒烟：Quick-open 视图应能渲染且列出候选表（t 与 u）
+	if v := m.View(); !strings.Contains(v, "t") || !strings.Contains(v, "u") {
+		t.Fatalf("quick-open view missing table list:\n%s", v)
+	}
+	// 空输入应列出全部表（t 与 u），且不含已过滤
+	if len(md(m).qoFiltered) != 2 {
+		t.Fatalf("qoFiltered=%+v, want 2 tables", md(m).qoFiltered)
+	}
+
+	// 输入 'u' 过滤到 u
+	m, _ = m.Update(runeKey('u'))
+	if len(md(m).qoFiltered) != 1 || md(m).qoFiltered[0].table != "u" {
+		t.Fatalf("filter 'u' = %+v, want [u]", md(m).qoFiltered)
+	}
+
+	// Enter 选定 → tablesCmd(带 pending) → detailCmd → viewTable(u)
+	m, cmd = m.Update(key(tea.KeyEnter))
+	m = drive(t, m, cmd)
+	mm := md(m)
+	if mm.view != viewTable || mm.tableDetail == nil {
+		t.Fatalf("after pick: view=%v detail=%v, want viewTable(u)", mm.view, mm.tableDetail)
+	}
+	if mm.tables[mm.tableCur].Name != "u" {
+		t.Fatalf("selected table=%q, want u", mm.tables[mm.tableCur].Name)
+	}
+	if mm.pendingTablePick != "" {
+		t.Fatalf("pendingTablePick should be cleared, got %q", mm.pendingTablePick)
+	}
+	cols := map[string]bool{}
+	for _, c := range mm.tableDetail.columns {
+		cols[c.Name] = true
+	}
+	if !cols["email"] {
+		t.Fatalf("u columns=%+v, want email present", mm.tableDetail.columns)
+	}
+}

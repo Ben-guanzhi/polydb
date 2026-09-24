@@ -37,6 +37,11 @@ type (
 		tables []protocol.TableInfo
 		err    error
 	}
+	// allTablesMsg 承载跨 schema 汇总的全部表（Quick-open 模糊搜表用）。
+	allTablesMsg struct {
+		items []quickItem
+		err   error
+	}
 	detailMsg struct {
 		detail *tableDetail
 		err    error
@@ -87,6 +92,15 @@ type tableDetail struct {
 	fks     []protocol.ForeignKeyInfo
 	ddl     string
 }
+
+// quickItem Quick-open 候选：一条 schema.table（跨 schema 汇总后的最小单元）。
+type quickItem struct {
+	schema string
+	table  string
+}
+
+// label 返回候选展示文本 schema.table。
+func (q quickItem) label() string { return q.schema + "." + q.table }
 
 func loadConnsCmd(a transport.Client) tea.Cmd {
 	return func() tea.Msg {
@@ -152,6 +166,25 @@ func tablesCmd(a transport.Client, id, schema string) tea.Cmd {
 	return func() tea.Msg {
 		tables, err := a.ListTables(context.Background(), id, schema)
 		return tablesMsg{schema: schema, tables: tables, err: err}
+	}
+}
+
+// allTablesCmd 汇总各 schema 的全部表，供 Quick-open 模糊搜表（跨 schema，含未浏览到的）。
+// 逐 schema 累积，任一 schema 失败即中止返回已收集部分前的错误。
+func allTablesCmd(a transport.Client, id string, schemas []protocol.SchemaInfo) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		var items []quickItem
+		for _, s := range schemas {
+			tables, err := a.ListTables(ctx, id, s.Name)
+			if err != nil {
+				return allTablesMsg{err: err}
+			}
+			for _, t := range tables {
+				items = append(items, quickItem{schema: s.Name, table: t.Name})
+			}
+		}
+		return allTablesMsg{items: items}
 	}
 }
 

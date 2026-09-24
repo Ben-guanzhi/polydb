@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	bkey "github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -23,11 +24,15 @@ const (
 	viewKV
 	viewResults
 	viewBrowse
+	viewQuickOpen
 )
 
 // 心跳：每 30s ping 当前连接；测试经 TestMain 置 heartbeatDisabled，
 // 避免 drive() 跟随自续的 tea.Tick 命令链而阻塞。
 const heartbeatEvery = 30 * time.Second
+
+// quickOpenMax 限制 Quick-open 过滤结果的最大渲染条数。
+const quickOpenMax = 200
 
 var heartbeatDisabled bool
 
@@ -40,14 +45,15 @@ func (m *model) armHB() tea.Cmd {
 }
 
 var viewTitles = map[view]string{
-	viewConns:   "连接",
-	viewForm:    "新建连接",
-	viewTables:  "库表结构",
-	viewTable:   "表详情",
-	viewQuery:   "查询",
-	viewKV:      "Redis 键",
-	viewResults: "结果导航",
-	viewBrowse:  "数据浏览",
+	viewConns:     "连接",
+	viewForm:      "新建连接",
+	viewTables:    "库表结构",
+	viewTable:     "表详情",
+	viewQuery:     "查询",
+	viewKV:        "Redis 键",
+	viewResults:   "结果导航",
+	viewBrowse:    "数据浏览",
+	viewQuickOpen: "搜索表",
 }
 
 type model struct {
@@ -104,6 +110,13 @@ type model struct {
 	acTable      string // 当前候选对应的表（列补全结果）
 	acColumns    []protocol.ColumnInfo
 
+	// Quick-open（Ctrl+P 于库表视图）：跨 schema 汇总全部表并即时模糊过滤。
+	qoInput          textinput.Model
+	qoAll            []quickItem
+	qoFiltered       []quickItem
+	qoCur            int
+	pendingTablePick string // 选定后待 tablesMsg 落地时定位并加载详情的表名
+
 	// Redis KV（M6 前端 Redis 模式；redis 连接走 viewKV，不进库表/查询流）。
 	kvDB       int
 	kvPattern  string
@@ -125,10 +138,17 @@ func New(app transport.Client) *model {
 	ta.Placeholder = "输入 SQL（F5 执行）…"
 	ta.ShowLineNumbers = true
 	ta.SetHeight(6)
+	// 与 GUI/Web 对齐：补绑 Ctrl+←/→ 词级移动（bubbles 默认仅 alt+←/→）。
+	tkm := ta.KeyMap
+	tkm.WordBackward = bkey.NewBinding(bkey.WithKeys("alt+left", "alt+b", "ctrl+left"))
+	tkm.WordForward = bkey.NewBinding(bkey.WithKeys("alt+right", "alt+f", "ctrl+right"))
+	ta.KeyMap = tkm
 	filter := textinput.New()
 	filter.Placeholder = "键模式（* 或 user:*）"
 	km := textinput.New()
 	km.Placeholder = "Redis 命令（GET user:1 / EXPIRE user:1 60 …）"
+	qo := textinput.New()
+	qo.Placeholder = "输入表名过滤（schema.table 模糊匹配）…"
 	m := &model{
 		app:        app,
 		view:       viewConns,
@@ -136,6 +156,7 @@ func New(app transport.Client) *model {
 		queryInput: ta,
 		kvFilter:   filter,
 		kvCmd:      km,
+		qoInput:    qo,
 	}
 	return m
 }
@@ -242,6 +263,29 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.tableCur >= len(m.tables) {
 			m.tableCur = 0
 		}
+		// Quick-open 落地：把光标定位到刚切换 schema 中的目标表并加载详情。
+		if m.pendingTablePick != "" {
+			pick := m.pendingTablePick
+			m.pendingTablePick = ""
+			for i, t := range m.tables {
+				if t.Name == pick {
+					m.tableCur = i
+					m.busy = "加载详情 …"
+					return m, detailCmd(m.app, m.selectedID, msg.schema, pick)
+				}
+			}
+		}
+		return m, nil
+	case allTablesMsg:
+		m.busy = ""
+		if msg.err != nil {
+			m.status = "加载全部表失败: " + msg.err.Error()
+			m.view = viewTables
+			return m, nil
+		}
+		m.qoAll = msg.items
+		m.qoCur = 0
+		m.refilterQuickOpen()
 		return m, nil
 	case detailMsg:
 		m.busy = ""
@@ -397,6 +441,8 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.resultsKey(msg)
 	case viewBrowse:
 		return m.browseKey(msg)
+	case viewQuickOpen:
+		return m.quickOpenKey(msg)
 	}
 	return m, nil
 }
@@ -527,6 +573,8 @@ func (m *model) tablesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.busy = "加载详情 …"
 			return m, detailCmd(m.app, m.selectedID, m.schemas[m.schemaIdx].Name, t.Name)
 		}
+	case tea.KeyCtrlP:
+		return m.openQuickSwitcher()
 	case tea.KeyF7:
 		return m.startBrowse()
 	case tea.KeyRunes:
@@ -550,6 +598,100 @@ func (m *model) tablesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// ─── Quick-open（Ctrl+P）────────────────────────────────────
+
+// quickFilter 纯函数：按大小写不敏感子串过滤 schema.table 候选（空 query 全返回）。
+func quickFilter(items []quickItem, query string) []quickItem {
+	q := strings.ToLower(strings.TrimSpace(query))
+	if q == "" {
+		return items
+	}
+	var out []quickItem
+	for _, it := range items {
+		if strings.Contains(strings.ToLower(it.label()), q) {
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
+// openQuickSwitcher 进入 Quick-open：清空输入、汇总当前连接各 schema 的全部表。
+func (m *model) openQuickSwitcher() (tea.Model, tea.Cmd) {
+	m.view = viewQuickOpen
+	m.qoInput.SetValue("")
+	m.qoInput.CursorEnd()
+	m.qoInput.Focus()
+	m.qoCur = 0
+	m.qoFiltered = nil
+	m.busy = "加载全部表 …"
+	return m, allTablesCmd(m.app, m.selectedID, m.schemas)
+}
+
+// refilterQuickOpen 依据当前输入重算过滤列表并夹紧光标下标。
+func (m *model) refilterQuickOpen() {
+	m.qoFiltered = quickFilter(m.qoAll, m.qoInput.Value())
+	if m.qoCur >= len(m.qoFiltered) {
+		m.qoCur = 0
+	}
+	if len(m.qoFiltered) > quickOpenMax {
+		m.qoFiltered = m.qoFiltered[:quickOpenMax]
+	}
+}
+
+// quickOpenKey 处理 Quick-open 视图按键：Esc 返回、↑/↓ 选择、Enter 跳转、其余编辑过滤。
+func (m *model) quickOpenKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyCtrlC:
+		m.quit = true
+		return m, tea.Quit
+	case tea.KeyEsc:
+		m.qoInput.Blur()
+		m.view = viewTables
+		return m, nil
+	case tea.KeyUp:
+		if m.qoCur > 0 {
+			m.qoCur--
+		}
+		return m, nil
+	case tea.KeyDown:
+		if m.qoCur < len(m.qoFiltered)-1 {
+			m.qoCur++
+		}
+		return m, nil
+	case tea.KeyEnter:
+		if m.qoCur < len(m.qoFiltered) {
+			return m.pickQuickItem(m.qoFiltered[m.qoCur])
+		}
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.qoInput, cmd = m.qoInput.Update(msg)
+	m.refilterQuickOpen()
+	return m, cmd
+}
+
+// pickQuickItem 选定候选：定位 schema、拉取该 schema 的表并在落地后打开目标表详情。
+func (m *model) pickQuickItem(it quickItem) (tea.Model, tea.Cmd) {
+	si := -1
+	for i, s := range m.schemas {
+		if s.Name == it.schema {
+			si = i
+			break
+		}
+	}
+	if si < 0 {
+		m.qoInput.Blur()
+		m.view = viewTables
+		return m, nil
+	}
+	m.schemaIdx = si
+	m.pendingTablePick = it.table
+	m.qoInput.Blur()
+	m.view = viewTables
+	m.busy = "加载表 …"
+	return m, tablesCmd(m.app, m.selectedID, it.schema)
 }
 
 func (m *model) tableKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1357,6 +1499,8 @@ func (m *model) View() string {
 		body = m.resultsView()
 	case viewBrowse:
 		body = m.browseView()
+	case viewQuickOpen:
+		body = m.quickOpenView()
 	}
 	return m.frame(body)
 }
@@ -1422,6 +1566,8 @@ func (m *model) footer() string {
 			return "Enter 刷新全值 · Esc 关闭全值（再按返回列表）"
 		}
 		return "↑/↓ 行 · ←/→ 翻页 · Shift←/→ 列 · Enter 完整值 · r 刷新 · Esc 返回"
+	case viewQuickOpen:
+		return "↑/↓ 选择 · Enter 打开 · Esc 返回"
 	}
 	return ""
 }
@@ -1483,6 +1629,29 @@ func (m *model) tablesView() string {
 			line += "  [" + string(t.Type) + "]"
 		}
 		if i == m.tableCur {
+			line = "\x1b[7m" + line + "\x1b[0m"
+		}
+		b.WriteString(line + "\n")
+	}
+	return b.String()
+}
+
+func (m *model) quickOpenView() string {
+	var b strings.Builder
+	b.WriteString("🔍 " + m.qoInput.View() + "\n")
+	if len(m.qoFiltered) == 0 {
+		b.WriteString("（无匹配）\n")
+		return b.String()
+	}
+	total := len(m.qoAll)
+	b.WriteString(fmt.Sprintf("匹配 %d / 共 %d 张表\n", len(m.qoFiltered), total))
+	for i, it := range m.qoFiltered {
+		marker := "  "
+		if i == m.qoCur {
+			marker = "▸ "
+		}
+		line := marker + it.label()
+		if i == m.qoCur {
 			line = "\x1b[7m" + line + "\x1b[0m"
 		}
 		b.WriteString(line + "\n")
