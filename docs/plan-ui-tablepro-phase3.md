@@ -119,7 +119,7 @@
 
 ### 阶段 C — Web 余留（穿插，小件）
 
-- **W1**：Inspector 行详情尾板（与 G2 同语义，只读+跳转编辑入口）；结果视图模式补
+- **W1** ✅（2026-09-24）：Inspector 行详情尾板（与 G2 同语义，只读+跳转编辑入口）；结果视图模式补
   JSON / Output(消息) 两页签。**纯前端，无 spec 变更。**
 - 另案（不排期）：过滤操作符 13→18 + Match Case（spec 变更 + 6 驱动×2 语言 + 契约测试）；
   Rewind 快照（需存储层）；Compare & Sync、Server Dashboard、连接条 rail。
@@ -140,7 +140,7 @@
 | 三端行为漂移 | §4 表驱动同用例 + 对拍清单 |
 | TUI 编辑流误操作风险（终端无确认弹窗习惯） | 提交前强制 Review 一步 + 只读连接门禁 + 行数校验兜底 |
 
-## 6. 实现落点（阶段 A G1–G6、阶段 B T1–T4 已完成，2026-09-24）
+## 6. 实现落点（阶段 A G1–G6、阶段 B T1–T4、阶段 C W1 已完成，2026-09-24）
 
 > 许可红线复核：TablePro / TableProGo 为 AGPLv3，以下内容仅为**交互设计与语义参考**，
 > 三端实现全部独立，未移植其任何代码。
@@ -167,6 +167,20 @@
   `EXPLAIN` / `PRAGMA` 行集被丢弃（另外四家 Go 驱动与 Rust 侧均按查询处理）——已对齐并补回归测试。
 - 门禁：`gofmt` + `go vet ./...` + `go build ./...` + `go test ./...` 全绿
   （`golangci-lint` v2 本机未安装，lint 步骤跳过）。
+
+### 阶段 C — Web（`web/src`，W1 已完成 2026-09-24）
+- 纯逻辑下沉 `web/src/lib/resultViews.ts`：`ViewMode`、`cellClass`/`fmt`（自 QueryWorkspace 迁出）、
+  `buildInspectorFields`（跳过隐藏列、保留原始列下标、400 字符裁断）、`outputMessages`
+  （多语句逐条 + 单语句，统一状态文案）。呈现组件 `ResultViewPanels.tsx`
+  （`JsonResultView` / `MessagesView` / `RowInspector`），派生与状态仍留在 QueryWorkspace。
+- 视图模式：`chartOpen` 收敛为单一 `viewMode`，`表格 | JSON | 图表 | 消息` 四页签互斥；
+  用派生 `effectiveMode` 处理「新结果不支持该模式」回落，避免在各 `setResult` 处散落重置。
+  挂起事务条移出「有列」分支，四页签下常驻。
+- Inspector：恰好选中 1 行走 `displayRows`+`origIdx` 取行（与网格排序/过滤/隐藏列/草稿一致），
+  「编辑」复用 `startEdit` 门禁（主键列、不可识别行、只读连接均不出入口），「完整值」复用
+  `setCellPreview`；开合偏好 `polydb.inspector.v1`。
+- 门禁：`tsc --noEmit` + `eslint .` 干净，`vitest run` 13 文件 / 121 测试全绿，`vite build` 成功。
+  界面**未在浏览器肉眼验证**（自动化浏览器被沙箱拦截），以组件测试 + 构建门禁代替。
 
 ### 三端一致 / 差异
 - 一致：过滤 13 op 与排序/计数走服务端；变更跟踪编辑「暂存 → Review → 单事务提交（失败回滚）→ 撤销」；

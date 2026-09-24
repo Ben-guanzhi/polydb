@@ -28,6 +28,15 @@ import ContextMenu, { type ContextMenuEntry } from './ContextMenu';
 import CellPreviewPanel from './CellPreview';
 import TabStrip from './TabStrip';
 import { PlayIcon, StopIcon } from './Icons';
+import {
+  buildInspectorFields,
+  cellClass,
+  fmt,
+  outputMessages,
+  type StatementInput,
+  type ViewMode,
+} from '../lib/resultViews';
+import { JsonResultView, MessagesView, RowInspector } from './ResultViewPanels';
 
 interface Props {
   connId: string;
@@ -82,11 +91,11 @@ function ExplainView({ result, kind }: { result: QueryResult; kind: import('../a
 }
 
 type Transport = 'http' | 'ws';
-type CellClass = 'null' | 'num' | 'bool' | 'text' | 'blob';
 type SortDir = 'asc' | 'desc' | null;
 
 const HISTORY_KEY = 'polydb.queryHistory';
 const THEME_KEY = 'polydb.theme';
+const INSPECTOR_KEY = 'polydb.inspector.v1';
 const HISTORY_LIMIT = 50;
 
 type EditorTheme = 'vs' | 'vs-dark' | 'hc-black';
@@ -131,27 +140,6 @@ function sqlLiteral(v: unknown): string {
   const s = String(v).replace(/'/g, "''");
   return `'${s}'`;
 }
-function cellClass(v: unknown, col?: ResultColumn): CellClass {
-  if (v === null || v === undefined) return 'null';
-  const t = col?.type?.toLowerCase() ?? '';
-  if (typeof v === 'number') return 'num';
-  if (typeof v === 'boolean') return 'bool';
-  if (t.includes('int') || t.includes('smallint') || t.includes('bigint') || t.includes('decimal') || t.includes('numeric') || t.includes('float') || t.includes('double') || t.includes('real')) {
-    const s = String(v);
-    if (/^-?\d+(\.\d+)?$/.test(s)) return 'num';
-  }
-  return 'text';
-}
-
-function fmt(v: unknown): string {
-  if (v === null || v === undefined) return 'NULL';
-  if (typeof v === 'object') {
-    if (Array.isArray(v)) return `[${v.map(fmt).join(', ')}]`;
-    return JSON.stringify(v);
-  }
-  return String(v);
-}
-
 function loadHistory(): string[] {
   try {
     const raw = localStorage.getItem(HISTORY_KEY);
@@ -169,6 +157,19 @@ function saveHistory(h: string[]) {
   } catch {
     // quota / private mode
   }
+}
+
+// Inspector 行详情尾板的开合偏好：默认展开（选中一行即自动出现）。
+function loadInspectorPref(): boolean {
+  try {
+    return localStorage.getItem(INSPECTOR_KEY) !== 'off';
+  } catch { /* ignore */ }
+  return true;
+}
+function saveInspectorPref(open: boolean) {
+  try {
+    localStorage.setItem(INSPECTOR_KEY, open ? 'on' : 'off');
+  } catch { /* ignore */ }
 }
 
 function stripCommentsForHistory(sql: string): string {
@@ -443,7 +444,8 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; row: number; col: number } | null>(null);
   const [cellPreview, setCellPreview] = useState<{ row: number; col: number } | null>(null);
   const [previewTab, setPreviewTab] = useState<'text' | 'json' | 'hex' | 'time'>('text');
-  const [chartOpen, setChartOpen] = useState(false);
+  const [viewMode, setViewMode] = useState<ViewMode>('table');
+  const [inspectorOpen, setInspectorOpen] = useState<boolean>(() => loadInspectorPref());
   const [chartKind, setChartKind] = useState<'bar' | 'line' | 'pie'>('bar');
   const [chartXCol, setChartXCol] = useState<number>(0);
   const [chartYCol, setChartYCol] = useState<number>(-1);
@@ -473,6 +475,7 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
   }, [connId]);
 
   useEffect(() => { saveAiSettings(aiSettings); }, [aiSettings]);
+  useEffect(() => { saveInspectorPref(inspectorOpen); }, [inspectorOpen]);
 
   useEffect(() => { histIdxRef.current = histIdx; }, [histIdx]);
   useEffect(() => { historyRef.current = history; }, [history]);
@@ -1811,6 +1814,39 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
   const visibleRows = displayRows.map((entry) => ({ origIdx: entry.origIdx, cells: entry.row.filter((_, j) => !hiddenCols.has(j)) }));
   const exportRows = visibleRows.filter((entry) => selRows.size === 0 || selRows.has(entry.origIdx));
 
+  // ── W1：结果区视图模式（表格 / JSON / 图表 / 消息）──
+  // 无结果集时图表与 JSON 无意义（仅 DML 的图表本就禁用），派生回落而不是把非法状态写进 state，
+  // 这样切到新结果时无需额外的重置 effect。
+  const modeAvailable = (m: ViewMode): boolean => {
+    if (m === 'table' || m === 'output') return true;
+    if (columns.length === 0) return false;
+    return m === 'json' || isSelect;
+  };
+  const effectiveMode: ViewMode = modeAvailable(viewMode) ? viewMode : 'table';
+
+  const jsonText = effectiveMode === 'json'
+    ? exporters.toJson(visibleColumns.map((c) => c.name), visibleRows.map((e) => e.cells as unknown[]))
+    : '';
+
+  const multiInputs: StatementInput[] | null = multiResults
+    ? multiResults.map((e) => ({ sql: e.sql, result: e.result, error: e.error, elapsed: e.elapsed, status: e.status }))
+    : null;
+  const messages = outputMessages({
+    multi: multiInputs && multiInputs.length > 0 ? multiInputs : null,
+    activeIdx: activeMultiIdx,
+    single: multiInputs ? null : { sql: lastQuerySql, result, error, elapsed, status: error ? 'err' : 'ok' },
+  });
+
+  // ── W1：Inspector 行详情尾板（与 GUI G2 同语义，只读 + 跳转编辑入口）──
+  // 取 displayRows 而非 result.rows：让未提交的编辑草稿与网格保持一致。
+  const inspectorRow = selRows.size === 1 ? Array.from(selRows)[0] : -1;
+  const inspectorEntry = inspectorRow >= 0 ? displayRows.find((e) => e.origIdx === inspectorRow) : undefined;
+  const inspectorFields = inspectorEntry ? buildInspectorFields(columns, inspectorEntry.row, hiddenCols) : [];
+  const inspectorRowJson = inspectorEntry
+    ? exporters.toJson(visibleColumns.map((c) => c.name), [inspectorEntry.row.filter((_, j) => !hiddenCols.has(j)) as unknown[]])
+    : '';
+  const showInspector = inspectorOpen && effectiveMode === 'table' && inspectorFields.length > 0;
+
   const doExport = (kind: 'csv' | 'json' | 'tsv' | 'ndjson' | 'markdown' | 'sql-insert') => {
     if (!result || columns.length === 0) return;
     const cols = visibleColumns;
@@ -2323,6 +2359,7 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
   useEffect(() => {
     const unregs: (() => void)[] = [];
     const hasResult = !!result && (result.columns.length > 0 || result.affected_rows > 0);
+    const hasColumns = !!result && result.columns.length > 0;
 
     unregs.push(registerCommand({
       id: 'ws.templates-open',
@@ -2510,33 +2547,65 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
       run: () => { setTransport('ws'); },
     }));
     unregs.push(registerCommand({
+      id: 'ws.view-table',
+      label: '结果视图 → 表格',
+      category: '视图',
+      keywords: ['table', 'grid', 'view', '表格'],
+      enabled: () => hasResult,
+      run: () => { setViewMode('table'); },
+    }));
+    unregs.push(registerCommand({
+      id: 'ws.view-json',
+      label: '结果视图 → JSON',
+      category: '视图',
+      keywords: ['json', 'view', '视图'],
+      enabled: () => hasColumns,
+      run: () => { setViewMode('json'); },
+    }));
+    unregs.push(registerCommand({
+      id: 'ws.view-output',
+      label: '结果视图 → 消息',
+      category: '视图',
+      keywords: ['message', 'output', '消息', '日志'],
+      enabled: () => hasResult,
+      run: () => { setViewMode('output'); },
+    }));
+    unregs.push(registerCommand({
+      id: 'ws.inspector-toggle',
+      label: inspectorOpen ? '关闭行详情尾板' : '打开行详情尾板',
+      category: '视图',
+      keywords: ['inspector', 'row', 'detail', '行详情', '详情'],
+      enabled: () => hasColumns,
+      run: () => { setInspectorOpen((v) => !v); },
+    }));
+    unregs.push(registerCommand({
       id: 'ws.chart-toggle',
-      label: chartOpen ? '关闭图表' : '打开图表',
+      label: viewMode === 'chart' ? '结果视图 → 关闭图表' : '结果视图 → 打开图表',
       category: '图表',
       keywords: ['chart', 'graph', 'viz', 'visual'],
-      enabled: () => hasResult,
-      run: () => { setChartOpen((v) => !v); },
+      enabled: () => hasColumns,
+      run: () => { setViewMode((m) => (m === 'chart' ? 'table' : 'chart')); },
     }));
     unregs.push(registerCommand({
       id: 'ws.chart-bar',
       label: '图表 → 柱状图',
       category: '图表',
       keywords: ['bar', 'chart'],
-      run: () => { setChartKind('bar'); setChartOpen(true); },
+      run: () => { setChartKind('bar'); setViewMode('chart'); },
     }));
     unregs.push(registerCommand({
       id: 'ws.chart-line',
       label: '图表 → 折线图',
       category: '图表',
       keywords: ['line', 'chart'],
-      run: () => { setChartKind('line'); setChartOpen(true); },
+      run: () => { setChartKind('line'); setViewMode('chart'); },
     }));
     unregs.push(registerCommand({
       id: 'ws.chart-pie',
       label: '图表 → 饼图',
       category: '图表',
       keywords: ['pie', 'chart'],
-      run: () => { setChartKind('pie'); setChartOpen(true); },
+      run: () => { setChartKind('pie'); setViewMode('chart'); },
     }));
     unregs.push(registerCommand({
       id: 'ws.chart-bar-grouped',
@@ -2557,7 +2626,7 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
       label: '导出图表为 PNG',
       category: '图表',
       keywords: ['png', 'export', 'download', 'image', 'chart'],
-      enabled: () => chartOpen && !!result && result.columns.length > 0,
+      enabled: () => viewMode === 'chart' && !!result && result.columns.length > 0,
       run: () => { exportChartPng(); },
     }));
     unregs.push(registerCommand({
@@ -2645,7 +2714,7 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
 
     return () => { for (const u of unregs) u(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chartOpen, chartBarMode, result, explainResult, contextLabel, contextTable, transport, queryId, explainBusy, pendingTxBusy, allTemplates]);
+  }, [viewMode, inspectorOpen, chartBarMode, result, explainResult, contextLabel, contextTable, transport, queryId, explainBusy, pendingTxBusy, allTemplates]);
 
   const editorStatusCleanupRef = useRef<(() => void) | null>(null);
   const publishCursor = (ed: Parameters<OnMount>[0]) => {
@@ -3058,6 +3127,42 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
                     {result.statement_type}
                   </span>
                 )}
+                <div style={{ display: 'flex', gap: 2 }} title="结果视图模式">
+                  {([['table', '表格'], ['json', 'JSON'], ['chart', '图表'], ['output', '消息']] as const).map(([m, lbl]) => {
+                    const avail = modeAvailable(m);
+                    return (
+                      <button
+                        key={m}
+                        className="btn-ico"
+                        onClick={() => {
+                          if (m === 'chart' && effectiveMode === 'chart') {
+                            setViewMode('table');
+                            return;
+                          }
+                          if (m === 'chart') {
+                            setChartXCol(0);
+                            setChartYCol(-1);
+                          }
+                          setViewMode(m);
+                        }}
+                        disabled={!avail}
+                        title={m === 'chart' && !isSelect ? '仅 SELECT 结果可图表化' : `切换到${lbl}视图`}
+                        style={{
+                          padding: '2px 8px',
+                          fontSize: 11,
+                          border: '1px solid var(--border)',
+                          borderRadius: 2,
+                          background: effectiveMode === m ? 'var(--accent-dim)' : 'transparent',
+                          color: effectiveMode === m ? 'var(--fg)' : 'var(--muted)',
+                          opacity: avail ? 1 : 0.4,
+                          cursor: avail ? 'pointer' : 'not-allowed',
+                        }}
+                      >
+                        {lbl}
+                      </button>
+                    );
+                  })}
+                </div>
                 <button
                   className="btn-ico"
                   onClick={() => void runExplain()}
@@ -3067,19 +3172,16 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
                 >
                   ⚙ 执行计划{explainBusy ? '…' : ''}
                 </button>
-                <button
-                  className="btn-ico"
-                  onClick={() => {
-                    setChartXCol(0);
-                    setChartYCol(-1);
-                    setChartOpen((v) => !v);
-                  }}
-                  disabled={!isSelect || columns.length === 0}
-                  title={isSelect ? '图表可视化（柱/折线/饼）' : '仅 SELECT 语句可图表化'}
-                  style={{ opacity: (!isSelect || columns.length === 0) ? 0.5 : 1, color: chartOpen ? 'var(--accent)' : undefined }}
-                >
-                  📊 {chartOpen ? '关闭图表' : '图表'}
-                </button>
+                {columns.length > 0 && inspectorRow >= 0 && (
+                  <button
+                    className="btn-ico"
+                    onClick={() => setInspectorOpen((v) => !v)}
+                    title={inspectorOpen ? '收起行详情尾板' : '展开行详情尾板（选中一行时自动显示）'}
+                    style={{ color: inspectorOpen ? 'var(--accent)' : undefined }}
+                  >
+                    ⓘ 行详情
+                  </button>
+                )}
                 <span className="badge" style={{ background: 'var(--bg)', color: 'var(--text)', fontFamily: 'monospace', border: '1px solid var(--border)' }} title="服务端执行耗时">
                   ⏱ {result.execution_time_ms < 1 ? result.execution_time_ms.toFixed(3) : result.execution_time_ms.toFixed(2)} ms
                 </span>
@@ -3239,11 +3341,60 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
                   <span className="muted">共 {result.total_rows} 行</span>
                 )}
               </div>
-              {columns.length === 0 ? (
+              {pendingTx && (
+                <div style={{ padding: '8px 10px', borderTop: '1px solid var(--accent)', borderBottom: '1px solid var(--accent)', background: 'var(--accent-dim, rgba(255, 200, 0, 0.1))', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                  <strong style={{ fontSize: 12, color: 'var(--muted)' }}>待提交事务</strong>
+                  <span style={{ color: 'var(--muted)', fontSize: 12 }}>
+                    {pendingTx.count} 行 · txn {pendingTx.txId.slice(0, 8)}
+                  </span>
+                  {pendingTx.expr && <span style={{ fontSize: 11, color: 'var(--muted)' }}>（含 SQL 表达式）</span>}
+                  {(() => {
+                    const sec = Math.max(0, Math.floor((txNow - pendingTx.openedAt) / 1000));
+                    const label = sec < 60 ? `${sec}s` : sec < 3600 ? `${Math.floor(sec / 60)}m${sec % 60}s` : `${Math.floor(sec / 3600)}h${Math.floor((sec % 3600) / 60)}m`;
+                    return <span style={{ fontSize: 11, color: 'var(--muted)', fontFamily: 'monospace' }} title="事务挂起时长">· 已等待 {label}</span>;
+                  })()}
+                  <span style={{ flex: 1 }} />
+                  {pendingTxBusy && <span style={batchBusySpinner}>处理中…</span>}
+                  <span style={{ fontSize: 11, color: 'var(--muted)' }} title="Ctrl+Enter 提交 · Esc 回滚">Ctrl+Enter 提交 · Esc 回滚</span>
+                  <button
+                    className="btn-ico"
+                    style={{ background: 'var(--danger, #c0392b)', color: 'white', borderColor: 'var(--danger, #c0392b)' }}
+                    onClick={() => void resolvePendingTx(false)}
+                    disabled={pendingTxBusy}
+                    title="回滚事务并恢复修改前的值（Esc）"
+                  >
+                    撤销（回滚）
+                  </button>
+                  <button
+                    className="primary btn-ico"
+                    onClick={() => void resolvePendingTx(true)}
+                    disabled={pendingTxBusy}
+                    title="确认提交事务，永久保存修改（Ctrl+Enter）"
+                  >
+                    确认提交
+                  </button>
+                </div>
+              )}
+              {effectiveMode === 'output' ? (
+                <MessagesView
+                  items={messages}
+                  pickable={!!multiInputs && multiInputs.length > 1}
+                  onPick={(i) => applyActiveMulti(i)}
+                />
+              ) : effectiveMode === 'json' ? (
+                <JsonResultView
+                  text={jsonText}
+                  objectCount={visibleRows.length}
+                  visibleColCount={visibleColumns.length}
+                  totalColCount={columns.length}
+                  onCopy={() => void navigator.clipboard.writeText(jsonText)}
+                  onDownload={() => download(`${baseFilename()}.json`, 'application/json', jsonText)}
+                />
+              ) : columns.length === 0 ? (
                 <div className="empty">语句执行成功，无结果集。</div>
               ) : (
                 <>
-                  {chartOpen && (
+                  {effectiveMode === 'chart' && (
                     <div style={{ padding: '8px 10px', borderBottom: '1px solid var(--border)', background: 'var(--bg-alt, transparent)' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
                         <strong style={{ fontSize: 12, color: 'var(--muted)' }}>图表</strong>
@@ -3587,6 +3738,7 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
                       )}
                     </div>
                   )}
+                  {effectiveMode === 'table' && (<>
                   <div
                     style={{
                       display: 'grid',
@@ -3642,40 +3794,6 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
                       );
                     })}
                   </div>
-                  {pendingTx && (
-                    <div style={{ padding: '8px 10px', borderTop: '1px solid var(--accent)', borderBottom: '1px solid var(--accent)', background: 'var(--accent-dim, rgba(255, 200, 0, 0.1))', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                      <strong style={{ fontSize: 12, color: 'var(--muted)' }}>待提交事务</strong>
-                      <span style={{ color: 'var(--muted)', fontSize: 12 }}>
-                        {pendingTx.count} 行 · txn {pendingTx.txId.slice(0, 8)}
-                      </span>
-                      {pendingTx.expr && <span style={{ fontSize: 11, color: 'var(--muted)' }}>（含 SQL 表达式）</span>}
-                      {(() => {
-                        const sec = Math.max(0, Math.floor((txNow - pendingTx.openedAt) / 1000));
-                        const label = sec < 60 ? `${sec}s` : sec < 3600 ? `${Math.floor(sec / 60)}m${sec % 60}s` : `${Math.floor(sec / 3600)}h${Math.floor((sec % 3600) / 60)}m`;
-                        return <span style={{ fontSize: 11, color: 'var(--muted)', fontFamily: 'monospace' }} title="事务挂起时长">· 已等待 {label}</span>;
-                      })()}
-                      <span style={{ flex: 1 }} />
-                      {pendingTxBusy && <span style={batchBusySpinner}>处理中…</span>}
-                      <span style={{ fontSize: 11, color: 'var(--muted)' }} title="Ctrl+Enter 提交 · Esc 回滚">Ctrl+Enter 提交 · Esc 回滚</span>
-                      <button
-                        className="btn-ico"
-                        style={{ background: 'var(--danger, #c0392b)', color: 'white', borderColor: 'var(--danger, #c0392b)' }}
-                        onClick={() => void resolvePendingTx(false)}
-                        disabled={pendingTxBusy}
-                        title="回滚事务并恢复修改前的值（Esc）"
-                      >
-                        撤销（回滚）
-                      </button>
-                      <button
-                        className="primary btn-ico"
-                        onClick={() => void resolvePendingTx(true)}
-                        disabled={pendingTxBusy}
-                        title="确认提交事务，永久保存修改（Ctrl+Enter）"
-                      >
-                        确认提交
-                      </button>
-                    </div>
-                  )}
                   {batchOpen && batchEdit && selRows.size >= 2 && (
                     <div style={{ padding: '8px 10px', borderTop: '1px solid var(--border)', borderBottom: '1px solid var(--border)', background: 'var(--bg-elev, rgba(0,0,0,0.03))' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
@@ -3847,6 +3965,20 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
                     })}
                   </tbody>
                   </table>
+                  {showInspector && inspectorEntry && (
+                    <RowInspector
+                      rowIdx={inspectorRow}
+                      fields={inspectorFields}
+                      editable={(col) => editEnabled && !pkCols.includes(columns[col].name)
+                        && identifyableRow(inspectorEntry.row, pkCols, columns)}
+                      onPreview={(col) => { setCellPreview({ row: inspectorRow, col }); setPreviewTab('text'); }}
+                      onEdit={(col) => startEdit(inspectorRow, col)}
+                      onCopyRow={() => void navigator.clipboard.writeText(inspectorRowJson)}
+                      onClose={() => setInspectorOpen(false)}
+                    />
+                  )}
+                    </>
+                  )}
                 </>
               )}
             </>

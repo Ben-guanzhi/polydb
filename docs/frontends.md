@@ -12,6 +12,17 @@ polydb 有多个前端，均遵守 AGENTS.md 铁律：**只经 `app-core`（进�
   🕸 开关切 ER 图，表详情内「结构编辑」ALTER 表单）、ERDiagram（M16，纯 SVG 只读关系图）、
   TableStructureEditor（M16，按方言生成 DDL，事务内执行失败回滚）、
   QueryWorkspace（Monaco + 结果表格 + 变更跟踪编辑/导出）、RedisBrowser（Redis 键浏览/命令）
+- 结果区视图模式（阶段 C W1）：`表格 | JSON | 图表 | 消息` 四页签互斥，图表由叠加面板改为独立页签。
+  JSON 页签跟随当前可见视图（排序、列过滤、隐藏列之后）输出「行→对象数组」，可复制/下载；
+  消息页签逐条列出每次执行的状态（行列数、影响行数、服务端/往返耗时、截断与分页提示、错误、
+  取消/跳过），多语句时可点击条目切回该条结果。挂起事务条在四页签下常驻。
+- Inspector 行详情尾板（与 GUI G2 同语义）：**恰好选中 1 行**时自动展开，逐字段显示
+  列名/类型/值（超 400 字符裁断），提供「完整值」与「编辑」入口（编辑仅在该列可内联编辑时出现：
+  有主键、非主键列、行可识别、非只读）；右上 `×` 强制收起，开合偏好存 localStorage `polydb.inspector.v1`。
+- 命令面板新增 `ws.view-table / ws.view-json / ws.view-output / ws.inspector-toggle`（category「视图」），
+  `ws.chart-toggle` 改为切页签。
+- 纯逻辑出口：`web/src/lib/resultViews.ts`（视图模式类型、`cellClass`/`fmt`、`buildInspectorFields`、
+  `outputMessages`）；呈现组件 `web/src/components/ResultViewPanels.tsx`（`JsonResultView`/`MessagesView`/`RowInspector`）。
 
 ## TUI（M4，Go + bubbletea）
 
