@@ -207,6 +207,13 @@ pub(crate) struct CellMenuState {
     pub col: usize,
 }
 
+/// D3 执行计划浮层：实际下发的 EXPLAIN 语句 + 展平后的计划行。
+#[derive(Clone)]
+pub(crate) struct ExplainState {
+    pub(crate) sql: String,
+    pub(crate) lines: Vec<String>,
+}
+
 #[derive(Clone)]
 pub(crate) struct HbState {
     pub ok: bool,
@@ -558,6 +565,8 @@ pub struct PolyDBApp {
     // ── 全局浮层（预览/右键菜单，作用于某个网格源）──
     pub(crate) preview: Option<PreviewState>,
     pub(crate) ctx_menu: Option<CellMenuState>,
+    /// D3 执行计划浮层（None=未打开）。
+    pub(crate) explain: Option<ExplainState>,
 
     // ── 过滤栏值输入（复用单一聚焦句柄；编辑目标定位到当前表 tab 的某草稿某字段）──
     pub(crate) filter_focus: FocusHandle,
@@ -646,6 +655,7 @@ impl PolyDBApp {
             cancel: Arc::new(AtomicBool::new(false)),
             preview: None,
             ctx_menu: None,
+            explain: None,
             filter_focus: cx.focus_handle(),
             editing: None,
             edit_cursor: 0,
@@ -784,6 +794,7 @@ impl PolyDBApp {
         self.result = None;
         self.preview = None;
         self.ctx_menu = None;
+        self.explain = None;
         self.editing = None;
         self.multi_log.clear();
         self.tables.clear();
@@ -808,6 +819,7 @@ impl PolyDBApp {
         self.result = None;
         self.preview = None;
         self.ctx_menu = None;
+        self.explain = None;
         self.editing = None;
         self.multi_log.clear();
         self.status = "Enter 执行 · Shift+Enter 换行 · 双击侧栏表开标签".into();
@@ -2451,6 +2463,8 @@ impl PolyDBApp {
         self.result = None;
         self.preview = None;
         self.ctx_menu = None;
+        // 计划是旧快照：重新执行查询即失效，避免浮层展示过期内容。
+        self.explain = None;
         self.cancel.store(false, Ordering::Relaxed);
         if stmts.len() > 1 {
             self.multi_log = stmts
@@ -2534,6 +2548,57 @@ impl PolyDBApp {
             });
         })
         .detach();
+    }
+
+    // ─── D3 执行计划（语义对齐 Web lib/explain.ts / TUI pkg/explain）───
+
+    /// 取编辑器第一条语句，按方言包成 EXPLAIN 执行，结果渲染为计划树/表格文本。
+    pub(crate) fn run_explain(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.sel_id() else {
+            self.status = "请先选择连接".into();
+            cx.notify();
+            return;
+        };
+        if self.is_redis() {
+            self.status = "Redis 无执行计划".into();
+            cx.notify();
+            return;
+        }
+        let Some(kind) = self.sel_kind() else { return };
+        let sql = self.sql.trim().to_string();
+        let esql = split_statements(&sql)
+            .into_iter()
+            .next()
+            .map(|s| crate::explain::build_sql(&s, kind))
+            .unwrap_or_default();
+        if esql.is_empty() {
+            self.status = "SQL 为空".into();
+            cx.notify();
+            return;
+        }
+        self.active = ActiveView::Workbench;
+        self.busy = true;
+        self.preview = None;
+        self.ctx_menu = None;
+        cx.notify();
+        let shown = esql.clone();
+        self.io(
+            cx,
+            move |t| Box::pin(async move { t.execute(id, &esql, &[]).await }),
+            move |this, out, cx| {
+                this.busy = false;
+                match out {
+                    Ok(r) => {
+                        let lines = crate::explain::render(&r, kind).lines();
+                        this.status =
+                            format!("执行计划：{} 行（F9 / Ctrl+Shift+E 重跑）", lines.len());
+                        this.explain = Some(ExplainState { sql: shown, lines });
+                    }
+                    Err(e) => this.status = format!("执行计划失败: {e}"),
+                }
+                cx.notify();
+            },
+        );
     }
 
     pub(crate) fn request_cancel(&mut self, cx: &mut Context<Self>) {
@@ -2811,6 +2876,7 @@ impl PolyDBApp {
                     cx.notify();
                 }
                 "p" => self.open_quick_switcher(cx),
+                "e" if ks.modifiers.shift => self.run_explain(cx),
                 "enter" => self.run_query(cx),
                 _ => {}
             }
@@ -2826,6 +2892,16 @@ impl PolyDBApp {
                 } else {
                     self.run_query(cx);
                 }
+                return;
+            }
+            // F9 执行计划、Esc 关闭计划浮层（与 TUI 键位对齐）。
+            "f9" => {
+                self.run_explain(cx);
+                return;
+            }
+            "escape" if self.explain.is_some() => {
+                self.explain = None;
+                cx.notify();
                 return;
             }
             "backspace" => self.backspace(),

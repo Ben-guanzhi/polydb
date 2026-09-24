@@ -140,7 +140,10 @@
   落点：`db-redis/src/lib.rs`（`AtomicU32`）、`pkg/dbredis/dbredis.go`、TUI `model.go` `kvScanMsg`、
   GUI `app.rs` `redis_scan/redis_more/redis_set_db`、Web `RedisBrowser.tsx`；
   契约 `redisScenario` 用 `SELECT 1` 证明非本地值。
-- **D3** Rust GUI 执行计划：补三端差异（Web `lib/explain.ts` / TUI `pkg/explain` 已有）。
+- **D3** ✅（2026-09-25）Rust GUI 执行计划：新增 `rust/crates/ui-gui/src/explain.rs`（纯函数，与 Web
+  `lib/explain.ts` / TUI `go/pkg/explain` 同语义、输出逐字一致），顶栏「⚙ 执行计划」+ `F9` /
+  `Ctrl+Shift+E` 触发，绝对定位浮层展平渲染 `├─/└─/│` 计划行、可一键复制、`Esc`/点击外部关闭；
+  Redis 连接不渲染入口并提示「Redis 无执行计划」，重新执行查询即作废旧快照。无 spec 变更。
 - **D4** Redis string 整值写回：Web + GUI 对齐 TUI 的 `e`。
 - 仍不排期（各自需新里程碑再拆）：Rewind 快照（需存储层）、Compare & Sync、Server Dashboard、
   左缘连接条 rail。
@@ -208,4 +211,5 @@
   三端渲染同一份集中式 WHERE 构造器）；变更跟踪编辑「暂存 → Review → 单事务提交（失败回滚）→ 撤销」；
   只读连接禁用全部写入口；`Ctrl+P` Quick-open。
 - 差异（有意保留）：终端无鼠标习惯 → TUI 不做拖拽选区；取消入口三端形态不同（`F8` / 顶栏按钮 / `Ctrl+Esc`）；
-  执行计划 TUI `F9` 与 Web 均有，GUI 暂缺；Redis 整值写回仅 TUI（Web 走命令行、GUI 只读）。
+  执行计划三端均已具备（阶段 D 补齐 GUI，触发形态各异：`F9` / 工具栏按钮 / 顶栏按钮）；
+  Redis 整值写回仅 TUI（Web 走命令行、GUI 只读）。

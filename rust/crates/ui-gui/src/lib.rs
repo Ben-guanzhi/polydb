@@ -8,6 +8,7 @@
 
 mod app;
 mod changes;
+mod explain;
 mod exporters;
 mod filters;
 mod presets;

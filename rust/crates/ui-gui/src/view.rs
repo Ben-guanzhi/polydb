@@ -119,6 +119,7 @@ impl PolyDBApp {
         let ctx_menu = self.render_ctx_menu(cx);
         let conn_modal = self.render_conn_form(cx);
         let quick_modal = self.render_quick_switcher(cx);
+        let explain_modal = self.render_explain_modal(cx);
         div()
             .relative()
             .size_full()
@@ -137,6 +138,7 @@ impl PolyDBApp {
             .children(ctx_menu)
             .children(conn_modal)
             .children(quick_modal)
+            .children(explain_modal)
             .into_any_element()
     }
 
@@ -174,6 +176,14 @@ impl PolyDBApp {
                     this.request_cancel(cx);
                 }))
         });
+        // D3：SQL 连接才有权看执行计划（Redis 无）。
+        let explain_btn = (!kind.is_empty() && !self.is_redis()).then(|| {
+            btn("btn-explain", "⚙ 执行计划", th).on_click(cx.listener(
+                |this, _ev: &ClickEvent, _window, cx| {
+                    this.run_explain(cx);
+                },
+            ))
+        });
         div()
             .h(px(40.0))
             .flex_none()
@@ -207,6 +217,7 @@ impl PolyDBApp {
             .children(ro_badge)
             .children(hb_chip)
             .children(cancel_btn)
+            .children(explain_btn)
             .child(btn("theme-ws", "🌗", th).on_click(cx.listener(
                 |this, _ev: &ClickEvent, _window, cx| {
                     this.toggle_theme();
@@ -3002,6 +3013,126 @@ impl PolyDBApp {
                                 .child(body),
                         ),
                 ),
+        )
+    }
+
+    // ─── D3 执行计划浮层（EXPLAIN 树/表格文本，语义对齐 Web 与 TUI）───
+
+    fn render_explain_modal(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let e = self.explain.as_ref()?;
+        let th = &self.theme;
+        let body = e.lines.join("\n");
+        let clip = body.clone();
+        let n = e.lines.len();
+        let sql = e.sql.clone();
+        Some(
+            div()
+                .id("explain-backdrop")
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_start()
+                .justify_center()
+                .pt(px(56.0))
+                .bg(Rgba {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.45,
+                })
+                .on_click(cx.listener(|this, _ev: &ClickEvent, _window, cx| {
+                    this.explain = None;
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .id("explain-modal")
+                        .w(px(680.0))
+                        .max_h(px(460.0))
+                        .flex()
+                        .flex_col()
+                        .rounded(px(8.0))
+                        .border(px(1.0))
+                        .border_color(th.border)
+                        .bg(th.bg_alt)
+                        .on_click(cx.listener(|_this, _ev: &ClickEvent, _window, cx| {
+                            cx.stop_propagation();
+                        }))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .px(px(12.0))
+                                .py(px(8.0))
+                                .border_b(px(1.0))
+                                .border_color(th.border)
+                                .child(
+                                    div()
+                                        .text_color(th.fg)
+                                        .text_size(px(13.0))
+                                        .font_weight(FontWeight::BOLD)
+                                        .child(format!("⚙ 执行计划 · {n} 行")),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_size(px(11.0))
+                                        .text_color(th.fg_dim)
+                                        .child("Esc / 点击外部关闭"),
+                                )
+                                .child(btn("explain-copy", "⧉ 复制", th).on_click(cx.listener(
+                                    move |this, _ev: &ClickEvent, _window, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            clip.clone(),
+                                        ));
+                                        this.status = "已复制执行计划".into();
+                                        cx.notify();
+                                    },
+                                )))
+                                .child(
+                                    div()
+                                        .id("explain-close")
+                                        .px(px(6.0))
+                                        .cursor(CursorStyle::PointingHand)
+                                        .text_color(th.fg_muted)
+                                        .child("×")
+                                        .on_click(cx.listener(
+                                            |this, _ev: &ClickEvent, _window, cx| {
+                                                this.explain = None;
+                                                cx.notify();
+                                            },
+                                        )),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("explain-sql")
+                                .flex_none()
+                                .max_h(px(72.0))
+                                .overflow_y_scroll()
+                                .px(px(12.0))
+                                .py(px(6.0))
+                                .text_size(px(11.0))
+                                .font_family("monospace")
+                                .text_color(th.fg_muted)
+                                .child(sql),
+                        )
+                        .child(
+                            div()
+                                .id("explain-body")
+                                .flex_1()
+                                .min_h(px(0.0))
+                                .overflow_y_scroll()
+                                .px(px(12.0))
+                                .pb(px(12.0))
+                                .text_size(px(12.0))
+                                .font_family("monospace")
+                                .text_color(th.fg)
+                                .child(body),
+                        ),
+                )
+                .into_any_element(),
         )
     }
 

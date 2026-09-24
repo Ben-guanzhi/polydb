@@ -65,7 +65,8 @@ polydb 有多个前端，均遵守 AGENTS.md 铁律：**只经 `app-core`（进�
     GUI 顶栏「■ 取消」按钮（多语句尽力而为：当前语句跑完、剩余跳过）；Web 在 Monaco 内
     `Ctrl+Esc`，多语句另有取消入口。
   - 执行计划：TUI `F9`（按方言生成 + 计划树，见上）；Web 工具栏「⚙ 执行计划」+ 命令面板
-    「运行 EXPLAIN」，走 `lib/explain.ts`；GUI 无。
+    「运行 EXPLAIN」，走 `lib/explain.ts`；GUI 顶栏「⚙ 执行计划」+ `F9`/`Ctrl+Shift+E`，
+    走 `rust/crates/ui-gui/src/explain.rs`（三端各自实现、输出逐字一致，见「执行计划」一节）。
   - 连接编辑：三端均有表单（TUI 连接列表 `e`，Web/GUI 走连接列表编辑入口）。
   - Redis 值写回：TUI `e` 放开 string 整值写回（Enter 提交并回读）；Web 走命令行
     `exec_command`；GUI 为只读子集。
@@ -81,7 +82,8 @@ polydb 有多个前端，均遵守 AGENTS.md 铁律：**只经 `app-core`（进�
   侧栏 schema→表→列树 + schema 切换、数据浏览（过滤栏 18 op + 大小写三态/排序/页大小/精确计数/Inspector 尾板/
   虚拟滚动网格）、变更跟踪编辑（Review + 单事务提交/回滚 + 撤销栈 + 只读门禁）、连接 CRUD 表单、
   结果导出 CSV/TSV/JSON/NDJSON/Markdown/INSERT、Redis 键浏览（只读子集）、SQL 编辑器选区/剪贴板/
-  undo-redo + Quick Switcher（`Ctrl+P` 在已开对象 tab 间跳转）。主题走 `theme.rs` token（dark 默认 + light）。
+  undo-redo + Quick Switcher（`Ctrl+P` 在已开对象 tab 间跳转）、执行计划浮层（`F9`）。
+  主题走 `theme.rs` token（dark 默认 + light）。
 - 顶栏「■ 取消」为多语句尽力而为取消（当前语句跑完、剩余跳过）；驱动层无中断，故不是即时取消。
 - 运行：`cd rust && cargo run -p polydb-gui`（构建含 GPUI，Windows 下首次编译较慢）
 
@@ -120,3 +122,17 @@ polydb 有多个前端，均遵守 AGENTS.md 铁律：**只经 `app-core`（进�
   Web `RedisBrowser.loadKeys` 同理；字段缺席一律保持上次值（不当作 db 0）。
 - 契约：`redisScenario` 先 `SELECT 1` 再 SCAN，断言回显为 `1`（本地记忆恒 0，只有真回读能给出 1），
   随后回 `db 0` 断言回显 `0`；Redis 不可达时整段按既有 soft-skip 跳过。
+
+## 执行计划（三端一致，D3）
+
+- 三端各自实现同一套语义（前端之间不互相 import，也不得 import driver）：Web `web/src/lib/explain.ts`、
+  TUI `go/pkg/explain`、GUI `rust/crates/ui-gui/src/explain.rs`。GUI 是阶段 D 补齐的第三套。
+- 包裹规则按方言：SQLite `EXPLAIN QUERY PLAN`、PG `EXPLAIN (FORMAT JSON)`、MySQL `EXPLAIN FORMAT=JSON`、
+  Oracle `EXPLAIN PLAN FOR`、其余 `EXPLAIN`；已经以 `EXPLAIN` 开头的原样下发。下发前先剥注释与尾分号
+  （字符串字面量内的 `--`/`/*` 不算注释）。
+- 解析：SQLite 用 `id`/`parent` 行组树（第 4 列 `notused` 是内部标志位、取值漂移，三端一律不显示）、
+  PG/MySQL 解析 JSON 计划，其余方言与解析失败退化为「列 | 行」表格文本。递归深度上限 64，
+  自引用/环上的节点标 `…` 并把不可达节点补为顶层，避免计划行凭空消失。
+- 树渲染展平为 `├─ / └─ / │` 缩进行，GUI 浮层里以等宽文本显示，可一键复制。
+- GUI 门禁：Redis 连接顶栏不渲染该按钮，`F9`/`Ctrl+Shift+E` 走同一入口时状态栏提示
+  「Redis 无执行计划」；重新执行查询会清掉已过期的计划快照。
