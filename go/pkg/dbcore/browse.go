@@ -339,7 +339,7 @@ func renderRegex(d SQLDialect, col string, v protocol.Value, cs *bool) (string, 
 		return "REGEXP_LIKE(" + col + ", ?)", val, nil
 	case FlavorSQLite:
 		if toCI {
-			return "lower(" + col + ") REGEXP lower(?)", val, nil
+			return col + " REGEXP '(?i)' || ?", val, nil
 		}
 		return col + " REGEXP ?", val, nil
 	default:

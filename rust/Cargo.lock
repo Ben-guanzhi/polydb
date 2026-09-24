@@ -4948,6 +4948,7 @@ dependencies = [
  "polydb-core",
  "polydb-db-core",
  "polydb-protocol",
+ "regex",
  "rusqlite",
  "serde_json",
  "smol",

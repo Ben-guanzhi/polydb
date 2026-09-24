@@ -66,7 +66,7 @@ chrono = { version = "0.4", features = ["serde"] }
 arrow = { version = "54" }
 
 # Database
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "functions"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "mysql", "postgres", "chrono", "bigdecimal"] }
 tiberius = { version = "0.12", default-features = false, features = ["tds73", "tokio", "chrono", "rustls", "rust_decimal"] }
 oracle = { version = "0.6" }
@@ -74,6 +74,9 @@ redis = { version = "0.29", default-features = false, features = ["tokio-comp"] 
 
 # Concurrency
 parking_lot = "0.12"
+
+# 文本正则（SQLite REGEXP UDF 等）
+regex = "1"
 
 # Keyring (M8)
 aes-gcm = "0.10"

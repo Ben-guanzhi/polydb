@@ -13,6 +13,7 @@ thiserror = { workspace = true }
 rusqlite = { workspace = true }
 parking_lot = { workspace = true }
 serde_json = { workspace = true }
+regex = { workspace = true }
 
 [dev-dependencies]
 smol = { workspace = true }

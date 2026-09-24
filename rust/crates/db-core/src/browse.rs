@@ -344,7 +344,7 @@ fn render_regex(
         (BrowseFlavor::MySql, _) => (format!("{col} REGEXP ?"), val),
         (BrowseFlavor::Oracle, Some(false)) => (format!("REGEXP_LIKE({col}, ?, 'i')"), val),
         (BrowseFlavor::Oracle, _) => (format!("REGEXP_LIKE({col}, ?)"), val),
-        (BrowseFlavor::Sqlite, Some(false)) => (format!("lower({col}) REGEXP lower(?)"), val),
+        (BrowseFlavor::Sqlite, Some(false)) => (format!("{col} REGEXP '(?i)' || ?"), val),
         (BrowseFlavor::Sqlite, _) => (format!("{col} REGEXP ?"), val),
     })
 }
@@ -767,7 +767,7 @@ mod tests {
         one(
             DIALECT_SQLITE,
             with_cs(cond("x", Op::Regex, s("^a")), Some(false)),
-            r#"lower("x") REGEXP lower(?)"#,
+            r#""x" REGEXP '(?i)' || ?"#,
             s("^a"),
         );
     }

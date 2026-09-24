@@ -144,7 +144,7 @@ func TestRegexPerFlavor(t *testing.T) {
 	assertOne(t, SQLiteSQLDialect(), colCond("x", protocol.FilterOpRegex, strVal("^a")),
 		`"x" REGEXP ?`, strVal("^a"))
 	assertOne(t, SQLiteSQLDialect(), withCS(colCond("x", protocol.FilterOpRegex, strVal("^a")), boolPtr(false)),
-		`lower("x") REGEXP lower(?)`, strVal("^a"))
+		`"x" REGEXP '(?i)' || ?`, strVal("^a"))
 }
 
 func TestRegexOnMssqlNotSupported(t *testing.T) {

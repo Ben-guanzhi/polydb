@@ -16,6 +16,43 @@ pub struct SqliteConn {
     _path: String,
 }
 
+/// SQLite 内置函数里没有 REGEXP：`x REGEXP y` 只是 `regexp(y, x)` 的语法糖，
+/// 标量函数必须由驱动注册（behavior.md §13.5）。这里注册的实现与 Go 侧
+/// （modernc + regexp 包）语义对齐：同为 RE2 家族（无后向引用、无环视）、
+/// 任一参数 NULL 则结果为 NULL、非法正则报错冒泡为 POLYDB_ERR_QUERY_FAILED。
+fn register_regexp_fn(conn: &RusqliteConnection) -> CoreResult<()> {
+    use rusqlite::functions::{Context, FunctionFlags};
+    conn.create_scalar_function(
+        "regexp",
+        2,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx: &Context| -> rusqlite::Result<Option<bool>> {
+            let Some(pattern) = arg_text(ctx.get_raw(0)) else {
+                return Ok(None);
+            };
+            let Some(text) = arg_text(ctx.get_raw(1)) else {
+                return Ok(None);
+            };
+            let re = regex::Regex::new(&pattern).map_err(|e| {
+                rusqlite::Error::UserFunctionError(format!("invalid regex {pattern:?}: {e}").into())
+            })?;
+            Ok(Some(re.is_match(&text)))
+        },
+    )
+    .map_err(|e| CoreError::Driver(format!("sqlite register regexp udf failed: {e}")))?;
+    Ok(())
+}
+
+fn arg_text(v: rusqlite::types::ValueRef) -> Option<String> {
+    use rusqlite::types::ValueRef as R;
+    Some(match v {
+        R::Text(b) | R::Blob(b) => String::from_utf8_lossy(b).into_owned(),
+        R::Integer(i) => i.to_string(),
+        R::Real(f) => f.to_string(),
+        R::Null => return None,
+    })
+}
+
 /// 事务句柄。SQLite 本身没有独立的事务对象，事务由底层 Connection 的
 /// BEGIN IMMEDIATE 句柄只是不透明标记；实际 begin/commit/rollback 与执行
 /// 都通过 self.conn 上的 execute_batch 完成。
@@ -28,6 +65,7 @@ impl SqliteConn {
             .map_err(|e| CoreError::Driver(format!("sqlite open failed: {e}")))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
             .map_err(|e| CoreError::Driver(format!("sqlite pragma failed: {e}")))?;
+        register_regexp_fn(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             _path: path.to_string(),
@@ -519,6 +557,172 @@ impl SqlDriver for SqliteConn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use polydb_core::{FilterCondition, FilterOperator as Op, TableRowsRequest};
+
+    fn cond(column: &str, op: Op, value: Value) -> FilterCondition {
+        FilterCondition {
+            column: column.to_string(),
+            op,
+            value,
+            second_value: Value::Null,
+            values: Vec::new(),
+            case_sensitive: None,
+        }
+    }
+
+    /// 建一张三行文本表：Alice / alice / Bob。
+    fn fixture_conn() -> SqliteConn {
+        let conn = SqliteConn::open(":memory:").unwrap();
+        let sql_driver: &dyn SqlDriver = conn.as_sql().unwrap();
+        smol::block_on(
+            sql_driver.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)", &[]),
+        )
+        .unwrap();
+        for sql in [
+            "INSERT INTO t (name) VALUES ('Alice')",
+            "INSERT INTO t (name) VALUES ('alice')",
+            "INSERT INTO t (name) VALUES ('Bob')",
+        ] {
+            smol::block_on(sql_driver.execute(sql, &[])).unwrap();
+        }
+        conn
+    }
+
+    fn browse_names(conn: &SqliteConn, conditions: Vec<FilterCondition>) -> Vec<String> {
+        let sql_driver: &dyn SqlDriver = conn.as_sql().unwrap();
+        let page = smol::block_on(sql_driver.browse_rows(
+            "",
+            "t",
+            &TableRowsRequest {
+                columns: Vec::new(),
+                conditions,
+                logic: None,
+                order_by: Vec::new(),
+                offset: 0,
+                limit: 0,
+            },
+        ))
+        .unwrap();
+        page.rows
+            .iter()
+            .map(|r| match &r[1] {
+                Value::String(s) => s.clone(),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn regexp_udf_is_registered() {
+        let conn = SqliteConn::open(":memory:").unwrap();
+        let sql_driver: &dyn SqlDriver = conn.as_sql().unwrap();
+        let one = |pattern: Value| {
+            smol::block_on(sql_driver.execute(
+                "SELECT CASE WHEN 'hello' REGEXP ?1 THEN 1 ELSE 0 END",
+                &[pattern],
+            ))
+            .unwrap()
+            .rows[0][0]
+                .clone()
+        };
+        assert_eq!(one(Value::String("^h".into())), Value::Integer(1));
+        assert_eq!(one(Value::String("^H".into())), Value::Integer(0));
+        // (?i) 内联标志是两端 UDF 的统一不区分大小写写法
+        assert_eq!(one(Value::String("(?i)^H".into())), Value::Integer(1));
+        // RE2 家族：后向引用不受支持，必须报错而不是静默通过
+        assert!(smol::block_on(
+            sql_driver.execute("SELECT 'a' REGEXP ?1", &[Value::String("(a)\\1".into())])
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn regexp_udf_propagates_null() {
+        let conn = SqliteConn::open(":memory:").unwrap();
+        let sql_driver: &dyn SqlDriver = conn.as_sql().unwrap();
+        for sql in [
+            "SELECT (NULL REGEXP '^h') IS NULL",
+            "SELECT ('hello' REGEXP NULL) IS NULL",
+        ] {
+            let res = smol::block_on(sql_driver.execute(sql, &[])).unwrap();
+            assert_eq!(res.rows[0][0], Value::Integer(1), "sql: {sql}");
+        }
+    }
+
+    #[test]
+    fn browse_rows_supports_new_ops() {
+        let conn = fixture_conn();
+        // contains 走 LIKE + ESCAPE：SQLite 的 LIKE 对 ASCII 不区分，ALI 两种大小写都中
+        assert_eq!(
+            browse_names(
+                &conn,
+                vec![cond("name", Op::Contains, Value::String("ALI".into()))]
+            ),
+            vec!["Alice", "alice"]
+        );
+        // 强制区分走 GLOB：小写 ali 只命中 alice
+        let mut cs = cond("name", Op::Contains, Value::String("ali".into()));
+        cs.case_sensitive = Some(true);
+        assert_eq!(browse_names(&conn, vec![cs]), vec!["alice"]);
+        // 显式强制不区分仍走 LIKE
+        let mut ci = cond("name", Op::Contains, Value::String("ali".into()));
+        ci.case_sensitive = Some(false);
+        assert_eq!(browse_names(&conn, vec![ci]), vec!["Alice", "alice"]);
+        // regex：默认区分，不区分靠 (?i)
+        assert_eq!(
+            browse_names(
+                &conn,
+                vec![cond("name", Op::Regex, Value::String("^A".into()))]
+            ),
+            vec!["Alice"]
+        );
+        let mut re_ci = cond("name", Op::Regex, Value::String("^a".into()));
+        re_ci.case_sensitive = Some(false);
+        assert_eq!(browse_names(&conn, vec![re_ci]), vec!["Alice", "alice"]);
+        // starts_with / ends_with / empty
+        assert_eq!(
+            browse_names(
+                &conn,
+                vec![cond("name", Op::StartsWith, Value::String("Bo".into()))]
+            ),
+            vec!["Bob"]
+        );
+        assert_eq!(
+            browse_names(
+                &conn,
+                vec![cond("name", Op::EndsWith, Value::String("lice".into()))]
+            ),
+            vec!["Alice", "alice"]
+        );
+        smol::block_on(
+            conn.as_sql()
+                .unwrap()
+                .execute("INSERT INTO t (name) VALUES ('')", &[]),
+        )
+        .unwrap();
+        assert_eq!(
+            browse_names(&conn, vec![cond("name", Op::Empty, Value::Null)]).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn browse_rows_count_matches_new_ops() {
+        let conn = fixture_conn();
+        let sql_driver: &dyn SqlDriver = conn.as_sql().unwrap();
+        let req = TableRowsRequest {
+            columns: Vec::new(),
+            conditions: vec![cond("name", Op::Regex, Value::String("^[AB]".into()))],
+            logic: None,
+            order_by: Vec::new(),
+            offset: 0,
+            limit: 0,
+        };
+        assert_eq!(
+            smol::block_on(sql_driver.browse_rows_count("", "t", &req)).unwrap(),
+            2
+        );
+    }
 
     #[test]
     fn open_and_ping() {

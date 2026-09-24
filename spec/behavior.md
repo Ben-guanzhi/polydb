@@ -315,12 +315,18 @@
   `contains`/`starts_with`/`ends_with` 直接对原始值做该转义再包 `*`。GLOB 的转义符默认就是 `\`，
   不需要 `ESCAPE` 子句。
 - **SQLite 的 `REGEXP` 是驱动注册的标量函数**（`rusqlite` `create_scalar_function` /
-  modernc `ConnectHook`），语义为 `x REGEXP y` ⇔ `regexp(y, x)`。两端在连接建立时注册同一实现；
-  非法正则由数据库报错，映射 `POLYDB_ERR_QUERY_FAILED`。强制不区分写作
-  `lower(col) REGEXP lower(?)`（SQLite `lower()` 仅覆盖 ASCII）。
-- 强制不区分统一用 `LOWER(col) LIKE LOWER(?)`（除 PG 用 `ILIKE`）：正确性优先于走索引，
-  过滤栏本就是交互式收窄手段。代价是 SQLite/MySQL 的 `lower()` 对非 ASCII 无效，
-  即**非 ASCII 文本的「不区分大小写」不保证**；MSSQL `COLLATE …_CS_AS` 只适用于文本列。
+  modernc `RegisterDeterministicScalarFunction`），语义为 `x REGEXP y` ⇔ `regexp(y, x)`。
+  两端在连接建立时注册同一实现：任一参数为 NULL → 结果为 NULL（与 SQL 三值逻辑一致）；
+  非法正则由函数报错冒泡，映射 `POLYDB_ERR_QUERY_FAILED`。
+  UDF 用各语言的正则库（Rust `regex` / Go `regexp`，同为 RE2 家族：无后向引用、无环视），
+  因此强制不区分**不降级成 `LOWER()`**，而是给模式加内联标志：
+  `col REGEXP ('(?i)' || ?)`——`lower()` 会破坏 `[A-Z]` 这类字符组，语义不等价。
+- 强制不区分统一用 `LOWER(col) LIKE LOWER(?)`（除 PG 用 `ILIKE`、SQLite 用天然不区分的
+  `LIKE`、SQLite 正则用 `(?i)`）：正确性优先于走索引，过滤栏本就是交互式收窄手段。
+  代价是 MySQL/Oracle/MSSQL 的 `lower()` 只覆盖 ASCII，且正则形态的
+  `LOWER(col) REGEXP LOWER(?)` 会把模式里的字符组一并小写化，即
+  **非 ASCII 文本与含字符组的正则，其「不区分大小写」不保证**；
+  MSSQL `COLLATE …_CS_AS` 只适用于文本列。
 - 能力不足的组合必须**显式报错**（`POLYDB_ERR_NOT_SUPPORTED`），不得静默降级成不等价的 SQL；
   前端据 §13.6 的能力矩阵把不可用 op 置灰。
 
