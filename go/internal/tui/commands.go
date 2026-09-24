@@ -58,6 +58,10 @@ type (
 		res    *protocol.TableRowsResult
 		err    error
 	}
+	browseCountMsg struct {
+		count uint64
+		err   error
+	}
 	columnsLoadedMsg struct {
 		table   string
 		columns []protocol.ColumnInfo
@@ -224,14 +228,19 @@ func queryCmd(a transport.Client, id, sql string) tea.Cmd {
 	}
 }
 
-// browseCmd 拉取一页表数据（服务端分页；M11 数据浏览）。
-func browseCmd(a transport.Client, id, schema, table string, offset uint64, limit uint32) tea.Cmd {
+// browseCmd 拉取一页表数据（服务端分页；M11 数据浏览）。req 携带过滤/排序/分页。
+func browseCmd(a transport.Client, id, schema, table string, req *protocol.TableRowsRequest) tea.Cmd {
 	return func() tea.Msg {
-		res, err := a.BrowseRows(context.Background(), id, schema, table, &protocol.TableRowsRequest{
-			Offset: offset,
-			Limit:  limit,
-		})
-		return browseMsg{schema: schema, table: table, offset: offset, res: res, err: err}
+		res, err := a.BrowseRows(context.Background(), id, schema, table, req)
+		return browseMsg{schema: schema, table: table, offset: req.Offset, res: res, err: err}
+	}
+}
+
+// browseCountCmd 对同过滤条件执行精确 COUNT(*)（T2.4）。
+func browseCountCmd(a transport.Client, id, schema, table string, req *protocol.TableRowsRequest) tea.Cmd {
+	return func() tea.Msg {
+		n, err := a.BrowseRowsCount(context.Background(), id, schema, table, req)
+		return browseCountMsg{count: n, err: err}
 	}
 }
 

@@ -565,6 +565,95 @@ func TestModelBrowseNavigation(t *testing.T) {
 	}
 }
 
+// enterBrowse 驱动模型进入 viewBrowse（表 t：id=1, name=hello 单行）。
+func enterBrowse(t *testing.T) tea.Model {
+	t.Helper()
+	app, _ := setupApp(t)
+	var m tea.Model = New(transport.NewLocal(app))
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = drive(t, m, m.Init())
+	var cmd tea.Cmd
+	m, cmd = m.Update(key(tea.KeyEnter))
+	m = drive(t, m, cmd)
+	m, cmd = m.Update(key(tea.KeyF7))
+	m = drive(t, m, cmd)
+	return m
+}
+
+// typeInto 向当前聚焦的 textinput 逐字符输入。
+func typeInto(t *testing.T, m tea.Model, s string) tea.Model {
+	t.Helper()
+	for _, r := range s {
+		var cmd tea.Cmd
+		m, cmd = m.Update(runeKey(r))
+		m = drive(t, m, cmd)
+	}
+	return m
+}
+
+func TestModelBrowseFilter(t *testing.T) {
+	m := enterBrowse(t)
+	if mm := md(m); mm.brErr != nil || len(mm.brRes.Rows) != 1 {
+		t.Fatalf("setup browse: err=%v rows=%d", mm.brErr, len(mm.brRes.Rows))
+	}
+	// / 进入过滤栏编辑，草稿落在当前列 id、op=eq、值字段聚焦
+	var cmd tea.Cmd
+	m, cmd = m.Update(runeKey('/'))
+	m = drive(t, m, cmd)
+	if mm := md(m); !mm.brEditing || mm.brDraft.Column != "id" || mm.brField != 2 {
+		t.Fatalf("enter filter: editing=%v col=%q field=%d", mm.brEditing, mm.brDraft.Column, mm.brField)
+	}
+	m = typeInto(t, m, "1")
+	m, cmd = m.Update(key(tea.KeyEnter))
+	m = drive(t, m, cmd)
+	mm := md(m)
+	if mm.brEditing || len(mm.brConds) != 1 {
+		t.Fatalf("apply filter: editing=%v conds=%d", mm.brEditing, len(mm.brConds))
+	}
+	if mm.brConds[0].Column != "id" || mm.brConds[0].Op != protocol.FilterOpEq {
+		t.Fatalf("condition: %+v", mm.brConds[0])
+	}
+	if mm.brRes == nil || len(mm.brRes.Rows) != 1 {
+		t.Fatalf("id=1 should match 1 row, got %+v", mm.brRes)
+	}
+	if v := m.View(); !strings.Contains(v, "过滤:") || !strings.Contains(v, "id =") {
+		t.Errorf("filter bar missing:\n%s", v)
+	}
+	// 非匹配过滤 → 0 行
+	m, cmd = m.Update(runeKey('/'))
+	m = drive(t, m, cmd)
+	m = typeInto(t, m, "999")
+	m, cmd = m.Update(key(tea.KeyEnter))
+	m = drive(t, m, cmd)
+	if r := md(m).brRes; r == nil || len(r.Rows) != 0 {
+		t.Fatalf("id=999 should match 0 rows, got %+v", r)
+	}
+}
+
+func TestModelBrowseCountSort(t *testing.T) {
+	m := enterBrowse(t)
+	m, cmd := m.Update(runeKey('c'))
+	m = drive(t, m, cmd)
+	mm := md(m)
+	if !mm.brCountOK || mm.brCount == nil || *mm.brCount != 1 {
+		t.Fatalf("count should be 1: ok=%v count=%v", mm.brCountOK, mm.brCount)
+	}
+	if v := m.View(); !strings.Contains(v, "共 1 行") {
+		t.Errorf("count summary missing:\n%s", v)
+	}
+	m, cmd = m.Update(runeKey('s'))
+	m = drive(t, m, cmd)
+	mm = md(m)
+	if len(mm.brSort) != 1 || mm.brSort[0].Column != "id" || mm.brSort[0].Dir != protocol.SortAsc {
+		t.Fatalf("sort: %+v", mm.brSort)
+	}
+	m, cmd = m.Update(runeKey('s'))
+	m = drive(t, m, cmd)
+	if d := md(m).brSort[0].Dir; d != protocol.SortDesc {
+		t.Fatalf("second sort toggle should be desc, got %s", d)
+	}
+}
+
 func TestModelTestAndDelete(t *testing.T) {
 	app, id := setupApp(t)
 	var m tea.Model = New(transport.NewLocal(app))

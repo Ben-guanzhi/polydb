@@ -91,6 +91,15 @@ func (m *model) viewHelp() []helpEntry {
 			{"Esc", "返回查询编辑器"},
 		}
 	case viewBrowse:
+		if m.brEditing {
+			return []helpEntry{
+				{"Tab · Shift+Tab", "切换字段（列/操作符/值）"},
+				{"←/→", "调整当前列或操作符"},
+				{"↑/↓", "循环切换列"},
+				{"Enter", "应用过滤条件"},
+				{"Esc", "取消编辑"},
+			}
+		}
 		if m.brFull {
 			return []helpEntry{
 				{"Enter", "刷新完整值"},
@@ -102,6 +111,11 @@ func (m *model) viewHelp() []helpEntry {
 			{"←/→", "翻页"},
 			{"Shift+←/→", "移动列"},
 			{"Enter", "查看完整值"},
+			{"/ · Tab", "进入过滤栏编辑"},
+			{"s", "按当前列切换排序（升/降）"},
+			{"c", "精确计数（COUNT(*)）"},
+			{"o", "切换 AND / OR"},
+			{"d", "删除末条过滤条件"},
 			{"r", "刷新当前页"},
 			{"Esc", "返回库表结构"},
 		}

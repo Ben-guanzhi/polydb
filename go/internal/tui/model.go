@@ -104,6 +104,20 @@ type model struct {
 	brCol    int
 	brFull   bool
 
+	// 浏览过滤/排序（T2）：已提交条件、AND/OR 逻辑、排序；草稿与焦点环。
+	brConds   []protocol.FilterCondition
+	brLogic   protocol.FilterLogic
+	brSort    []protocol.OrderClause
+	brDraft   filterDraft
+	brVal     textinput.Model // 过滤值输入框（草稿的当前值字段）
+	brField   int             // 过滤编辑聚焦字段：0 列 / 1 op / 2 值 / 3 第二值
+	brFocus   int             // 0=网格，1=过滤栏编辑
+	brEditing bool            // 正在过滤栏编辑草稿（/ 进入）
+
+	// 精确计数（T2.4）：异步 COUNT(*) 结果与在途标记。
+	brCount   *uint64
+	brCountOK bool
+
 	// autocomplete 状态：在查询视图中 Ctrl+Space 触发，↑/↓ 选择，Enter/Tab 接受，Esc 关闭。
 	acWord       string
 	acCandidates []string
@@ -151,6 +165,8 @@ func New(app transport.Client) *model {
 	km.Placeholder = "Redis 命令（GET user:1 / EXPIRE user:1 60 …）"
 	qo := textinput.New()
 	qo.Placeholder = "输入表名过滤（schema.table 模糊匹配）…"
+	bv := textinput.New()
+	bv.Placeholder = "值（数字/字符串/true-false；in 用逗号分隔）"
 	m := &model{
 		app:        app,
 		view:       viewConns,
@@ -159,6 +175,8 @@ func New(app transport.Client) *model {
 		kvFilter:   filter,
 		kvCmd:      km,
 		qoInput:    qo,
+		brVal:      bv,
+		brLogic:    protocol.FilterLogicAnd,
 	}
 	return m
 }
@@ -326,6 +344,20 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.brOffset = msg.offset
 			m.brRow, m.brCol, m.brFull = 0, 0, false
 		}
+		return m, nil
+	case browseCountMsg:
+		if msg.err != nil {
+			m.brCountOK = false
+			m.status = "计数失败: " + msg.err.Error()
+			if m.busy == "计数中 …" {
+				m.busy = ""
+			}
+			return m, nil
+		}
+		n := msg.count
+		m.brCount = &n
+		m.brCountOK = true
+		m.busy = ""
 		return m, nil
 	case columnsLoadedMsg:
 		if msg.err != nil {
@@ -916,6 +948,25 @@ func (m *model) resultsView() string {
 
 // ─── 数据浏览（viewBrowse，F7）────────────────────────────────
 
+// browseRequest 依据当前过滤/排序/页大小构造分页请求（offset 由翻页决定）。
+func (m *model) browseRequest(offset uint64) *protocol.TableRowsRequest {
+	return &protocol.TableRowsRequest{
+		Conditions: m.brConds,
+		Logic:      m.brLogic,
+		OrderBy:    m.brSort,
+		Offset:     offset,
+		Limit:      m.brLimit,
+	}
+}
+
+// browseCountRequest 构造计数请求：与列表同过滤条件，但不带分页/排序。
+func (m *model) browseCountRequest() *protocol.TableRowsRequest {
+	return &protocol.TableRowsRequest{
+		Conditions: m.brConds,
+		Logic:      m.brLogic,
+	}
+}
+
 // startBrowse 对当前表发起服务端分页浏览（第一页）。
 func (m *model) startBrowse() (tea.Model, tea.Cmd) {
 	if m.selectedID == "" || len(m.tables) == 0 {
@@ -929,9 +980,14 @@ func (m *model) startBrowse() (tea.Model, tea.Cmd) {
 	m.brRes = nil
 	m.brErr = nil
 	m.brRow, m.brCol, m.brFull = 0, 0, false
+	m.brConds = nil
+	m.brSort = nil
+	m.brLogic = protocol.FilterLogicAnd
+	m.brFocus, m.brEditing = 0, false
+	m.brCount, m.brCountOK = nil, false
 	m.view = viewBrowse
 	m.busy = "加载数据 …"
-	return m, browseCmd(m.app, m.selectedID, m.brSchema, m.brTable, m.brOffset, m.brLimit)
+	return m, browseCmd(m.app, m.selectedID, m.brSchema, m.brTable, m.browseRequest(0))
 }
 
 // browsePage 拉取上一页/下一页（dir<0 回退，>0 前进，首页不回退）。
@@ -951,11 +1007,17 @@ func (m *model) browsePage(dir int) (tea.Model, tea.Cmd) {
 	}
 	m.busy = "加载数据 …"
 	m.brRow, m.brCol, m.brFull = 0, 0, false
-	return m, browseCmd(m.app, m.selectedID, m.brSchema, m.brTable, off, m.brLimit)
+	return m, browseCmd(m.app, m.selectedID, m.brSchema, m.brTable, m.browseRequest(off))
 }
 
-// browseKey 数据浏览键位：↑/↓ 行 · ←/→ 翻页 · Shift←/→ 列 · Enter 完整值 · r 刷新 · Esc 返回。
+// browseKey 数据浏览键位。焦点态分两层：网格态（brEditing=false）与过滤栏编辑态。
+// 网格态：↑/↓ 行 · ←/→ 翻页 · Shift←/→ 列 · Enter 完整值 · r 刷新 · c 计数 · s 排序 ·
+//
+//	/ 或 Tab 进入过滤栏 · d 删除末条过滤 · o 切换 AND/OR · Esc 返回。
 func (m *model) browseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.brEditing {
+		return m.browseFilterKey(msg)
+	}
 	r := m.brRes
 	switch msg.Type {
 	case tea.KeyCtrlC:
@@ -975,6 +1037,8 @@ func (m *model) browseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEnter:
 		m.brFull = true
 		return m, nil
+	case tea.KeyTab:
+		return m.enterFilterEdit()
 	case tea.KeyUp:
 		if m.brRow > 0 {
 			m.brRow--
@@ -1013,12 +1077,239 @@ func (m *model) browseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if r != nil && r.HasMore {
 				return m.browsePage(1)
 			}
+		case "/":
+			return m.enterFilterEdit()
 		case "r":
 			m.busy = "加载数据 …"
-			return m, browseCmd(m.app, m.selectedID, m.brSchema, m.brTable, m.brOffset, m.brLimit)
+			return m, browseCmd(m.app, m.selectedID, m.brSchema, m.brTable, m.browseRequest(m.brOffset))
+		case "c":
+			m.brCount, m.brCountOK = nil, false
+			m.busy = "计数中 …"
+			return m, browseCountCmd(m.app, m.selectedID, m.brSchema, m.brTable, m.browseCountRequest())
+		case "d":
+			return m.dropLastFilter()
+		case "o":
+			return m.toggleFilterLogic()
+		case "s":
+			return m.toggleSortCurrentColumn()
 		}
 	}
 	return m, nil
+}
+
+// currentBrowseColumn 返回光标所在列名（无数据时返回空串）。
+func (m *model) currentBrowseColumn() string {
+	if m.brRes == nil || len(m.brRes.Columns) == 0 {
+		return ""
+	}
+	return m.brRes.Columns[min(m.brCol, len(m.brRes.Columns)-1)].Name
+}
+
+// enterFilterEdit 进入过滤栏编辑态：草稿默认落在当前列、eq、值聚焦。
+func (m *model) enterFilterEdit() (tea.Model, tea.Cmd) {
+	col := m.currentBrowseColumn()
+	if col == "" {
+		m.status = "无可过滤列"
+		return m, nil
+	}
+	m.brDraft = filterDraft{Column: col, Op: protocol.FilterOpEq}
+	m.brVal.SetValue("")
+	m.brVal.CursorEnd()
+	m.brVal.Focus()
+	m.brField = 2 // 直接进值输入
+	m.brEditing = true
+	m.brFocus = 1
+	return m, nil
+}
+
+// browseFilterFieldCount 当前草稿的可编辑字段数（between 多一个第二值）。
+func (m *model) browseFilterFieldCount() int {
+	if m.brDraft.Op == protocol.FilterOpBetween {
+		return 4 // 列 / op / 值 / 第二值
+	}
+	return 3 // 列 / op / 值
+}
+
+// browseFieldFocus 切换过滤草稿聚焦字段，并在值字段间同步 textinput 内容。
+func (m *model) browseFieldFocus(next int) {
+	n := m.browseFilterFieldCount()
+	next = ((next % n) + n) % n
+	switch m.brField {
+	case 2:
+		m.brDraft.Raw = m.brVal.Value()
+	case 3:
+		m.brDraft.Raw2 = m.brVal.Value()
+	}
+	m.brField = next
+	switch next {
+	case 2:
+		m.brVal.SetValue(m.brDraft.Raw)
+		m.brVal.CursorEnd()
+		m.brVal.Focus()
+	case 3:
+		m.brVal.SetValue(m.brDraft.Raw2)
+		m.brVal.CursorEnd()
+		m.brVal.Focus()
+	default:
+		m.brVal.Blur()
+	}
+}
+
+// browseFilterKey 过滤栏编辑态键位：Tab/Shift+Tab 切字段 · ←/→ 调整列或操作符 ·
+// Enter 应用 · Esc 取消；值字段路由给 textinput。
+func (m *model) browseFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyCtrlC:
+		m.quit = true
+		return m, tea.Quit
+	case tea.KeyEsc:
+		m.brEditing = false
+		m.brFocus = 0
+		m.brVal.Blur()
+		return m, nil
+	case tea.KeyTab:
+		m.browseFieldFocus(m.brField + 1)
+		return m, nil
+	case tea.KeyShiftTab:
+		m.browseFieldFocus(m.brField - 1)
+		return m, nil
+	case tea.KeyEnter:
+		m.brDraft.Raw = m.brVal.Value()
+		return m.applyFilterDraft()
+	case tea.KeyUp:
+		m.cycleBrowseColumn(-1)
+		return m, nil
+	case tea.KeyDown:
+		m.cycleBrowseColumn(1)
+		return m, nil
+	case tea.KeyLeft:
+		if m.brField == 0 {
+			m.cycleBrowseColumn(-1)
+			return m, nil
+		}
+		if m.brField == 1 {
+			m.cycleOp(-1)
+			return m, nil
+		}
+	case tea.KeyRight:
+		if m.brField == 0 {
+			m.cycleBrowseColumn(1)
+			return m, nil
+		}
+		if m.brField == 1 {
+			m.cycleOp(1)
+			return m, nil
+		}
+	}
+	// 值字段（2/3）把其余键交给 textinput。
+	if m.brField >= 2 {
+		dst := &m.brVal
+		if m.brField == 3 {
+			// 第二值暂存于 Raw2，输入框内容映射到 Raw2。
+			m.brDraft.Raw2 = m.brVal.Value()
+		}
+		var cmd tea.Cmd
+		*dst, cmd = dst.Update(msg)
+		return m, cmd
+	}
+	return m, nil
+}
+
+// cycleBrowseColumn 在结果列间循环切换草稿列名。
+func (m *model) cycleBrowseColumn(dir int) {
+	if m.brRes == nil || len(m.brRes.Columns) == 0 {
+		return
+	}
+	cols := m.brRes.Columns
+	cur := 0
+	for i, c := range cols {
+		if c.Name == m.brDraft.Column {
+			cur = i
+			break
+		}
+	}
+	cur = (cur + dir + len(cols)) % len(cols)
+	m.brDraft.Column = cols[cur].Name
+}
+
+// cycleOp 在 13 个操作符间循环。
+func (m *model) cycleOp(dir int) {
+	cur := 0
+	for i, op := range browseOps {
+		if op == m.brDraft.Op {
+			cur = i
+			break
+		}
+	}
+	cur = (cur + dir + len(browseOps)) % len(browseOps)
+	m.brDraft.Op = browseOps[cur]
+}
+
+// applyFilterDraft 把草稿落地为条件、回到首页重查；缺值则留在编辑态提示。
+func (m *model) applyFilterDraft() (tea.Model, tea.Cmd) {
+	m.brDraft.Raw = m.brVal.Value()
+	c, ok := draftToCondition(m.brDraft)
+	if !ok {
+		m.status = "过滤条件缺少值"
+		return m, nil
+	}
+	m.brConds = append(m.brConds, c)
+	m.brEditing = false
+	m.brFocus = 0
+	m.brVal.Blur()
+	m.busy = "加载数据 …"
+	m.brOffset = 0
+	m.brRow, m.brCol, m.brFull = 0, 0, false
+	m.brCount, m.brCountOK = nil, false
+	return m, browseCmd(m.app, m.selectedID, m.brSchema, m.brTable, m.browseRequest(0))
+}
+
+// dropLastFilter 删除最后一条过滤条件并回首页重查。
+func (m *model) dropLastFilter() (tea.Model, tea.Cmd) {
+	if len(m.brConds) == 0 {
+		m.status = "无过滤条件"
+		return m, nil
+	}
+	m.brConds = m.brConds[:len(m.brConds)-1]
+	m.busy = "加载数据 …"
+	m.brOffset = 0
+	m.brRow, m.brCol, m.brFull = 0, 0, false
+	m.brCount, m.brCountOK = nil, false
+	return m, browseCmd(m.app, m.selectedID, m.brSchema, m.brTable, m.browseRequest(0))
+}
+
+// toggleFilterLogic 切换 AND/OR 并在有条件时重查。
+func (m *model) toggleFilterLogic() (tea.Model, tea.Cmd) {
+	if m.brLogic == protocol.FilterLogicOr {
+		m.brLogic = protocol.FilterLogicAnd
+	} else {
+		m.brLogic = protocol.FilterLogicOr
+	}
+	if len(m.brConds) < 2 {
+		return m, nil
+	}
+	m.busy = "加载数据 …"
+	m.brOffset = 0
+	return m, browseCmd(m.app, m.selectedID, m.brSchema, m.brTable, m.browseRequest(0))
+}
+
+// toggleSortCurrentColumn 对当前列设/翻排序并回首页重查（T2.3）。
+func (m *model) toggleSortCurrentColumn() (tea.Model, tea.Cmd) {
+	col := m.currentBrowseColumn()
+	if col == "" {
+		m.status = "无可排序列"
+		return m, nil
+	}
+	dir := protocol.SortAsc
+	if len(m.brSort) == 1 && m.brSort[0].Column == col && m.brSort[0].Dir == protocol.SortAsc {
+		dir = protocol.SortDesc
+	}
+	m.brSort = []protocol.OrderClause{{Column: col, Dir: dir}}
+	m.busy = "加载数据 …"
+	m.brOffset = 0
+	m.brRow, m.brCol, m.brFull = 0, 0, false
+	m.brCount, m.brCountOK = nil, false
+	return m, browseCmd(m.app, m.selectedID, m.brSchema, m.brTable, m.browseRequest(0))
 }
 
 // browseView 渲染当前页数据表格（带行/列光标）+ 可选完整值面板。
@@ -1048,6 +1339,7 @@ func (m *model) browseView() string {
 		hdr += " · 有下一页"
 	}
 	b.WriteString(hdr + "\n")
+	b.WriteString(m.browseFilterBar() + "\n")
 	b.WriteString(renderTable(r.Columns, r.Rows, max(m.width-4, 20), maxRows, start, m.brRow, m.brCol))
 	if m.brFull && len(r.Columns) > 0 && m.brRow < len(r.Rows) {
 		col := min(m.brCol, len(r.Columns)-1)
@@ -1576,10 +1868,13 @@ func (m *model) footer() string {
 		}
 		return "↑/↓/←/→ 移动 · Enter 完整值（JSON 自动美化）· Esc 返回查询"
 	case viewBrowse:
+		if m.brEditing {
+			return "Tab 切字段 · ←/→ 调整 · Enter 应用 · Esc 取消"
+		}
 		if m.brFull {
 			return "Enter 刷新全值 · Esc 关闭全值（再按返回列表）"
 		}
-		return "↑/↓ 行 · ←/→ 翻页 · Shift←/→ 列 · Enter 完整值 · r 刷新 · Esc 返回"
+		return "↑/↓ 行 · ←/→ 翻页 · / 过滤 · c 计数 · s 排序 · o 且/或 · d 删过滤 · Esc 返回"
 	case viewQuickOpen:
 		return "↑/↓ 选择 · Enter 打开 · Esc 返回"
 	}
