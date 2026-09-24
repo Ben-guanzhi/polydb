@@ -86,6 +86,11 @@ func (l *Local) BrowseRows(ctx context.Context, id, schema, table string, req *p
 	return l.app.BrowseRows(ctx, id, schema, table, req)
 }
 
+// BrowseRowsCount 进程内委托 app-core 精确计数（零序列化）。
+func (l *Local) BrowseRowsCount(ctx context.Context, id, schema, table string, req *protocol.TableRowsRequest) (uint64, error) {
+	return l.app.BrowseRowsCount(ctx, id, schema, table, req)
+}
+
 // ─── Redis KV ───────────────────────────────────────────────
 
 func (l *Local) SelectDB(ctx context.Context, id string, index int) error {

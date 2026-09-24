@@ -46,6 +46,9 @@ type Client interface {
 	// BrowseRows 按表浏览行数据（服务端分页；M11 数据面，只读操作）。
 	BrowseRows(ctx context.Context, id, schema, table string, req *protocol.TableRowsRequest) (*protocol.TableRowsResult, error)
 
+	// BrowseRowsCount 对同过滤条件执行精确 COUNT(*)（behavior.md §13.1，只读操作）。
+	BrowseRowsCount(ctx context.Context, id, schema, table string, req *protocol.TableRowsRequest) (uint64, error)
+
 	// Redis KV（M6 前端 Redis 模式；读写受连接 read_only 约束，见 app-core）。
 	SelectDB(ctx context.Context, id string, index int) error
 	ScanKeys(ctx context.Context, id string, cursor uint64, pattern string, count int) (*protocol.RedisScanPage, error)

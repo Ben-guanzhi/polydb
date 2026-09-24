@@ -257,6 +257,16 @@ func (r *Remote) BrowseRows(ctx context.Context, id, schema, table string, req *
 	return &out, nil
 }
 
+// BrowseRowsCount 远程走 POST rows/count（msgpack 数据面，spec browseTableRowsCount）。
+func (r *Remote) BrowseRowsCount(ctx context.Context, id, schema, table string, req *protocol.TableRowsRequest) (uint64, error) {
+	var out protocol.TableCountResult
+	path := "/api/connections/" + url.PathEscape(id) + "/schemas/" + url.PathEscape(schema) + "/tables/" + url.PathEscape(table) + "/rows/count"
+	if err := r.do(http.MethodPost, path, req, &out); err != nil {
+		return 0, err
+	}
+	return out.Count, nil
+}
+
 // ─── Redis KV ──────────────────────────────────────────────
 
 func (r *Remote) SelectDB(ctx context.Context, id string, index int) error {
