@@ -10,4 +10,5 @@ polydb-protocol = { workspace = true }
 polydb-transport = { workspace = true }
 gpui = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+serde = { workspace = true }
 serde_json = { workspace = true }
