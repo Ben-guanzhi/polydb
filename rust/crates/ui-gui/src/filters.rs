@@ -205,6 +205,7 @@ pub(crate) fn draft_to_condition(d: &FilterDraft) -> Option<FilterCondition> {
         value: Value::Null,
         second_value: Value::Null,
         values: Vec::new(),
+        case_sensitive: None,
     };
     if m.needs_value {
         c.value = parse_wire_value(&d.value);

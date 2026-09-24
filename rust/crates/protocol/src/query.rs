@@ -121,6 +121,16 @@ pub enum FilterOperator {
     Null,
     #[serde(rename = "not_null")]
     NotNull,
+    #[serde(rename = "contains")]
+    Contains,
+    #[serde(rename = "starts_with")]
+    StartsWith,
+    #[serde(rename = "ends_with")]
+    EndsWith,
+    #[serde(rename = "empty")]
+    Empty,
+    #[serde(rename = "regex")]
+    Regex,
     /// 解码回退（#[serde(other)]）：未知 op 不在解码期拒绝，交给 browse 校验层
     /// 返回 POLYDB_ERR_INVALID_PARAM（behavior.md §13.3）。序列化时跳过，不出现在线上。
     #[serde(other)]
@@ -144,8 +154,45 @@ impl FilterOperator {
             Self::Between => "between",
             Self::Null => "null",
             Self::NotNull => "not_null",
+            Self::Contains => "contains",
+            Self::StartsWith => "starts_with",
+            Self::EndsWith => "ends_with",
+            Self::Empty => "empty",
+            Self::Regex => "regex",
             Self::Unknown => "unknown",
         }
+    }
+
+    /// 文本匹配类 op：只有它们受 `case_sensitive` 影响（behavior.md §13.5）。
+    pub fn is_text_match(&self) -> bool {
+        matches!(
+            self,
+            Self::Like
+                | Self::NotLike
+                | Self::Contains
+                | Self::StartsWith
+                | Self::EndsWith
+                | Self::Regex
+        )
+    }
+
+    /// 需要非空 `value` 的 op。
+    pub fn needs_value(&self) -> bool {
+        matches!(
+            self,
+            Self::Eq
+                | Self::Ne
+                | Self::Lt
+                | Self::Le
+                | Self::Gt
+                | Self::Ge
+                | Self::Like
+                | Self::NotLike
+                | Self::Contains
+                | Self::StartsWith
+                | Self::EndsWith
+                | Self::Regex
+        )
     }
 }
 
@@ -186,6 +233,10 @@ pub struct FilterCondition {
     pub second_value: Value,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub values: Vec<Value>,
+    /// 文本匹配类 op 的区分大小写（behavior.md §13.5）：None=方言默认，
+    /// Some(true)=强制区分，Some(false)=强制不区分。其余 op 忽略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub case_sensitive: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -255,7 +255,7 @@ impl SqlDriver for SqliteConn {
         req: &polydb_protocol::TableRowsRequest,
     ) -> CoreResult<polydb_protocol::TableRowsResult> {
         let (sql, args) =
-            polydb_db_core::build_rows_query(polydb_db_core::DIALECT_DEFAULT, schema, table, req)?;
+            polydb_db_core::build_rows_query(polydb_db_core::DIALECT_SQLITE, schema, table, req)?;
         let limit = polydb_db_core::browse_rows_limits(req.limit);
         let res = self.execute(&sql, &args).await?;
         Ok(polydb_db_core::rows_result_to_browse_page(
@@ -270,7 +270,7 @@ impl SqlDriver for SqliteConn {
         req: &polydb_protocol::TableRowsRequest,
     ) -> CoreResult<u64> {
         let (sql, args) = polydb_db_core::build_rows_count_query(
-            polydb_db_core::DIALECT_DEFAULT,
+            polydb_db_core::DIALECT_SQLITE,
             schema,
             table,
             req,
