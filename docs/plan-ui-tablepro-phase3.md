@@ -216,3 +216,24 @@
 - 差异（有意保留）：终端无鼠标习惯 → TUI 不做拖拽选区；取消入口三端形态不同（`F8` / 顶栏按钮 / `Ctrl+Esc`）；
   执行计划三端均已具备（阶段 D 补齐 GUI，触发形态各异：`F9` / 工具栏按钮 / 顶栏按钮）；
   Redis 整值写回三端均已具备（阶段 D 补齐 Web/GUI，见 D4；list/hash/set 仍只有命令行）。
+
+## 阶段 A–D 收口：全端门禁基线（2026-09-25）
+
+一次性把六条门禁全跑一遍，数字如下（含**没跑成的**，避免把 soft-skip 当验证）：
+
+| 门禁 | 命令 | 结果 |
+| --- | --- | --- |
+| 协议漂移 | `tools/genprotocol` `ts --check` / `check` | TS 类型与 spec 同步；`54 spec types vs rust + go` OK，零漂移 |
+| Rust | `cargo fmt --all -- --check` / `clippy --workspace --all-targets` / `test --workspace` | 格式干净；**零警告**；全绿（`polydb-ui-gui` 48 测试，含 explain 7 + Redis 写回门禁 1） |
+| Go | `go build ./...` / `go vet ./...` / `go test ./... -count=1` | 构建与 vet 干净；10 个有测试的包全部 `ok`（非缓存） |
+| Go 格式 | `gofmt -l` | 首扫 45 个文件全部“未格式化”，逐个剥掉 CR 后**真未格式化 0** ⇒ 是本机 `core.autocrlf=true` 的换行 artifact，不是格式漂移 |
+| Web | `tsc --noEmit` / `eslint --max-warnings=0` / `vitest run` / `vite build` | 0 类型错误、0 lint 警告、15 文件 / 141 测试全绿、构建成功（主 chunk 4.96 MB，Monaco 造成的既有体积告警，非本次引入） |
+| 契约对拍 | `test/contract` `go test -count=1 -v` | `51 RUN / 51 PASS / 0 SKIP / 0 FAIL`（156s，Go 与 Rust 双后端） |
+
+**上述绿灯不覆盖的部分（如实披露）**：
+- 契约里 10 处驱动流程 soft-skip：PG / MySQL / MSSQL / Oracle / Redis × 两端，本机这些服务不可达。
+  即 Redis 写回→回读（D4）、`regex` 的 MSSQL `NOT_SUPPORTED`（D1）、`RedisScanPage.db` 回显（D2）
+  三条真库路径**只有单元测试兜底，没有服务端对拍数字**。
+- `golangci-lint` v2 本机未安装 ⇒ Go lint 步骤跳过（`go vet` 已跑）。
+- GUI（GPUI）与 Web 的界面渲染未肉眼验证：无头环境跑不了 GUI，Web 自动化浏览器此前被沙箱拦截，
+  以组件测试 + 构建门禁代替。

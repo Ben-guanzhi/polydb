@@ -154,8 +154,12 @@ polydb 有多个前端，均遵守 AGENTS.md 铁律：**只经 `app-core`（进�
 
 ## 已知未验证项
 
+- 阶段 A–D 收口时的契约对拍（2026-09-25）为 `51 RUN / 51 PASS / 0 SKIP / 0 FAIL`，但其中
+  **10 处驱动流程按既有 soft-skip 静默跳过**：PG / MySQL / MSSQL / Oracle / Redis × Go/Rust 两端，
+  本机这些服务不可达。完整门禁基线见 `docs/plan-ui-tablepro-phase3.md`「阶段 A–D 收口」。
 - 三端 Redis 写回**未端到端跑过**：链路需要真实 Redis 实例，本机没有常驻服务。离线门禁只保证
   纯函数层（Web `redisWrite.test.ts`、GUI `util::tests::redis_write_block_gates`）；`PUT /kv/keys`
   两端的 set/get 对拍在 `test/contract/contract_test.go` 的 `set *` / `get *` 步骤里，Redis
-  不可达时按既有 soft-skip 整段跳过，因此本轮没有服务端验证数字。
+  不可达时整段跳过，因此没有服务端验证数字。同理适用于 D2 的 `RedisScanPage.db` 回显与
+  D1 的 MSSQL `regex → NOT_SUPPORTED`。
 - GUI 编辑框（GPUI 单行输入 + `▏` 光标）与 Web `textarea` 的渲染效果未做肉眼验证。
