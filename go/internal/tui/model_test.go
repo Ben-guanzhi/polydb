@@ -22,6 +22,11 @@ import (
 // 测试阻塞 30s/跳；心跳逻辑由 TestHeartbeatArming 单独覆盖。
 func TestMain(t *testing.M) {
 	heartbeatDisabled = true
+	// 固定主题档位：非 tty 下 termenv 自动探测为 Ascii 会剥离样式，
+	// 令断言 ANSI 的测试不确定；显式设 ANSI 深色底使样式可预期。
+	os.Setenv("POLYDB_TUI_COLOR", "ansi")
+	os.Setenv("POLYDB_TUI_THEME", "dark")
+	initTheme()
 	os.Exit(t.Run())
 }
 
@@ -799,6 +804,56 @@ func TestKVViewNavigation(t *testing.T) {
 	mm.view = viewKV
 	if v := mm.View(); !strings.Contains(v, "db 0") || !strings.Contains(v, "a") || !strings.Contains(v, "b") {
 		t.Fatalf("kv view missing content:\n%s", v)
+	}
+}
+
+// ─── 主题 token 化（NO_COLOR / dark-light / 强制档位）────────
+
+func TestThemeProfileSelection(t *testing.T) {
+	keys := []string{"NO_COLOR", "POLYDB_TUI_NO_COLOR", "POLYDB_TUI_COLOR", "POLYDB_TUI_THEME"}
+	for _, k := range keys {
+		if v, ok := os.LookupEnv(k); ok {
+			defer os.Setenv(k, v)
+		} else {
+			defer os.Unsetenv(k)
+		}
+	}
+	defer initTheme()
+
+	// 强制 ANSI + 深底：失败标红、灰徽标用亮黑（90）
+	os.Unsetenv("NO_COLOR")
+	os.Unsetenv("POLYDB_TUI_NO_COLOR")
+	os.Setenv("POLYDB_TUI_COLOR", "ansi")
+	os.Setenv("POLYDB_TUI_THEME", "dark")
+	initTheme()
+	if !strings.HasPrefix(failText("boom"), "\x1b[31m") {
+		t.Fatalf("ANSI dark fail not red: %q", failText("boom"))
+	}
+	if !strings.Contains(selected("x"), "\x1b[7m") {
+		t.Fatalf("ANSI selected not reverse: %q", selected("x"))
+	}
+	if s := stBadge(protocol.StatementTypeOther); !strings.Contains(s, "\x1b[90m") {
+		t.Fatalf("dark gray badge not bright-black: %q", s)
+	}
+
+	// 浅底：灰徽标改用黑（30）以保证可见
+	os.Setenv("POLYDB_TUI_THEME", "light")
+	initTheme()
+	if s := stBadge(protocol.StatementTypeOther); !strings.Contains(s, "\x1b[30m") {
+		t.Fatalf("light gray badge not black: %q", s)
+	}
+
+	// NO_COLOR：剥离所有样式
+	os.Setenv("NO_COLOR", "1")
+	initTheme()
+	if failText("boom") != "boom" {
+		t.Fatalf("NO_COLOR should strip fail: %q", failText("boom"))
+	}
+	if selected("x") != "x" {
+		t.Fatalf("NO_COLOR should strip reverse: %q", selected("x"))
+	}
+	if stBadge(protocol.StatementTypeSelect) != "SELECT" {
+		t.Fatalf("NO_COLOR should strip badge: %q", stBadge(protocol.StatementTypeSelect))
 	}
 }
 

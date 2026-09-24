@@ -1327,7 +1327,7 @@ func (m *model) kvView() string {
 			line += fmt.Sprintf("  ttl:%d", *ki.TTL)
 		}
 		if i == m.kvCur {
-			line = "\x1b[7m" + line + "\x1b[0m"
+			line = selected(line)
 		}
 		b.WriteString(line + "\n")
 	}
@@ -1337,7 +1337,7 @@ func (m *model) kvView() string {
 	if m.kvValueKey != "" {
 		b.WriteString("\n")
 		if m.kvValueErr != nil {
-			b.WriteString("值加载失败: \x1b[31m" + m.kvValueErr.Error() + "\x1b[0m\n")
+			b.WriteString("值加载失败: " + failText(m.kvValueErr.Error()) + "\n")
 		} else {
 			b.WriteString("键 " + truncate(m.kvValueKey, 40) + " (" + string(m.kvValue.Type) + "):\n")
 			b.WriteString(kvValueText(m.kvValue, max(3, m.height-24)) + "\n")
@@ -1528,7 +1528,7 @@ func (m *model) frame(body string) string {
 // colorStatus 状态行着色：含「失败」标红（与 Rust GUI status_color 语义一致）。
 func colorStatus(s string) string {
 	if strings.Contains(s, "失败") {
-		return "\x1b[31m" + s + "\x1b[0m"
+		return failText(s)
 	}
 	return s
 }
@@ -1588,16 +1588,16 @@ func (m *model) connsView() string {
 		}
 		if st, ok := m.connStatus[c.ID]; ok {
 			if st.Connected {
-				line += fmt.Sprintf("  \x1b[32m●\x1b[0m %.1f ms", st.LatencyMs)
+				line += "  " + okText("●") + fmt.Sprintf(" %.1f ms", st.LatencyMs)
 			} else {
-				line += "  \x1b[31m●\x1b[0m 连接失败"
+				line += "  " + failText("●") + " 连接失败"
 			}
 		}
 		if m.pendingDel == c.ID {
-			line += "  \x1b[33m待确认删除\x1b[0m"
+			line += "  " + warnText("待确认删除")
 		}
 		if i == m.connCursor {
-			line = "\x1b[7m" + line + "\x1b[0m"
+			line = selected(line)
 		}
 		b.WriteString(line + "\n")
 	}
@@ -1629,7 +1629,7 @@ func (m *model) tablesView() string {
 			line += "  [" + string(t.Type) + "]"
 		}
 		if i == m.tableCur {
-			line = "\x1b[7m" + line + "\x1b[0m"
+			line = selected(line)
 		}
 		b.WriteString(line + "\n")
 	}
@@ -1652,7 +1652,7 @@ func (m *model) quickOpenView() string {
 		}
 		line := marker + it.label()
 		if i == m.qoCur {
-			line = "\x1b[7m" + line + "\x1b[0m"
+			line = selected(line)
 		}
 		b.WriteString(line + "\n")
 	}
@@ -1729,7 +1729,7 @@ func (m *model) queryView() string {
 		b.WriteString(m.acPanel())
 	}
 	if m.queryErr != nil {
-		b.WriteString("\x1b[31m" + m.queryErr.Error() + "\x1b[0m\n")
+		b.WriteString(failText(m.queryErr.Error()) + "\n")
 		return b.String()
 	}
 	if m.queryResult != nil {
@@ -1779,7 +1779,7 @@ func (m *model) acPanel() string {
 		}
 		line := marker + m.acCandidates[i]
 		if i == m.acIdx {
-			line = "\x1b[7m" + line + "\x1b[0m"
+			line = selected(line)
 		}
 		b.WriteString(line + "\n")
 	}

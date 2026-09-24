@@ -149,7 +149,7 @@ func renderTable(cols []protocol.ResultColumn, rows [][]protocol.Value, maxWidth
 			}
 			s := pad(truncate(c, widths[i]), widths[i])
 			if ri == curRow && i == curCol {
-				s = "\x1b[7m" + s + "\x1b[0m"
+				s = selected(s)
 			}
 			sb.WriteString(s)
 		}
@@ -198,21 +198,10 @@ func renderTable(cols []protocol.ResultColumn, rows [][]protocol.Value, maxWidth
 	return b.String()
 }
 
-// stBadge 渲染语句类型徽标（着色）。
+// stBadge 渲染语句类型徽标（着色走 theme 的 badgeStyle；空类型回落纯文本「其他」）。
 func stBadge(t protocol.StatementType) string {
-	styles := map[protocol.StatementType]int{
-		protocol.StatementTypeSelect: 2, // 绿
-		protocol.StatementTypeInsert: 6, // 青
-		protocol.StatementTypeUpdate: 6, // 青
-		protocol.StatementTypeDelete: 6, // 青
-		protocol.StatementTypeDDL:    3, // 黄
-		protocol.StatementTypeOther:  8, // 灰
-	}
 	if t == "" {
 		return "其他"
 	}
-	if c, ok := styles[t]; ok {
-		return fmt.Sprintf("\x1b[%dm%s\x1b[0m", 30+c, strings.ToUpper(string(t)))
-	}
-	return strings.ToUpper(string(t))
+	return badgeStyle(t).Render(strings.ToUpper(string(t)))
 }
