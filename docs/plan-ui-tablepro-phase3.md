@@ -139,3 +139,37 @@
 | TableProGo AGPL 传染 | 仅读其代码理解语义分层，实现全部独立；提交说明沿用红线复核注记 |
 | 三端行为漂移 | §4 表驱动同用例 + 对拍清单 |
 | TUI 编辑流误操作风险（终端无确认弹窗习惯） | 提交前强制 Review 一步 + 只读连接门禁 + 行数校验兜底 |
+
+## 6. 实现落点（阶段 A G1–G6、阶段 B T1–T4 已完成，2026-09-24）
+
+> 许可红线复核：TablePro / TableProGo 为 AGPLv3，以下内容仅为**交互设计与语义参考**，
+> 三端实现全部独立，未移植其任何代码。
+
+### 阶段 A — Rust GUI（`rust/crates/ui-gui`）
+- 由 1,807 行单文件拆为 `theme/tabs/profile/filters/presets/changes/exporters/app/view/util`；
+  §1.1 六项缺陷（结果无滚动、游离 FocusHandle、心跳无退出、refresh 踢回启动屏、
+  `browse_rows` 协议字段空置、文档落后）全部修复。
+- §1.2 的 GUI 侧对应能力同批落地：过滤/排序/计数/页大小走服务端、变更队列 + 事务提交、
+  连接 CRUD、导出、Redis 只读浏览、编辑器选区/撤销、`Ctrl+P` Quick Switcher。
+- 门禁：`cargo fmt && clippy`（零警告）`&& test`（33 项）`&& build`。
+
+### 阶段 B — Go TUI（`go/internal/tui` + `go/pkg/{changes,explain}`）
+- T1：lipgloss 主题 token（NO_COLOR / dark/light）、列表虚拟滚动、`F1` 快捷键面板。
+- T2：`transport.Client` 增 `BrowseRowsCount`；过滤栏 13 op（Go 独立条件构造）、排序、
+  页大小 50/200/1000、精确计数、`Tab` 焦点环、`F4` 历史抽屉（本地 JSONL）、`Ctrl+P` 跨 schema 搜表。
+- T3：`transport.Client` 增事务四方法；`go/pkg/changes` 队列纯函数包 + 单测；单元格编辑、
+  Review、单事务提交/回滚、撤销栈、只读门禁——与 Web/GUI 同语义。
+- T4：`F8` 取消在途查询（ctx 贯穿 + 远程 cancel 端点，UUID `query_id`）；连接编辑
+  （`UpdateConnection` 接线）；Redis string 值 `e` 就地写回 + 回读；`F9` 执行计划
+  （新增 `go/pkg/explain` 语义层 + `viewExplain` 树渲染）；`docs/frontends.md` 键位总表。
+- §1.2 遗留项处置：kvDB 恒 0 经核查**非缺陷**（需 spec 回读字段，另案）；其余均已修复。
+- 附带后端修复：`go/pkg/dbsqlite` 把 `StatementTypeOther` 送去 `Exec`，导致 SQLite 的
+  `EXPLAIN` / `PRAGMA` 行集被丢弃（另外四家 Go 驱动与 Rust 侧均按查询处理）——已对齐并补回归测试。
+- 门禁：`gofmt` + `go vet ./...` + `go build ./...` + `go test ./...` 全绿
+  （`golangci-lint` v2 本机未安装，lint 步骤跳过）。
+
+### 三端一致 / 差异
+- 一致：过滤 13 op 与排序/计数走服务端；变更跟踪编辑「暂存 → Review → 单事务提交（失败回滚）→ 撤销」；
+  只读连接禁用全部写入口；`Ctrl+P` Quick-open。
+- 差异（有意保留）：终端无鼠标习惯 → TUI 不做拖拽选区；取消入口三端形态不同（`F8` / 顶栏按钮 / `Ctrl+Esc`）；
+  执行计划 TUI `F9` 与 Web 均有，GUI 暂缺；Redis 整值写回仅 TUI（Web 走命令行、GUI 只读）。
