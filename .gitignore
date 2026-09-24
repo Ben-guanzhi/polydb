@@ -13,6 +13,13 @@
 # ─── Vendored local tools（Windows 专属二进制，不入库）─────
 /.tools/
 
+# ─── 工具构建产物（协议生成器用 go run . / go build . 重建）──
+/tools/genprotocol/*.exe
+
+# ─── IDE / Agent 工具本地状态（不入库）─────────────────────
+/.idea/
+/.qoder/
+
 # ─── Logs & scratch ────────────────────────────────────────
 *.log
 _agt_tmp.md
