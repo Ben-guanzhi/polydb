@@ -9,8 +9,9 @@ import (
 
 // M11 表数据浏览契约：Rust / Go 双后端一致性（spec/behavior.md §13）。
 //
-// 覆盖：分页（offset/limit/has_more）、排序（asc/desc/多列）、13 种过滤操作符、
-// AND/OR 组合、rows/count 精确计数、非法请求 → INVALID_PARAM。
+// 覆盖：分页（offset/limit/has_more）、排序（asc/desc/多列）、18 种过滤操作符、
+// 大小写三态 case_sensitive（§13.5）、AND/OR 组合、rows/count 精确计数、
+// 非法请求 → INVALID_PARAM。
 
 func TestContractTableRows(t *testing.T) {
 	bs := backends(t)
@@ -41,14 +42,25 @@ func TestContractTableRows(t *testing.T) {
 					}
 				}
 			}
-			// 追加 9 行（score 4..12，name d..l）
+			// 追加 9 行（score 4..12，name d..l）。
+			// 用显式 VALUES：两端内置 SQLite 无 chr()，printf 也不支持 %c（会退化成 '1'）。
 			if st, got, err := c.Do("POST", "/api/connections/"+id+"/query",
-				map[string]any{"sql": "WITH seq(n) AS (SELECT 4 UNION ALL SELECT n+1 FROM seq WHERE n < 12) INSERT INTO t(name, score) SELECT printf('%c', 96+n), n FROM seq"}); err != nil || st != 200 {
+				map[string]any{"sql": "INSERT INTO t(name, score) VALUES('d',4),('e',5),('f',6),('g',7),('h',8),('i',9),('j',10),('k',11),('l',12)"}); err != nil || st != 200 {
 				t.Fatalf("%s: seed rows: status=%d err=%v body=%v", b.name, st, err, got)
+			}
+			// 大小写/空值样本表：case_sensitive 与 empty 只在文本族上有语义。
+			for _, sql := range []string{
+				"CREATE TABLE te(name TEXT, note TEXT)",
+				"INSERT INTO te(name, note) VALUES('Apple','x'), ('apple','y'), ('APPLE',''), ('banana', NULL)",
+			} {
+				if st, got, err := c.Do("POST", "/api/connections/"+id+"/query", map[string]any{"sql": sql}); err != nil || st != 200 {
+					t.Fatalf("%s: setup te %q: status=%d err=%v body=%v", b.name, sql, st, err, got)
+				}
 			}
 
 			rowsPath := "/api/connections/" + id + "/schemas/main/tables/t/rows/query"
 			countPath := "/api/connections/" + id + "/schemas/main/tables/t/rows/count"
+			teCountPath := "/api/connections/" + id + "/schemas/main/tables/te/rows/count"
 
 			// ─── 分页 ────────────────────────────────────────
 			// 第一页（limit 5）：has_more=true，5 行，按 PK 顺序
@@ -110,6 +122,10 @@ func TestContractTableRows(t *testing.T) {
 				{"ge", map[string]any{"column": "score", "op": "ge", "value": 10}, 3},
 				{"like", map[string]any{"column": "name", "op": "like", "value": "%a%"}, 1},   // a..l 中仅 "a" 含 a
 				{"not_like", map[string]any{"column": "name", "op": "not_like", "value": "%a%"}, 11},
+				{"contains", map[string]any{"column": "name", "op": "contains", "value": "a"}, 1},
+				{"starts_with", map[string]any{"column": "name", "op": "starts_with", "value": "a"}, 1},
+				{"ends_with", map[string]any{"column": "name", "op": "ends_with", "value": "l"}, 1},
+				{"regex", map[string]any{"column": "name", "op": "regex", "value": "^[ab]$"}, 2},
 				{"in", map[string]any{"column": "score", "op": "in", "values": []any{1, 3, 5}}, 3},
 				{"not_in", map[string]any{"column": "score", "op": "not_in", "values": []any{1, 3, 5}}, 9},
 				{"between", map[string]any{"column": "score", "op": "between", "value": 2, "second_value": 4}, 3},
@@ -123,6 +139,45 @@ func TestContractTableRows(t *testing.T) {
 				count := got.(map[string]any)["count"]
 				if int(toInt64(t, b, count)) != tc.count {
 					t.Fatalf("%s: count op %s = %v, want %d", b.name, tc.name, count, tc.count)
+				}
+			}
+
+			// ─── 大小写三态 case_sensitive（§13.5）+ empty ───
+			// 样本：'Apple' / 'apple' / 'APPLE' / 'banana'。nil 表示字段缺席（沿用方言默认）。
+			// SQLite 默认：LIKE 对 ASCII 不区分，REGEXP（UDF）区分。
+			for _, tc := range []struct {
+				name string
+				cond map[string]any
+				cs   *bool
+				want int
+			}{
+				{"contains-nil", map[string]any{"column": "name", "op": "contains", "value": "app"}, nil, 3},
+				{"contains-sensitive", map[string]any{"column": "name", "op": "contains", "value": "app"}, boolPtr(true), 1},
+				{"contains-insensitive", map[string]any{"column": "name", "op": "contains", "value": "app"}, boolPtr(false), 3},
+				{"starts_with-sensitive", map[string]any{"column": "name", "op": "starts_with", "value": "A"}, boolPtr(true), 2},
+				{"ends_with-nil", map[string]any{"column": "name", "op": "ends_with", "value": "e"}, nil, 3},
+				{"ends_with-sensitive", map[string]any{"column": "name", "op": "ends_with", "value": "e"}, boolPtr(true), 2},
+				{"regex-nil", map[string]any{"column": "name", "op": "regex", "value": "^apple$"}, nil, 1},
+				{"regex-sensitive", map[string]any{"column": "name", "op": "regex", "value": "^apple$"}, boolPtr(true), 1},
+				{"regex-insensitive", map[string]any{"column": "name", "op": "regex", "value": "^apple$"}, boolPtr(false), 3},
+				{"not_like-sensitive", map[string]any{"column": "name", "op": "not_like", "value": "a%"}, boolPtr(true), 3},
+				{"empty-note", map[string]any{"column": "note", "op": "empty"}, nil, 2},
+				{"empty-name", map[string]any{"column": "name", "op": "empty"}, nil, 0},
+			} {
+				cond := tc.cond
+				if tc.cs != nil {
+					cond = map[string]any{}
+					for k, v := range tc.cond {
+						cond[k] = v
+					}
+					cond["case_sensitive"] = *tc.cs
+				}
+				st, got, err := c.Do("POST", teCountPath, map[string]any{"conditions": []any{cond}})
+				if err != nil || st != 200 {
+					t.Fatalf("%s: count %s: status=%d err=%v body=%v", b.name, tc.name, st, err, got)
+				}
+				if int(toInt64(t, b, got.(map[string]any)["count"])) != tc.want {
+					t.Fatalf("%s: count %s = %v, want %d", b.name, tc.name, got.(map[string]any)["count"], tc.want)
 				}
 			}
 
@@ -150,6 +205,8 @@ func TestContractTableRows(t *testing.T) {
 			for _, bad := range []map[string]any{
 				{"conditions": []any{map[string]any{"column": "name", "op": "bogus"}}},
 				{"conditions": []any{map[string]any{"column": "name", "op": "in", "values": []any{}}}},
+				{"conditions": []any{map[string]any{"column": "name", "op": "contains"}}},
+				{"conditions": []any{map[string]any{"column": "name", "op": "regex", "value": []any{1}}}},
 				{"columns": []any{""}},
 			} {
 				st, got, _ := c.Do("POST", rowsPath, bad)
@@ -167,6 +224,8 @@ func TestContractTableRows(t *testing.T) {
 		})
 	}
 }
+
+func boolPtr(v bool) *bool { return &v }
 
 func assertRowsPage(t *testing.T, b *Backend, got any, wantRows int, wantOffset int, wantHasMore bool) {
 	t.Helper()

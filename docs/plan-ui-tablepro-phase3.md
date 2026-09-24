@@ -48,10 +48,13 @@
 4. **变更跟踪编辑流**以 Web `lib/changes.ts` 语义为基准：GUI 在 Rust 侧、TUI 在 Go 侧
    各自独立实现纯函数队列（RowChange/sequence 保序/改回原值自动移除/Review SQL 预览/
    事务提交+行数校验/撤销栈），三端**行为一致 + 各自单测**，不做跨语言共享库。
-5. **过滤栏对齐上游交互而非 18 操作符全集**：GUI/TUI 直接复用后端已有 13 op 协议
+5. **过滤栏对齐上游交互而非 18 操作符全集**：阶段 A/B 先复用后端当时已有的 13 op 协议
    （零 spec 变更）；操作符 13→18（contains/starts with/ends with/is empty/regex + Match Case）
-   需 `spec/schemas/query.json` op 枚举扩充 + 6 驱动×2 语言渲染 + 契约测试，**列为另案**
-   （见 §5）。Raw SQL 过滤行维持"不做"（注入面，parity 文档 §2-8 结论不变）。
+   需 `spec/schemas/query.json` op 枚举扩充 + **集中式 WHERE 构造器两端各一处**
+   （`rust/crates/db-core/src/browse.rs` / `go/pkg/dbcore/browse.go`，驱动只声明方言差异，
+   原估「6 驱动×2 语言」高估约 6 倍）+ 契约测试，**列为另案**（见 §5）。
+   ✅ **阶段 D1 已交付（2026-09-24）**：spec + 两端渲染 + SQLite REGEXP UDF + 三端过滤栏。
+   Raw SQL 过滤行维持"不做"（注入面，parity 文档 §2-8 结论不变）。
 6. **TUI 键盘模型借 TablePro 的"焦点决定键义"+ 面板焦点环**：`Tab/Shift+Tab` 巡览
    （侧栏↔编辑器↔网格↔详情），模态键表按焦点上下文分发；`Ctrl+P` QuickOpen
    （fuzzy 语义对齐 Web `lib/tableSearch.ts`，Go 独立实现）、`F1` 快捷键面板。
@@ -121,8 +124,20 @@
 
 - **W1** ✅（2026-09-24）：Inspector 行详情尾板（与 G2 同语义，只读+跳转编辑入口）；结果视图模式补
   JSON / Output(消息) 两页签。**纯前端，无 spec 变更。**
-- 另案（不排期）：过滤操作符 13→18 + Match Case（spec 变更 + 6 驱动×2 语言 + 契约测试）；
-  Rewind 快照（需存储层）；Compare & Sync、Server Dashboard、连接条 rail。
+- **D1** ✅（2026-09-24）：过滤操作符 13→18 + Match Case 三态。落点：`spec/`（`FilterOperator` 枚举
+  + `behavior.md` §13.5 三态语义 / §13.6 能力矩阵）→ 两端集中式渲染（`db-core/browse.rs`、
+  `dbcore/browse.go`；SQLite 严格大小写走 `GLOB`、正则走驱动注册的 `REGEXP` UDF，MSSQL `regex`
+  显式 `POLYDB_ERR_NOT_SUPPORTED`）→ 三端过滤栏（Web `lib/filterOps.ts`、GUI `filters.rs`+`view.rs`、
+  TUI `browse_filters.go`+`model.go`）→ 契约测试 `test/contract/rows_test.go`（18 op + 三态打两端）。
+  **spec 变更 non-breaking**：新字段 `case_sensitive` 可选，缺席即沿用方言排序规则。
+
+### 阶段 D — 原「另案」落地（协议 + 小件）
+
+- **D2** kvDB 恒 0：经核查**非缺陷**——服务端未回读当前 db。需 spec 加回读字段 + 两端实现 + 前端显示。
+- **D3** Rust GUI 执行计划：补三端差异（Web `lib/explain.ts` / TUI `pkg/explain` 已有）。
+- **D4** Redis string 整值写回：Web + GUI 对齐 TUI 的 `e`。
+- 仍不排期（各自需新里程碑再拆）：Rewind 快照（需存储层）、Compare & Sync、Server Dashboard、
+  左缘连接条 rail。
 
 ## 4. 跨端一致性门禁
 
@@ -183,7 +198,8 @@
   界面**未在浏览器肉眼验证**（自动化浏览器被沙箱拦截），以组件测试 + 构建门禁代替。
 
 ### 三端一致 / 差异
-- 一致：过滤 13 op 与排序/计数走服务端；变更跟踪编辑「暂存 → Review → 单事务提交（失败回滚）→ 撤销」；
+- 一致：过滤 18 op + `case_sensitive` 三态与排序/计数走服务端（能力矩阵见 `behavior.md` §13.6，
+  三端渲染同一份集中式 WHERE 构造器）；变更跟踪编辑「暂存 → Review → 单事务提交（失败回滚）→ 撤销」；
   只读连接禁用全部写入口；`Ctrl+P` Quick-open。
 - 差异（有意保留）：终端无鼠标习惯 → TUI 不做拖拽选区；取消入口三端形态不同（`F8` / 顶栏按钮 / `Ctrl+Esc`）；
   执行计划 TUI `F9` 与 Web 均有，GUI 暂缺；Redis 整值写回仅 TUI（Web 走命令行、GUI 只读）。

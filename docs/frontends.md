@@ -50,7 +50,7 @@ polydb 有多个前端，均遵守 AGENTS.md 铁律：**只经 `app-core`（进�
   | 执行计划 | `↑/↓`·`j/k` 滚动 · `F8` 取消在途 EXPLAIN · `Esc`/`q` 返回编辑器 |
   | 结果网格 | `↑↓←→` 移动单元格光标 · `Enter` 完整值（JSON 自动美化） · `Esc` 返回 |
   | 数据浏览 | `↑/↓` 行 · `←/→` 翻页 · `Shift+←/→` 移列 · `Enter` 完整值 · `/`·`Tab` 进过滤栏 · `e` 编辑单元格（需主键且非只读） · `u` 撤销暂存 · `w` 审阅并提交（单事务，失败回滚） · `s` 排序 · `p` 页大小 50/200/1000 · `c` 精确计数 · `o` AND/OR · `d` 删末条过滤 · `r` 刷新 |
-  | 过滤栏编辑 | `Tab`/`Shift+Tab` 列·操作符·值 · `←/→` 调整 · `↑/↓` 循环选列 · `Enter` 应用 · `Esc` 取消 |
+  | 过滤栏编辑 | `Tab`/`Shift+Tab` 列·操作符·值·(第二值)·(大小写) · `←/→` 调整当前格 · `↑/↓` 循环选列 · `Enter` 应用 · `Esc` 取消 |
   | 变更审阅 | `↑/↓` 看语句 · `Enter`/`y` 提交 · `u` 撤销 · `Esc`/`n` 返回 |
   | Redis 键 | `↑/↓` 选键 · `Enter` 看值 · `/` 模式过滤 · `g` 加载更多 · `b` 切 db 0–15 · `c` 命令行 · `e` **写回 string 值**（`Enter` 提交并回读，`Esc` 放弃） · `r` 刷新 |
 
@@ -78,9 +78,33 @@ polydb 有多个前端，均遵守 AGENTS.md 铁律：**只经 `app-core`（进�
   不 import 任何 driver；异步 transport 调用委托给专用 tokio runtime（gpui 的 executor 与驱动所需的
   tokio reactor 分离）
 - 形态（阶段 A G1–G6 后）：对象 tab 壳层（workbench 常驻 + 表 tab 多开，rails 概览/数据/结构/关系）、
-  侧栏 schema→表→列树 + schema 切换、数据浏览（过滤栏 13 op/排序/页大小/精确计数/Inspector 尾板/
+  侧栏 schema→表→列树 + schema 切换、数据浏览（过滤栏 18 op + 大小写三态/排序/页大小/精确计数/Inspector 尾板/
   虚拟滚动网格）、变更跟踪编辑（Review + 单事务提交/回滚 + 撤销栈 + 只读门禁）、连接 CRUD 表单、
   结果导出 CSV/TSV/JSON/NDJSON/Markdown/INSERT、Redis 键浏览（只读子集）、SQL 编辑器选区/剪贴板/
   undo-redo + Quick Switcher（`Ctrl+P` 在已开对象 tab 间跳转）。主题走 `theme.rs` token（dark 默认 + light）。
 - 顶栏「■ 取消」为多语句尽力而为取消（当前语句跑完、剩余跳过）；驱动层无中断，故不是即时取消。
 - 运行：`cd rust && cargo run -p polydb-gui`（构建含 GPUI，Windows 下首次编译较慢）
+
+## 数据浏览过滤栏（三端一致，D1）
+
+- **18 个操作符**，与 `spec/schemas/query.json` 的 `FilterOperator` 枚举一一对应。三端各自的
+  真相源文件必须与 spec 同步：Web `web/src/lib/filterOps.ts`、GUI `rust/crates/ui-gui/src/filters.rs`
+  (`OPS`)、TUI `go/internal/tui/browse_filters.go` (`browseOps`)。
+  取值形态：无值（`null`/`not_null`/`empty`）、单值（`eq`/`ne`/`lt`/`le`/`gt`/`ge`/`like`/
+  `not_like`/`contains`/`starts_with`/`ends_with`/`regex`）、双值（`between`）、多值（`in`/`not_in`，
+  TUI 用逗号分隔单字段输入）。
+- **大小写三态 `case_sensitive`**（`spec/behavior.md` §13.5）：`默认`（字段缺席，沿用方言排序规则）/
+  `区分`（`true`）/ `忽略`（`false`）。**只发给文本匹配族**（`like`/`not_like`/`contains`/
+  `starts_with`/`ends_with`/`regex`）；比较类 op 上三端一律不下发该字段，避免给数值/日期列注入
+  `CAST`/`COLLATE`。GUI 预设向后兼容：老预设缺 `case_mode` 字段按「默认」加载。
+- **SQLite 形态**：强制区分走 `GLOB`（模式按 GLOB 规则重转义），强制不区分走 `col REGEXP '(?i)' || ?`
+  （`lower()` 会破坏 `[A-Z]` 字符组，语义不等价）。REGEXP UDF 两端都注册
+  （rusqlite `functions` feature / modernc `RegisterFunc`），同为 RE2 家族：**无后向引用、无环视**，
+  NULL 传播为 NULL。
+- **能力降级要显式报错**：MSSQL 无原生正则，`regex` 由 `db-core`/`dbcore` 抛
+  `POLYDB_ERR_NOT_SUPPORTED`；三端把该 op 置灰并提示，且**整条条件不下发**（不是静默换实现）。
+  TUI 若草稿已落在不支持的 op 上，`Enter` 拒绝应用并给状态栏提示，`←/→` 循环会跳过不支持项。
+- **契约覆盖**：`test/contract/rows_test.go` 用同一组断言分别打 Go 与 Rust 后端，覆盖 18 op、
+  `case_sensitive` 三态（SQLite 真库：`GLOB`/`LIKE`/`REGEXP` UDF 三条路径）与 `empty`。
+  MSSQL 的 `NOT_SUPPORTED` 由两端 `browse.rs`/`browse.go` 单元测覆盖——契约测试无 MSSQL 实例，
+  该分支未走服务端对拍（如实披露）。
