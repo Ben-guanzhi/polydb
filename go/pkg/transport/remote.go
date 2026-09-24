@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -47,7 +48,10 @@ func (r *Remote) SetToken(token string) { r.token = token }
 
 // do 发送请求；body 非 nil 时按 msgpack 编码。2xx 且非 204 时按
 // Content-Type 解码到 out；非 2xx 时解码 PolyDBError 并返回（*protocol.PolyDBError）。
-func (r *Remote) do(method, path string, body any, out any) error {
+//
+// ctx 必须一路透传到 http.Request（AGENTS.md §10：context 首参贯穿所有 IO），
+// 否则客户端取消/超时对在途 HTTP 请求完全无效，远程模式的「取消查询」无从实现。
+func (r *Remote) do(ctx context.Context, method, path string, body any, out any) error {
 	var reader io.Reader
 	if body != nil {
 		data, err := msgpack.Marshal(body)
@@ -56,7 +60,7 @@ func (r *Remote) do(method, path string, body any, out any) error {
 		}
 		reader = bytes.NewReader(data)
 	}
-	req, err := http.NewRequest(method, r.base+path, reader)
+	req, err := http.NewRequestWithContext(ctx, method, r.base+path, reader)
 	if err != nil {
 		return err
 	}
@@ -114,9 +118,11 @@ func (r *Remote) IsConnected(id string) bool {
 
 // ─── 连接 CRUD ─────────────────────────────────────────────
 
+// 以下 CRUD 方法在 Client 接口里没有 ctx 参数（元数据面，非在途查询），
+// 统一用 Background()；查询/事务/浏览等会挂起的方法各自透传自己的 ctx。
 func (r *Remote) ListConnections() ([]protocol.ConnectionInfo, error) {
 	var out []protocol.ConnectionInfo
-	if err := r.do(http.MethodGet, "/api/connections", nil, &out); err != nil {
+	if err := r.do(context.Background(), http.MethodGet, "/api/connections", nil, &out); err != nil {
 		return nil, err
 	}
 	if out == nil {
@@ -127,24 +133,24 @@ func (r *Remote) ListConnections() ([]protocol.ConnectionInfo, error) {
 
 func (r *Remote) GetConnection(id string) (protocol.ConnectionInfo, error) {
 	var out protocol.ConnectionInfo
-	err := r.do(http.MethodGet, "/api/connections/"+url.PathEscape(id), nil, &out)
+	err := r.do(context.Background(), http.MethodGet, "/api/connections/"+url.PathEscape(id), nil, &out)
 	return out, err
 }
 
 func (r *Remote) CreateConnection(req *protocol.CreateConnectionRequest) (protocol.ConnectionInfo, error) {
 	var out protocol.ConnectionInfo
-	err := r.do(http.MethodPost, "/api/connections", req, &out)
+	err := r.do(context.Background(), http.MethodPost, "/api/connections", req, &out)
 	return out, err
 }
 
 func (r *Remote) UpdateConnection(id string, req *protocol.UpdateConnectionRequest) (protocol.ConnectionInfo, error) {
 	var out protocol.ConnectionInfo
-	err := r.do(http.MethodPut, "/api/connections/"+url.PathEscape(id), req, &out)
+	err := r.do(context.Background(), http.MethodPut, "/api/connections/"+url.PathEscape(id), req, &out)
 	return out, err
 }
 
 func (r *Remote) DeleteConnection(id string) (bool, error) {
-	err := r.do(http.MethodDelete, "/api/connections/"+url.PathEscape(id), nil, nil)
+	err := r.do(context.Background(), http.MethodDelete, "/api/connections/"+url.PathEscape(id), nil, nil)
 	if err != nil {
 		return false, err
 	}
@@ -156,7 +162,7 @@ func (r *Remote) DeleteConnection(id string) (bool, error) {
 
 func (r *Remote) Ping(ctx context.Context, id string) error {
 	var st protocol.ConnectionStatus
-	if err := r.do(http.MethodPost, "/api/connections/"+url.PathEscape(id)+"/test", nil, &st); err != nil {
+	if err := r.do(ctx, http.MethodPost, "/api/connections/"+url.PathEscape(id)+"/test", nil, &st); err != nil {
 		return err
 	}
 	if !st.Connected {
@@ -182,7 +188,7 @@ func (r *Remote) Disconnect(id string) {
 
 func (r *Remote) ListSchemas(ctx context.Context, id string) ([]protocol.SchemaInfo, error) {
 	var out []protocol.SchemaInfo
-	if err := r.do(http.MethodGet, "/api/connections/"+url.PathEscape(id)+"/schemas", nil, &out); err != nil {
+	if err := r.do(ctx, http.MethodGet, "/api/connections/"+url.PathEscape(id)+"/schemas", nil, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -191,7 +197,7 @@ func (r *Remote) ListSchemas(ctx context.Context, id string) ([]protocol.SchemaI
 func (r *Remote) ListTables(ctx context.Context, id, schema string) ([]protocol.TableInfo, error) {
 	var out []protocol.TableInfo
 	path := "/api/connections/" + url.PathEscape(id) + "/schemas/" + url.PathEscape(schema) + "/tables"
-	if err := r.do(http.MethodGet, path, nil, &out); err != nil {
+	if err := r.do(ctx, http.MethodGet, path, nil, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -200,7 +206,7 @@ func (r *Remote) ListTables(ctx context.Context, id, schema string) ([]protocol.
 func (r *Remote) ListColumns(ctx context.Context, id, schema, table string) ([]protocol.ColumnInfo, error) {
 	var out []protocol.ColumnInfo
 	path := "/api/connections/" + url.PathEscape(id) + "/schemas/" + url.PathEscape(schema) + "/tables/" + url.PathEscape(table) + "/columns"
-	if err := r.do(http.MethodGet, path, nil, &out); err != nil {
+	if err := r.do(ctx, http.MethodGet, path, nil, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -209,7 +215,7 @@ func (r *Remote) ListColumns(ctx context.Context, id, schema, table string) ([]p
 func (r *Remote) ListIndexes(ctx context.Context, id, schema, table string) ([]protocol.IndexInfo, error) {
 	var out []protocol.IndexInfo
 	path := "/api/connections/" + url.PathEscape(id) + "/schemas/" + url.PathEscape(schema) + "/tables/" + url.PathEscape(table) + "/indexes"
-	if err := r.do(http.MethodGet, path, nil, &out); err != nil {
+	if err := r.do(ctx, http.MethodGet, path, nil, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -218,7 +224,7 @@ func (r *Remote) ListIndexes(ctx context.Context, id, schema, table string) ([]p
 func (r *Remote) ListForeignKeys(ctx context.Context, id, schema, table string) ([]protocol.ForeignKeyInfo, error) {
 	var out []protocol.ForeignKeyInfo
 	path := "/api/connections/" + url.PathEscape(id) + "/schemas/" + url.PathEscape(schema) + "/tables/" + url.PathEscape(table) + "/foreign-keys"
-	if err := r.do(http.MethodGet, path, nil, &out); err != nil {
+	if err := r.do(ctx, http.MethodGet, path, nil, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -229,7 +235,7 @@ func (r *Remote) CreateTableSQL(ctx context.Context, id, schema, table string) (
 		SQL string `json:"sql"`
 	}
 	path := "/api/connections/" + url.PathEscape(id) + "/schemas/" + url.PathEscape(schema) + "/tables/" + url.PathEscape(table) + "/ddl"
-	if err := r.do(http.MethodGet, path, nil, &out); err != nil {
+	if err := r.do(ctx, http.MethodGet, path, nil, &out); err != nil {
 		return "", err
 	}
 	return out.SQL, nil
@@ -238,20 +244,42 @@ func (r *Remote) CreateTableSQL(ctx context.Context, id, schema, table string) (
 // ─── 查询 ──────────────────────────────────────────────────
 
 func (r *Remote) Execute(ctx context.Context, id, sql string, args ...protocol.Value) (*protocol.QueryResult, error) {
-	req := protocol.QueryRequest{SQL: sql, Params: args}
+	return r.ExecuteQuery(ctx, "", id, sql, args...)
+}
+
+// ExecuteQuery 走 POST /query 并携带客户端预分配的 query_id（spec query_id 字段），
+// 这样执行期间 CancelQuery 能在服务端 in-flight registry 里命中它。
+// queryID 为空时服务端自行生成，此时无法取消。
+func (r *Remote) ExecuteQuery(ctx context.Context, queryID, id, sql string, args ...protocol.Value) (*protocol.QueryResult, error) {
+	req := protocol.QueryRequest{SQL: sql, Params: args, QueryID: queryID}
 	var out protocol.QueryResult
 	path := "/api/connections/" + url.PathEscape(id) + "/query"
-	if err := r.do(http.MethodPost, path, &req, &out); err != nil {
+	if err := r.do(ctx, http.MethodPost, path, &req, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
+}
+
+// CancelQuery 走 POST /api/queries/{query_id}/cancel。
+// 204 → 已命中并触发取消；404 QUERY_NOT_FOUND → 查询已结束，返回 (false, nil)
+// （best-effort 语义，见 behavior.md：取消不保证一定中断驱动）。
+func (r *Remote) CancelQuery(ctx context.Context, queryID string) (bool, error) {
+	path := "/api/queries/" + url.PathEscape(queryID) + "/cancel"
+	if err := r.do(ctx, http.MethodPost, path, nil, nil); err != nil {
+		var pe *protocol.PolyDBError
+		if errors.As(err, &pe) && pe.Code == protocol.ErrQueryNotFound {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // BrowseRows 远程走 POST rows/query（msgpack 数据面，spec browseTableRows）。
 func (r *Remote) BrowseRows(ctx context.Context, id, schema, table string, req *protocol.TableRowsRequest) (*protocol.TableRowsResult, error) {
 	var out protocol.TableRowsResult
 	path := "/api/connections/" + url.PathEscape(id) + "/schemas/" + url.PathEscape(schema) + "/tables/" + url.PathEscape(table) + "/rows/query"
-	if err := r.do(http.MethodPost, path, req, &out); err != nil {
+	if err := r.do(ctx, http.MethodPost, path, req, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -261,7 +289,7 @@ func (r *Remote) BrowseRows(ctx context.Context, id, schema, table string, req *
 func (r *Remote) BrowseRowsCount(ctx context.Context, id, schema, table string, req *protocol.TableRowsRequest) (uint64, error) {
 	var out protocol.TableCountResult
 	path := "/api/connections/" + url.PathEscape(id) + "/schemas/" + url.PathEscape(schema) + "/tables/" + url.PathEscape(table) + "/rows/count"
-	if err := r.do(http.MethodPost, path, req, &out); err != nil {
+	if err := r.do(ctx, http.MethodPost, path, req, &out); err != nil {
 		return 0, err
 	}
 	return out.Count, nil
@@ -272,7 +300,7 @@ func (r *Remote) BrowseRowsCount(ctx context.Context, id, schema, table string, 
 func (r *Remote) BeginTransaction(ctx context.Context, id string) (*protocol.TransactionInfo, error) {
 	var out protocol.TransactionInfo
 	path := "/api/connections/" + url.PathEscape(id) + "/transactions"
-	if err := r.do(http.MethodPost, path, &protocol.BeginTransactionRequest{ConnectionID: id}, &out); err != nil {
+	if err := r.do(ctx, http.MethodPost, path, &protocol.BeginTransactionRequest{ConnectionID: id}, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -282,16 +310,18 @@ func (r *Remote) ExecuteInTx(ctx context.Context, txID, sql string, args ...prot
 	req := protocol.QueryRequest{SQL: sql, Params: args}
 	var out protocol.QueryResult
 	path := "/api/transactions/" + url.PathEscape(txID) + "/execute"
-	if err := r.do(http.MethodPost, path, &req, &out); err != nil {
+	if err := r.do(ctx, http.MethodPost, path, &req, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
+// CommitTransaction / RollbackTransaction 刻意不透传调用方 ctx：
+// finalize 必须尽力送达服务端，否则事务会一直挂在服务端（M25 记录的坑）。
 func (r *Remote) CommitTransaction(ctx context.Context, txID string) (*protocol.TransactionInfo, error) {
 	var out protocol.TransactionInfo
 	path := "/api/transactions/" + url.PathEscape(txID) + "/commit"
-	if err := r.do(http.MethodPost, path, nil, &out); err != nil {
+	if err := r.do(context.Background(), http.MethodPost, path, nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -300,7 +330,7 @@ func (r *Remote) CommitTransaction(ctx context.Context, txID string) (*protocol.
 func (r *Remote) RollbackTransaction(ctx context.Context, txID string) (*protocol.TransactionInfo, error) {
 	var out protocol.TransactionInfo
 	path := "/api/transactions/" + url.PathEscape(txID) + "/rollback"
-	if err := r.do(http.MethodPost, path, nil, &out); err != nil {
+	if err := r.do(context.Background(), http.MethodPost, path, nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -310,13 +340,13 @@ func (r *Remote) RollbackTransaction(ctx context.Context, txID string) (*protoco
 
 func (r *Remote) SelectDB(ctx context.Context, id string, index int) error {
 	req := protocol.RedisSelectDbRequest{Index: index}
-	return r.do(http.MethodPost, "/api/connections/"+url.PathEscape(id)+"/kv/select", &req, nil)
+	return r.do(ctx, http.MethodPost, "/api/connections/"+url.PathEscape(id)+"/kv/select", &req, nil)
 }
 
 func (r *Remote) ScanKeys(ctx context.Context, id string, cursor uint64, pattern string, count int) (*protocol.RedisScanPage, error) {
 	req := protocol.RedisScanRequest{Cursor: cursor, Pattern: pattern, Count: count}
 	var out protocol.RedisScanPage
-	if err := r.do(http.MethodPost, "/api/connections/"+url.PathEscape(id)+"/kv/scan", &req, &out); err != nil {
+	if err := r.do(ctx, http.MethodPost, "/api/connections/"+url.PathEscape(id)+"/kv/scan", &req, &out); err != nil {
 		return nil, err
 	}
 	if out.Keys == nil {
@@ -327,19 +357,19 @@ func (r *Remote) ScanKeys(ctx context.Context, id string, cursor uint64, pattern
 
 func (r *Remote) GetValue(ctx context.Context, id, key string) (protocol.RedisValue, error) {
 	var out protocol.RedisValue
-	err := r.do(http.MethodGet, "/api/connections/"+url.PathEscape(id)+"/kv/keys/"+url.PathEscape(key), nil, &out)
+	err := r.do(ctx, http.MethodGet, "/api/connections/"+url.PathEscape(id)+"/kv/keys/"+url.PathEscape(key), nil, &out)
 	return out, err
 }
 
 func (r *Remote) SetValue(ctx context.Context, id, key string, value protocol.RedisValue) error {
 	req := protocol.RedisSetRequest{Key: key, Value: value}
-	return r.do(http.MethodPut, "/api/connections/"+url.PathEscape(id)+"/kv/keys/"+url.PathEscape(key), &req, nil)
+	return r.do(ctx, http.MethodPut, "/api/connections/"+url.PathEscape(id)+"/kv/keys/"+url.PathEscape(key), &req, nil)
 }
 
 func (r *Remote) ExecCommand(ctx context.Context, id string, args []string) (protocol.RedisReply, error) {
 	req := protocol.RedisExecCommandRequest{Args: args}
 	var out protocol.RedisReply
-	if err := r.do(http.MethodPost, "/api/connections/"+url.PathEscape(id)+"/kv/exec", &req, &out); err != nil {
+	if err := r.do(ctx, http.MethodPost, "/api/connections/"+url.PathEscape(id)+"/kv/exec", &req, &out); err != nil {
 		return protocol.RedisReply{}, err
 	}
 	return out, nil

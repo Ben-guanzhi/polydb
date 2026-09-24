@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/google/uuid"
 	"github.com/polydb/polydb/pkg/changes"
 	"github.com/polydb/polydb/pkg/protocol"
 	"github.com/polydb/polydb/pkg/transport"
@@ -88,6 +90,13 @@ type model struct {
 	queryResult *protocol.QueryResult
 	queryErr    error
 	querySQL    string
+
+	// 在途查询取消（T4.1）：cancel 非空表示有查询在跑，queryID 供远程 cancel 端点关联，
+	// queryCancelled 记录「本轮结果是被 F8 取消的」——驱动取消错误会被包成
+	// POLYDB_ERR_QUERY_FAILED 且协议结构不带 error 链，只能靠自身状态判定。
+	queryCancel    context.CancelFunc
+	queryID        string
+	queryCancelled bool
 
 	// 查询历史抽屉（T2.6）：F4 开合，消费本地 JSONL。
 	histOpen bool
@@ -341,13 +350,22 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case queryMsg:
 		m.busy = ""
+		cancelled := m.queryCancelled
+		if c := m.queryCancel; c != nil {
+			c() // 结束即释放 ctx，避免泄漏
+		}
+		m.queryCancel, m.queryID, m.queryCancelled = nil, "", false
 		if sql := m.querySQL; sql != "" {
 			_ = appendHistory(histEntry{Time: time.Now().Unix(), Conn: m.selectedID, SQL: sql})
 		}
 		if msg.err != nil {
 			m.queryErr = msg.err
 			m.queryResult = nil
-			m.status = "查询失败: " + msg.err.Error()
+			if cancelled {
+				m.status = "查询已取消"
+			} else {
+				m.status = "查询失败: " + msg.err.Error()
+			}
 		} else {
 			m.queryResult = msg.res
 			m.queryErr = nil
@@ -355,6 +373,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.resRow, m.resCol, m.cellFull = 0, 0, false
 		}
 		m.view = viewQuery
+		return m, nil
+	case cancelAckMsg:
+		if msg.err != nil {
+			m.status = "取消请求失败: " + msg.err.Error()
+		}
 		return m, nil
 	case browseMsg:
 		m.busy = ""
@@ -498,6 +521,10 @@ func statusLine(st *protocol.ConnectionStatus) string {
 }
 
 func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// F8 取消在途查询：必须在 busy 门禁之前处理，否则执行期间键全部被吞掉。
+	if msg.Type == tea.KeyF8 {
+		return m.cancelInflight()
+	}
 	if m.busy != "" {
 		if msg.Type == tea.KeyCtrlC {
 			return m, tea.Quit
@@ -1574,9 +1601,30 @@ func (m *model) runQuery() (tea.Model, tea.Cmd) {
 		m.status = "SQL 为空"
 		return m, nil
 	}
+	qid := uuid.NewString()
+	ctx, cancel := context.WithCancel(context.Background())
 	m.querySQL = sql
-	m.busy = "执行中 …"
-	return m, queryCmd(m.app, m.selectedID, sql)
+	m.queryID = qid
+	m.queryCancel = cancel
+	m.queryCancelled = false
+	m.busy = "执行中 …（F8 取消）"
+	return m, queryCmd(ctx, m.app, qid, m.selectedID, sql)
+}
+
+// cancelInflight 中断在途查询：本地取消 ctx，远程再打 cancel 端点让服务端中断执行。
+// 两端都是 best-effort（behavior.md §2.2：驱动未必能中途打断已开跑的 SQL）。
+func (m *model) cancelInflight() (tea.Model, tea.Cmd) {
+	if m.queryCancel == nil {
+		m.status = "没有在途查询"
+		return m, nil
+	}
+	qid, cancel := m.queryID, m.queryCancel
+	m.queryCancel = nil
+	m.queryID = ""
+	m.queryCancelled = true
+	cancel()
+	m.status = "已请求取消查询 …"
+	return m, cancelQueryCmd(m.app, qid)
 }
 
 // ─── Redis KV 视图 ──────────────────────────────────────────
@@ -1958,7 +2006,7 @@ func (m *model) footer() string {
 		if len(m.acCandidates) > 0 {
 			return "↑/↓ 选择 · Enter 接受 · Esc 关闭 · F5 执行"
 		}
-		return "Tab 补全表/列 · F5 / Ctrl+E 执行 · F4 历史 · F6 导航结果 · Esc 返回"
+		return "Tab 补全表/列 · F5 / Ctrl+E 执行 · F8 取消 · F4 历史 · F6 导航结果 · Esc 返回"
 	case viewKV:
 		if m.kvFilterOn {
 			return "输入模式 · Enter 应用 · Esc 取消"

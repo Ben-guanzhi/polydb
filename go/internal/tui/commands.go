@@ -53,6 +53,13 @@ type (
 		err     error
 		elapsed time.Duration
 	}
+	// cancelAckMsg 承载取消请求的结果。hit=false 对 Local 是正常的
+	// （进程内没有服务端 registry，取消靠 ctx），故只在 err 非空时报错。
+	cancelAckMsg struct {
+		queryID string
+		hit     bool
+		err     error
+	}
 	browseMsg struct {
 		schema string
 		table  string
@@ -234,11 +241,21 @@ func columnsCmd(a transport.Client, id, schema, table string) tea.Cmd {
 	}
 }
 
-func queryCmd(a transport.Client, id, sql string) tea.Cmd {
+// queryCmd 执行一条 SQL。ctx 由调用方持有并可在 F8 时取消；queryID 是客户端
+// 预分配的 UUID，远程模式下服务端据此把查询登记进 in-flight registry 供取消。
+func queryCmd(ctx context.Context, a transport.Client, queryID, id, sql string) tea.Cmd {
 	return func() tea.Msg {
 		start := time.Now()
-		res, err := a.Execute(context.Background(), id, sql)
+		res, err := a.ExecuteQuery(ctx, queryID, id, sql)
 		return queryMsg{res: res, err: err, elapsed: time.Since(start)}
+	}
+}
+
+// cancelQueryCmd 通知服务端取消；必须用 Background（调用方 ctx 已被 cancel）。
+func cancelQueryCmd(a transport.Client, queryID string) tea.Cmd {
+	return func() tea.Msg {
+		hit, err := a.CancelQuery(context.Background(), queryID)
+		return cancelAckMsg{queryID: queryID, hit: hit, err: err}
 	}
 }
 

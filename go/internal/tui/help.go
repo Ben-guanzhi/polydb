@@ -17,6 +17,7 @@ type helpSection struct {
 func globalHelp() []helpEntry {
 	return []helpEntry{
 		{"F1", "打开 / 关闭本帮助面板"},
+		{"F8", "取消在途查询（任意视图，执行期间有效）"},
 		{"Ctrl+C", "退出"},
 		{"Esc", "返回上一级 / 关闭当前面板"},
 	}
@@ -63,6 +64,7 @@ func (m *model) viewHelp() []helpEntry {
 		return []helpEntry{
 			{"Tab", "补全表 / 列"},
 			{"F5 · Ctrl+E", "执行查询"},
+			{"F8", "取消在途查询"},
 			{"F4", "查询历史抽屉"},
 			{"F6", "导航结果"},
 			{"Ctrl+←/→", "词级左右移动"},

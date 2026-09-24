@@ -43,6 +43,15 @@ type Client interface {
 	// Execute 执行一条 SQL。args 为空时不携带参数。
 	Execute(ctx context.Context, id, sql string, args ...protocol.Value) (*protocol.QueryResult, error)
 
+	// ExecuteQuery 同 Execute，但带上客户端预分配的 queryID（须是 UUID），
+	// 使执行期间的 CancelQuery 能在服务端 in-flight registry 命中。
+	// queryID 为空表示不注册（不可取消）。Local 忽略 queryID，取消只靠 ctx。
+	ExecuteQuery(ctx context.Context, queryID, id, sql string, args ...protocol.Value) (*protocol.QueryResult, error)
+
+	// CancelQuery 请求取消在途查询，返回是否命中（best-effort，behavior.md §2.2：
+	// 取消不保证一定能中断底层驱动）。Local 无服务端 registry，恒返回 (false, nil)。
+	CancelQuery(ctx context.Context, queryID string) (bool, error)
+
 	// BrowseRows 按表浏览行数据（服务端分页；M11 数据面，只读操作）。
 	BrowseRows(ctx context.Context, id, schema, table string, req *protocol.TableRowsRequest) (*protocol.TableRowsResult, error)
 

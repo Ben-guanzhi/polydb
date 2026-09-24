@@ -81,6 +81,16 @@ func (l *Local) Execute(ctx context.Context, id, sql string, args ...protocol.Va
 	return l.app.Execute(ctx, id, sql, args...)
 }
 
+// ExecuteQuery 进程内没有服务端 in-flight registry，queryID 无意义（取消靠 ctx）。
+func (l *Local) ExecuteQuery(ctx context.Context, _, id, sql string, args ...protocol.Value) (*protocol.QueryResult, error) {
+	return l.app.Execute(ctx, id, sql, args...)
+}
+
+// CancelQuery 进程内取消由调用方 cancel 自己的 ctx 完成，此处恒返回未命中。
+func (l *Local) CancelQuery(ctx context.Context, queryID string) (bool, error) {
+	return false, nil
+}
+
 // BrowseRows 进程内委托 app-core（零序列化）。
 func (l *Local) BrowseRows(ctx context.Context, id, schema, table string, req *protocol.TableRowsRequest) (*protocol.TableRowsResult, error) {
 	return l.app.BrowseRows(ctx, id, schema, table, req)

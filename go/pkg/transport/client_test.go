@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vmihailenco/msgpack/v5"
 
@@ -275,4 +276,104 @@ func TestRemoteKV(t *testing.T) {
 	// SetValue 路径（未 stub 到 mux 默认 404，验证方法/路径分发无 panic 即可跳过；
 	// 这里只断言编译期签名存在）。
 	_ = gotSet
+}
+
+// TestRemoteQueryCancel 覆盖 T4.1 的两件事：
+//  1. ExecuteQuery 把客户端预分配的 query_id 透传给服务端（否则 cancel 无从关联）；
+//  2. CancelQuery 命中 204 → (true,nil)，未命中 404 → (false,nil) 且不当作错误；
+//  3. ctx 真正抵达 HTTP 请求：客户端取消后在途请求立即中断，服务端也观测到断开。
+func TestRemoteQueryCancel(t *testing.T) {
+	var gotQueryID string
+	hang := make(chan struct{})
+	released := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/connections/c1/query", func(w http.ResponseWriter, r *http.Request) {
+		var req protocol.QueryRequest
+		if err := msgpack.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("query body: %v", err)
+		}
+		gotQueryID = req.QueryID
+		close(hang)
+		select {
+		case <-r.Context().Done(): // 客户端取消后服务端应观测到断开
+			close(released)
+		case <-time.After(5 * time.Second):
+			t.Errorf("请求未被取消（ctx 未透传到 http.Request）")
+		}
+	})
+	mux.HandleFunc("POST /api/queries/{query_id}/cancel", func(w http.ResponseWriter, r *http.Request) {
+		if r.PathValue("query_id") == gotQueryID {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"code":"POLYDB_ERR_QUERY_NOT_FOUND","message":"gone","retryable":false}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	c := NewRemote(srv.URL)
+
+	qid := "11111111-2222-3333-4444-555555555555"
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.ExecuteQuery(ctx, qid, "c1", "SELECT 1")
+		done <- err
+	}()
+	<-hang // 服务端已收到请求，此刻查询在途
+
+	hit, err := c.CancelQuery(context.Background(), qid)
+	if err != nil || !hit {
+		t.Fatalf("cancel hit = %v err = %v, want true/nil", hit, err)
+	}
+	if gotQueryID != qid {
+		t.Fatalf("服务端收到 query_id = %q, want %q", gotQueryID, qid)
+	}
+
+	cancel() // 中断在途 HTTP 请求
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("取消后错误 = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("取消后 ExecuteQuery 未返回")
+	}
+	<-released
+
+	// 未命中（查询已结束）：404 转成 (false, nil)，best-effort 语义。
+	if hit, err := c.CancelQuery(context.Background(), "99999999-2222-3333-4444-555555555555"); err != nil || hit {
+		t.Fatalf("cancel miss = %v/%v, want false/nil", hit, err)
+	}
+}
+
+// TestLocalCancelIsCtxOnly：Local 没有服务端 registry，CancelQuery 恒 (false,nil)，
+// 取消完全靠 ctx。
+func TestLocalCancelNoop(t *testing.T) {
+	fx := newFixture(t)
+	c := NewLocal(fx.app)
+	info, err := c.CreateConnection(&protocol.CreateConnectionRequest{
+		Name: "l", Kind: protocol.DatabaseKindSQLite, Database: ":memory:",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	hit, err := c.CancelQuery(context.Background(), "whatever")
+	if err != nil || hit {
+		t.Fatalf("local cancel = %v/%v, want false/nil", hit, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	// 懒连接与已建连两条路径都必须在取消的 ctx 下立即失败（不挂住）。
+	// app-core 会把它包成 PolyDBError（协议结构不带 error 链），故只断言「报错」。
+	if _, err := c.ExecuteQuery(ctx, "x", info.ID, "SELECT 1"); err == nil {
+		t.Fatal("已取消 ctx 下执行未报错（懒连接路径）")
+	}
+	if err := c.Connect(context.Background(), info.ID); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if _, err := c.ExecuteQuery(ctx, "x", info.ID, "SELECT 1"); err == nil {
+		t.Fatal("已取消 ctx 下执行未报错（已建连路径）")
+	}
 }

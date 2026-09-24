@@ -9,6 +9,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/google/uuid"
 	"github.com/polydb/polydb/pkg/appcore"
 	"github.com/polydb/polydb/pkg/keyring"
 	"github.com/polydb/polydb/pkg/protocol"
@@ -1145,6 +1146,68 @@ func TestModelQueryHistory(t *testing.T) {
 	m = drive(t, m, cmd)
 	if got := len(md(m).hist); got != 1 {
 		t.Fatalf("dedup failed: hist=%d, want 1", got)
+	}
+}
+
+// TestModelQueryCancel 覆盖 T4.1：F8 取消在途查询。
+// 远程侧（cancel 端点 + query_id 透传 + ctx 中断 HTTP）由 pkg/transport 测试覆盖。
+func TestModelQueryCancel(t *testing.T) {
+	t.Setenv("POLYDB_DATA_DIR", t.TempDir())
+	app, _ := setupApp(t)
+	var m tea.Model = New(transport.NewLocal(app))
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = drive(t, m, m.Init())
+	var cmd tea.Cmd
+	m, cmd = m.Update(key(tea.KeyEnter))
+	m = drive(t, m, cmd)
+	m, cmd = m.Update(key(tea.KeyEnter))
+	m = drive(t, m, cmd)
+	m, _ = m.Update(runeKey('q'))
+	if md(m).view != viewQuery {
+		t.Fatalf("setup: view=%v", md(m).view)
+	}
+
+	// 空闲时按 F8：只提示，不发命令
+	m, cmd = m.Update(key(tea.KeyF8))
+	if cmd != nil || !strings.Contains(md(m).status, "没有在途查询") {
+		t.Fatalf("空闲 F8: cmd!=nil=%v status=%q", cmd != nil, md(m).status)
+	}
+
+	// 发起查询：登记 UUID 与 cancel，busy 文案提示取消键
+	m, cmd = m.Update(key(tea.KeyF5))
+	mm := md(m)
+	if mm.queryCancel == nil {
+		t.Fatal("F5 应登记可取消上下文")
+	}
+	if _, err := uuid.Parse(mm.queryID); err != nil {
+		t.Fatalf("queryID 必须是 UUID（远程 cancel 端点按 UUID 校验）：%q", mm.queryID)
+	}
+	if !strings.Contains(mm.busy, "F8") {
+		t.Fatalf("busy 应提示取消键：%q", mm.busy)
+	}
+
+	// busy 期间 F8 必须仍然生效（旧实现把所有键吞掉，取消无从下手）
+	m, cmd = m.Update(key(tea.KeyF8))
+	mm = md(m)
+	if mm.queryCancel != nil || mm.queryID != "" {
+		t.Fatal("F8 后应清空在途登记")
+	}
+	if !mm.queryCancelled {
+		t.Fatal("F8 应标记本轮结果来自取消")
+	}
+	m = drive(t, m, cmd) // cancelQueryCmd：Local 恒 no-op，不应报错
+	if strings.Contains(md(m).status, "取消请求失败") {
+		t.Fatalf("Local 取消不应报错：%q", md(m).status)
+	}
+
+	// 执行侧带着「被取消」的错误回来：状态区分于普通失败，且标记复位
+	m, _ = m.Update(queryMsg{err: &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: "context canceled"}})
+	mm = md(m)
+	if mm.busy != "" || mm.status != "查询已取消" {
+		t.Fatalf("取消收尾: busy=%q status=%q", mm.busy, mm.status)
+	}
+	if mm.queryErr == nil || mm.queryCancelled {
+		t.Fatalf("取消收尾应保留错误并复位标记: err=%v cancelled=%v", mm.queryErr, mm.queryCancelled)
 	}
 }
 
