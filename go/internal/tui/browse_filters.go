@@ -11,7 +11,7 @@ import (
 // browse 过滤栏：把终端草稿逐条构造为 protocol.FilterCondition。
 // 独立实现，语义对齐后端 WHERE 构造，不移植 TableProGo 任何代码。
 
-// browseOps 数据浏览可用的 13 个操作符（与 spec 枚举一致，按交互常用度排序）。
+// browseOps 数据浏览可用的 18 个操作符（与 spec 枚举一致，按交互常用度排序）。
 var browseOps = []protocol.FilterOperator{
 	protocol.FilterOpEq,
 	protocol.FilterOpNe,
@@ -21,11 +21,16 @@ var browseOps = []protocol.FilterOperator{
 	protocol.FilterOpLe,
 	protocol.FilterOpLike,
 	protocol.FilterOpNotLike,
+	protocol.FilterOpContains,
+	protocol.FilterOpStartsWith,
+	protocol.FilterOpEndsWith,
+	protocol.FilterOpRegex,
 	protocol.FilterOpIn,
 	protocol.FilterOpNotIn,
 	protocol.FilterOpBetween,
 	protocol.FilterOpNull,
 	protocol.FilterOpNotNull,
+	protocol.FilterOpEmpty,
 }
 
 // opLabel 操作符的终端友好标签。
@@ -47,6 +52,14 @@ func opLabel(op protocol.FilterOperator) string {
 		return "like"
 	case protocol.FilterOpNotLike:
 		return "not like"
+	case protocol.FilterOpContains:
+		return "contains"
+	case protocol.FilterOpStartsWith:
+		return "starts with"
+	case protocol.FilterOpEndsWith:
+		return "ends with"
+	case protocol.FilterOpRegex:
+		return "regex"
 	case protocol.FilterOpIn:
 		return "in"
 	case protocol.FilterOpNotIn:
@@ -57,15 +70,17 @@ func opLabel(op protocol.FilterOperator) string {
 		return "is null"
 	case protocol.FilterOpNotNull:
 		return "is not null"
+	case protocol.FilterOpEmpty:
+		return "is empty"
 	}
 	return string(op)
 }
 
-// opNeedsValues 该操作符需要几个值字段：0（is null 类）、1、2（between）。
+// opNeedsValues 该操作符需要几个值字段：0（is null / is empty 类）、1、2（between）。
 // in/not_in 虽逻辑上多值，但终端里用单字段逗号分隔输入，计为 1。
 func opNeedsValues(op protocol.FilterOperator) int {
 	switch op {
-	case protocol.FilterOpNull, protocol.FilterOpNotNull:
+	case protocol.FilterOpNull, protocol.FilterOpNotNull, protocol.FilterOpEmpty:
 		return 0
 	case protocol.FilterOpBetween:
 		return 2
@@ -74,12 +89,75 @@ func opNeedsValues(op protocol.FilterOperator) int {
 	}
 }
 
+// opIsTextMatch 文本匹配类 op：唯一接受大小写三态的一族（behavior.md §13.5）。
+func opIsTextMatch(op protocol.FilterOperator) bool {
+	switch op {
+	case protocol.FilterOpLike, protocol.FilterOpNotLike, protocol.FilterOpContains,
+		protocol.FilterOpStartsWith, protocol.FilterOpEndsWith, protocol.FilterOpRegex:
+		return true
+	}
+	return false
+}
+
+// opSupported 当前连接方言是否支持该 op（§13.6：MSSQL 无原生正则）。
+func opSupported(kind protocol.DatabaseKind, op protocol.FilterOperator) bool {
+	return !(op == protocol.FilterOpRegex && kind == protocol.DatabaseKindMSSQL)
+}
+
+// opUnsupportedHint 不支持时的提示文案；可用则空串。
+func opUnsupportedHint(kind protocol.DatabaseKind, op protocol.FilterOperator) string {
+	if opSupported(kind, op) {
+		return ""
+	}
+	if op == protocol.FilterOpRegex {
+		return "该数据库无原生正则，后端会返回 POLYDB_ERR_NOT_SUPPORTED"
+	}
+	return "该数据库不支持此操作符"
+}
+
+// filterCase 大小写三态（默认 = 沿用方言排序规则，线格式省略字段）。
+type filterCase int
+
+const (
+	caseDefault filterCase = iota
+	caseSensitive
+	caseInsensitive
+)
+
+func (c filterCase) label() string {
+	switch c {
+	case caseSensitive:
+		return "区分"
+	case caseInsensitive:
+		return "忽略"
+	}
+	return "默认"
+}
+
+func (c filterCase) next() filterCase {
+	return (c + 1) % 3
+}
+
+// toWire 三态→可选布尔；默认返回 nil 让后端沿用方言排序规则。
+func (c filterCase) toWire() *bool {
+	switch c {
+	case caseSensitive:
+		t := true
+		return &t
+	case caseInsensitive:
+		f := false
+		return &f
+	}
+	return nil
+}
+
 // filterDraft 一条可编辑的过滤条件草稿（Raw/Raw2 为用户原文）。
 type filterDraft struct {
 	Column string
 	Op     protocol.FilterOperator
 	Raw    string
 	Raw2   string
+	Case   filterCase
 }
 
 // parseScalarValue 按最可能类型解析标量：bool 仅认字面 true/false，
@@ -103,8 +181,12 @@ func parseScalarValue(s string) protocol.Value {
 }
 
 // draftToCondition 构造 FilterCondition；ok=false 表示缺必要值（值字段为空）。
+// 大小写三态只对文本匹配类 op 下发，默认态留 nil 以沿用方言排序规则。
 func draftToCondition(d filterDraft) (protocol.FilterCondition, bool) {
 	c := protocol.FilterCondition{Column: d.Column, Op: d.Op}
+	if opIsTextMatch(d.Op) {
+		c.CaseSensitive = d.Case.toWire()
+	}
 	switch opNeedsValues(d.Op) {
 	case 0:
 		return c, true
@@ -135,22 +217,36 @@ func draftToCondition(d filterDraft) (protocol.FilterCondition, bool) {
 
 // draftSummary 渲染一条草稿的可读摘要（用于过滤栏展示）。
 func draftSummary(d filterDraft) string {
+	var s string
 	switch opNeedsValues(d.Op) {
 	case 0:
-		return d.Column + " " + opLabel(d.Op)
+		s = d.Column + " " + opLabel(d.Op)
 	case 2:
-		return d.Column + " " + opLabel(d.Op) + " " + d.Raw + " .. " + d.Raw2
+		s = d.Column + " " + opLabel(d.Op) + " " + d.Raw + " .. " + d.Raw2
 	default:
 		if d.Op == protocol.FilterOpIn || d.Op == protocol.FilterOpNotIn {
-			return d.Column + " " + opLabel(d.Op) + " (" + d.Raw + ")"
+			s = d.Column + " " + opLabel(d.Op) + " (" + d.Raw + ")"
+		} else {
+			s = d.Column + " " + opLabel(d.Op) + " " + d.Raw
 		}
-		return d.Column + " " + opLabel(d.Op) + " " + d.Raw
 	}
+	if opIsTextMatch(d.Op) && d.Case != caseDefault {
+		s += " [大小写" + d.Case.label() + "]"
+	}
+	return s
 }
 
 // conditionSummary 渲染一条已提交条件的可读摘要（复用草稿摘要）。
 func conditionSummary(c protocol.FilterCondition) string {
 	d := filterDraft{Column: c.Column, Op: c.Op}
+	switch {
+	case c.CaseSensitive == nil:
+		d.Case = caseDefault
+	case *c.CaseSensitive:
+		d.Case = caseSensitive
+	default:
+		d.Case = caseInsensitive
+	}
 	switch opNeedsValues(c.Op) {
 	case 0:
 	case 2:
@@ -196,8 +292,15 @@ func (m *model) browseFilterBar() string {
 		if m.brDraft.Op == protocol.FilterOpBetween {
 			parts = append(parts, "值2 "+labeled(3, "["+m.brDraft.Raw2+"]"))
 		}
+		if opIsTextMatch(m.brDraft.Op) {
+			parts = append(parts, "大小写 "+labeled(4, "["+m.brDraft.Case.label()+"]"))
+		}
+		hint := ""
+		if !opSupported(m.brKind, m.brDraft.Op) {
+			hint = "\n  ⚠ " + opUnsupportedHint(m.brKind, m.brDraft.Op)
+		}
 		return "过滤: " + strings.Join(parts, " · ") +
-			"\n  Tab 切字段 · ←/→ 调整列或操作符 · ↑/↓ 换列 · Enter 应用 · Esc 取消"
+			"\n  Tab 切字段 · ←/→ 调整列/操作符/大小写 · ↑/↓ 换列 · Enter 应用 · Esc 取消" + hint
 	}
 	var seg []string
 	if len(m.brConds) > 0 {

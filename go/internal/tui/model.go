@@ -141,7 +141,7 @@ type model struct {
 	brSort    []protocol.OrderClause
 	brDraft   filterDraft
 	brVal     textinput.Model // 过滤值输入框（草稿的当前值字段）
-	brField   int             // 过滤编辑聚焦字段：0 列 / 1 op / 2 值 / 3 第二值
+	brField   int             // 过滤编辑聚焦字段：0 列 / 1 op / 2 值 / 3 第二值 / 4 大小写
 	brFocus   int             // 0=网格，1=过滤栏编辑
 	brEditing bool            // 正在过滤栏编辑草稿（/ 进入）
 
@@ -1317,18 +1317,35 @@ func (m *model) enterFilterEdit() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// browseFilterFieldCount 当前草稿的可编辑字段数（between 多一个第二值）。
-func (m *model) browseFilterFieldCount() int {
+// browseFilterFields 当前草稿可 Tab 巡览的字段下标：
+// 0 列 / 1 op / 2 值 / 3 第二值（仅 between）/ 4 大小写（仅文本匹配类 op）。
+func (m *model) browseFilterFields() []int {
+	fs := []int{0, 1, 2}
 	if m.brDraft.Op == protocol.FilterOpBetween {
-		return 4 // 列 / op / 值 / 第二值
+		fs = append(fs, 3)
 	}
-	return 3 // 列 / op / 值
+	if opIsTextMatch(m.brDraft.Op) {
+		fs = append(fs, 4)
+	}
+	return fs
 }
 
-// browseFieldFocus 切换过滤草稿聚焦字段，并在值字段间同步 textinput 内容。
-func (m *model) browseFieldFocus(next int) {
-	n := m.browseFilterFieldCount()
-	next = ((next % n) + n) % n
+// browseFilterFieldCount 当前草稿的可编辑字段数。
+func (m *model) browseFilterFieldCount() int {
+	return len(m.browseFilterFields())
+}
+
+// browseFieldFocus 在可用字段列表里前后巡览，并在值字段间同步 textinput 内容。
+func (m *model) browseFieldFocus(delta int) {
+	fs := m.browseFilterFields()
+	pos := 0
+	for i, f := range fs {
+		if f == m.brField {
+			pos = i
+			break
+		}
+	}
+	next := fs[((pos+delta)%len(fs)+len(fs))%len(fs)]
 	switch m.brField {
 	case 2:
 		m.brDraft.Raw = m.brVal.Value()
@@ -1363,10 +1380,10 @@ func (m *model) browseFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.brVal.Blur()
 		return m, nil
 	case tea.KeyTab:
-		m.browseFieldFocus(m.brField + 1)
+		m.browseFieldFocus(1)
 		return m, nil
 	case tea.KeyShiftTab:
-		m.browseFieldFocus(m.brField - 1)
+		m.browseFieldFocus(-1)
 		return m, nil
 	case tea.KeyEnter:
 		m.brDraft.Raw = m.brVal.Value()
@@ -1378,26 +1395,32 @@ func (m *model) browseFilterKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cycleBrowseColumn(1)
 		return m, nil
 	case tea.KeyLeft:
-		if m.brField == 0 {
+		switch m.brField {
+		case 0:
 			m.cycleBrowseColumn(-1)
 			return m, nil
-		}
-		if m.brField == 1 {
+		case 1:
 			m.cycleOp(-1)
+			return m, nil
+		case 4:
+			m.cycleFilterCase(-1)
 			return m, nil
 		}
 	case tea.KeyRight:
-		if m.brField == 0 {
+		switch m.brField {
+		case 0:
 			m.cycleBrowseColumn(1)
 			return m, nil
-		}
-		if m.brField == 1 {
+		case 1:
 			m.cycleOp(1)
+			return m, nil
+		case 4:
+			m.cycleFilterCase(1)
 			return m, nil
 		}
 	}
 	// 值字段（2/3）把其余键交给 textinput。
-	if m.brField >= 2 {
+	if m.brField == 2 || m.brField == 3 {
 		dst := &m.brVal
 		if m.brField == 3 {
 			// 第二值暂存于 Raw2，输入框内容映射到 Raw2。
@@ -1427,7 +1450,7 @@ func (m *model) cycleBrowseColumn(dir int) {
 	m.brDraft.Column = cols[cur].Name
 }
 
-// cycleOp 在 13 个操作符间循环。
+// cycleOp 在该方言可用的操作符间循环（跳过不支持的组合，如 MSSQL 的 regex）。
 func (m *model) cycleOp(dir int) {
 	cur := 0
 	for i, op := range browseOps {
@@ -1436,13 +1459,34 @@ func (m *model) cycleOp(dir int) {
 			break
 		}
 	}
-	cur = (cur + dir + len(browseOps)) % len(browseOps)
-	m.brDraft.Op = browseOps[cur]
+	n := len(browseOps)
+	for step := 1; step <= n; step++ {
+		cand := browseOps[((cur+dir*step)%n+n)%n]
+		if opSupported(m.brKind, cand) {
+			m.brDraft.Op = cand
+			return
+		}
+	}
+}
+
+// cycleFilterCase 在大小写三态间循环（仅文本匹配类 op 有此字段）。
+func (m *model) cycleFilterCase(dir int) {
+	if !opIsTextMatch(m.brDraft.Op) {
+		return
+	}
+	if dir < 0 {
+		dir = 2 // 三态里 -1 ≡ +2
+	}
+	m.brDraft.Case = filterCase(((int(m.brDraft.Case)+dir)%3 + 3) % 3)
 }
 
 // applyFilterDraft 把草稿落地为条件、回到首页重查；缺值则留在编辑态提示。
 func (m *model) applyFilterDraft() (tea.Model, tea.Cmd) {
 	m.brDraft.Raw = m.brVal.Value()
+	if !opSupported(m.brKind, m.brDraft.Op) {
+		m.status = opUnsupportedHint(m.brKind, m.brDraft.Op)
+		return m, nil
+	}
 	c, ok := draftToCondition(m.brDraft)
 	if !ok {
 		m.status = "过滤条件缺少值"
