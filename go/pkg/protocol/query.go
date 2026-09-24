@@ -104,7 +104,35 @@ const (
 	FilterOpBetween FilterOperator = "between"
 	FilterOpNull    FilterOperator = "null"
 	FilterOpNotNull FilterOperator = "not_null"
+	// D1（behavior.md §13.3）：包裹类 op 与正则
+	FilterOpContains   FilterOperator = "contains"
+	FilterOpStartsWith FilterOperator = "starts_with"
+	FilterOpEndsWith   FilterOperator = "ends_with"
+	FilterOpEmpty      FilterOperator = "empty"
+	FilterOpRegex      FilterOperator = "regex"
 )
+
+// IsTextMatch 报告该 op 是否受 case_sensitive 影响（behavior.md §13.5）。
+func (o FilterOperator) IsTextMatch() bool {
+	switch o {
+	case FilterOpLike, FilterOpNotLike, FilterOpContains, FilterOpStartsWith, FilterOpEndsWith, FilterOpRegex:
+		return true
+	default:
+		return false
+	}
+}
+
+// NeedsValue 报告该 op 是否要求非空 value。
+func (o FilterOperator) NeedsValue() bool {
+	switch o {
+	case FilterOpEq, FilterOpNe, FilterOpLt, FilterOpLe, FilterOpGt, FilterOpGe,
+		FilterOpLike, FilterOpNotLike, FilterOpContains, FilterOpStartsWith,
+		FilterOpEndsWith, FilterOpRegex:
+		return true
+	default:
+		return false
+	}
+}
 
 type FilterLogic string
 
@@ -126,6 +154,9 @@ type FilterCondition struct {
 	Value       Value          `json:"value,omitempty" msgpack:"value,omitempty"`
 	SecondValue Value          `json:"second_value,omitempty" msgpack:"second_value,omitempty"`
 	Values      []Value        `json:"values,omitempty" msgpack:"values,omitempty"`
+	// CaseSensitive 只作用于文本匹配类 op（behavior.md §13.5）：
+	// nil=方言默认，true=强制区分，false=强制不区分。
+	CaseSensitive *bool `json:"case_sensitive,omitempty" msgpack:"case_sensitive,omitempty"`
 }
 
 type OrderClause struct {
