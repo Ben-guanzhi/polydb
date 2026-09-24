@@ -721,7 +721,7 @@ impl PolyDBApp {
             .unwrap_or_default()
     }
 
-    fn sel_kind(&self) -> Option<DatabaseKind> {
+    pub(crate) fn sel_kind(&self) -> Option<DatabaseKind> {
         self.workspace
             .and_then(|i| self.conns.get(i))
             .map(|c| c.kind)
@@ -1541,12 +1541,14 @@ impl PolyDBApp {
     }
 
     /// 由当前草稿行 + 逻辑 + 排序，构造带 conditions/order_by 的分页请求。
-    fn build_request(tab: &TableTabState, offset: u64) -> TableRowsRequest {
+    /// 按连接方言过滤掉不可用的 op（behavior.md §13.6），与 Web `condToWire(c, kind)` 一致。
+    fn build_request(&self, tab: &TableTabState, offset: u64) -> TableRowsRequest {
+        let kind = self.sel_kind().unwrap_or(DatabaseKind::Sqlite);
         let conditions: Vec<FilterCondition> = tab
             .browse
             .filters
             .iter()
-            .filter_map(filters::draft_to_condition)
+            .filter_map(|d| filters::draft_to_condition(d, kind))
             .collect();
         let logic = if conditions.is_empty() {
             None
@@ -1583,7 +1585,7 @@ impl PolyDBApp {
         let (schema, table, req) = (
             tab.schema.clone(),
             tab.table.clone(),
-            Self::build_request(tab, tab.browse.offset),
+            self.build_request(tab, tab.browse.offset),
         );
         let t = Arc::clone(&self.transport);
         let io = Arc::clone(&self.io);
@@ -1659,7 +1661,7 @@ impl PolyDBApp {
         let (schema, table, req) = (
             tab.schema.clone(),
             tab.table.clone(),
-            Self::build_request(tab, offset),
+            self.build_request(tab, offset),
         );
         tab_set(self, idx, |t| {
             t.browse.loading = true;
@@ -1728,7 +1730,7 @@ impl PolyDBApp {
             return;
         };
         let (schema, table) = (tab.schema.clone(), tab.table.clone());
-        let req = Self::build_request(tab, 0);
+        let req = self.build_request(tab, 0);
         tab_set(self, idx, |t| t.browse.counting = true);
         cx.notify();
         self.io(
@@ -2125,9 +2127,24 @@ impl PolyDBApp {
     }
 
     pub(crate) fn cycle_filter_op(&mut self, idx: usize, fi: usize, cx: &mut Context<Self>) {
+        let kind = self.sel_kind().unwrap_or(DatabaseKind::Sqlite);
         if let Some(t) = self.tabs.get_mut(idx) {
             if let Some(d) = t.browse.filters.get_mut(fi) {
-                d.op = filters::next_op(d.op);
+                d.op = filters::next_op(kind, d.op);
+            }
+        }
+        cx.notify();
+    }
+
+    /// 循环大小写三态（默认→区分→忽略）；仅文本匹配类 op 的草稿行会渲染该控件。
+    pub(crate) fn cycle_filter_case(&mut self, idx: usize, fi: usize, cx: &mut Context<Self>) {
+        if let Some(t) = self.tabs.get_mut(idx) {
+            if let Some(d) = t.browse.filters.get_mut(fi) {
+                d.case_mode = match d.case_mode {
+                    filters::CaseMode::Default => filters::CaseMode::Sensitive,
+                    filters::CaseMode::Sensitive => filters::CaseMode::Insensitive,
+                    filters::CaseMode::Insensitive => filters::CaseMode::Default,
+                };
             }
         }
         cx.notify();

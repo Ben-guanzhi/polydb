@@ -104,6 +104,7 @@ mod tests {
                 value: "5".into(),
                 second: String::new(),
                 values: String::new(),
+                case_mode: crate::filters::CaseMode::Default,
             }],
             true,
         )

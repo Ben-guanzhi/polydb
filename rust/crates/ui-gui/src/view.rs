@@ -1985,6 +1985,8 @@ impl PolyDBApp {
         let editing = self.editing;
         let cursor = self.edit_cursor;
         let logic_and = self.tabs[idx].browse.logic == FilterLogic::And;
+        let kind = self.sel_kind().unwrap_or(DatabaseKind::Sqlite);
+        // 徽标只数「真正会下发」的条件：空列与方言不支持的 op 不计（对齐 Web 的 condToWire 计数）。
         let n_active = self
             .tabs
             .get(idx)
@@ -1992,7 +1994,7 @@ impl PolyDBApp {
                 t.browse
                     .filters
                     .iter()
-                    .filter(|d| !d.column.is_empty())
+                    .filter(|d| filters::draft_to_condition(d, kind).is_some())
                     .count()
             })
             .unwrap_or(0);
@@ -2045,6 +2047,7 @@ impl PolyDBApp {
             .into_iter()
             .map(|(fi, d)| {
                 let meta = filters::op_meta(d.op);
+                let supported = filters::op_supported(kind, d.op);
                 let col_chip = div()
                     .id(("fc", idx * 100 + fi))
                     .px(px(6.0))
@@ -2070,13 +2073,53 @@ impl PolyDBApp {
                     .py(px(2.0))
                     .rounded(px(3.0))
                     .bg(th.surface)
-                    .text_color(th.fg)
+                    .text_color(if supported { th.fg } else { th.danger })
                     .text_size(px(12.0))
                     .cursor(CursorStyle::PointingHand)
-                    .child(meta.label.to_string())
+                    .child(if supported {
+                        meta.label.to_string()
+                    } else {
+                        format!("{}（不支持）", meta.label)
+                    })
                     .on_click(cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
                         this.cycle_filter_op(idx, fi, cx);
                     }));
+                // 大小写三态只在文本匹配类 op 上出现（behavior.md §13.5）。
+                let case_chip: AnyElement = if meta.text_match {
+                    div()
+                        .id(("fcase", idx * 100 + fi))
+                        .px(px(6.0))
+                        .py(px(2.0))
+                        .rounded(px(3.0))
+                        .bg(th.surface)
+                        .text_color(if d.case_mode == filters::CaseMode::Default {
+                            th.fg_dim
+                        } else {
+                            th.accent
+                        })
+                        .text_size(px(12.0))
+                        .cursor(CursorStyle::PointingHand)
+                        .child(format!("Aa {}", d.case_mode.label()))
+                        .on_click(cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                            this.cycle_filter_case(idx, fi, cx);
+                        }))
+                        .into_any_element()
+                } else {
+                    div().into_any_element()
+                };
+                let unsupported_hint: AnyElement = if supported {
+                    div().into_any_element()
+                } else {
+                    div()
+                        .text_color(th.danger)
+                        .text_size(px(11.0))
+                        .child(
+                            filters::op_unsupported_hint(kind, d.op)
+                                .unwrap_or("当前数据库不支持该操作符")
+                                .to_string(),
+                        )
+                        .into_any_element()
+                };
                 let editors: AnyElement = if meta.needs_values {
                     value_box(fi, 2, d.values.clone(), "逗号分隔,如 1,2,x").into_any_element()
                 } else if meta.needs_second {
@@ -2104,7 +2147,9 @@ impl PolyDBApp {
                     .gap(px(6.0))
                     .child(col_chip)
                     .child(op_chip)
+                    .child(case_chip)
                     .child(editors)
+                    .child(unsupported_hint)
                     .child(
                         div()
                             .id(("frm", idx * 100 + fi))

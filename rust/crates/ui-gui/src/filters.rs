@@ -1,12 +1,57 @@
-//! G2 数据浏览过滤：纯函数层（语义对齐 Web `TableDataView.tsx` 的 OPS 表与 `condToWire`）。
+//! G2 数据浏览过滤：纯函数层（语义对齐 Web `lib/filterOps.ts` 的 op 表与 `condToWire`）。
 //!
-//! 独立实现、不移植代码：13 操作符元数据、数值探测（`numish` 的 `^-?\d+(\.\d+)?$`）、
-//! 草稿行→`FilterCondition` 线格式转换、以及供 presets 序列化的可 serde 结构。
+//! 独立实现、不移植代码：18 操作符元数据、数值探测（`numish` 的 `^-?\d+(\.\d+)?$`）、
+//! 草稿行→`FilterCondition` 线格式转换、`case_sensitive` 三态、按方言的能力矩阵
+//! （behavior.md §13.6）以及供 presets 序列化的可 serde 结构。
 
-use polydb_core::{FilterCondition, FilterOperator, Value};
+use polydb_core::{DatabaseKind, FilterCondition, FilterOperator, Value};
 use serde::{Deserialize, Serialize};
 
-/// 界面上的一行过滤草稿（列 + 操作符 + 三个可选值槽）。
+/// 大小写敏感的三态选择（behavior.md §13.5）。缺席=沿用方言默认排序规则，故线格式省略字段。
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub(crate) enum CaseMode {
+    #[default]
+    Default,
+    Sensitive,
+    Insensitive,
+}
+
+impl CaseMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            CaseMode::Default => "default",
+            CaseMode::Sensitive => "sensitive",
+            CaseMode::Insensitive => "insensitive",
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            CaseMode::Default => "默认",
+            CaseMode::Sensitive => "区分",
+            CaseMode::Insensitive => "忽略",
+        }
+    }
+
+    pub(crate) fn parse(s: &str) -> Self {
+        match s {
+            "sensitive" => CaseMode::Sensitive,
+            "insensitive" => CaseMode::Insensitive,
+            _ => CaseMode::Default,
+        }
+    }
+
+    /// 仅文本匹配类 op 下发；其余 op 后端本就忽略，前端不发以免污染对拍。
+    pub(crate) fn to_wire(self) -> Option<bool> {
+        match self {
+            CaseMode::Default => None,
+            CaseMode::Sensitive => Some(true),
+            CaseMode::Insensitive => Some(false),
+        }
+    }
+}
+
+/// 界面上的一行过滤草稿（列 + 操作符 + 三个可选值槽 + 大小写三态）。
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct FilterDraft {
     pub column: String,
@@ -14,6 +59,7 @@ pub(crate) struct FilterDraft {
     pub value: String,
     pub second: String,
     pub values: String,
+    pub case_mode: CaseMode,
 }
 
 impl FilterDraft {
@@ -24,11 +70,12 @@ impl FilterDraft {
             value: String::new(),
             second: String::new(),
             values: String::new(),
+            case_mode: CaseMode::default(),
         }
     }
 }
 
-/// 操作符元数据（是否与 Web OPS 表逐字段对齐）。
+/// 操作符元数据（是否与 Web `FILTER_OPS` 逐字段对齐）。
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct OpMeta {
     pub op: FilterOperator,
@@ -36,110 +83,132 @@ pub(crate) struct OpMeta {
     pub needs_value: bool,
     pub needs_values: bool,
     pub needs_second: bool,
+    /// 文本匹配类：唯一接受 `case_sensitive` 的 op 家族（behavior.md §13.5）。
+    pub text_match: bool,
 }
 
-pub(crate) const OPS: [OpMeta; 13] = [
+/// 按 `needs_*` 三标志构造一行元数据。
+const fn meta(
+    op: FilterOperator,
+    label: &'static str,
+    needs_value: bool,
+    needs_values: bool,
+    needs_second: bool,
+    text_match: bool,
+) -> OpMeta {
     OpMeta {
-        op: FilterOperator::Eq,
-        label: "= 等于",
-        needs_value: true,
-        needs_values: false,
-        needs_second: false,
-    },
-    OpMeta {
-        op: FilterOperator::Ne,
-        label: "≠ 不等于",
-        needs_value: true,
-        needs_values: false,
-        needs_second: false,
-    },
-    OpMeta {
-        op: FilterOperator::Lt,
-        label: "< 小于",
-        needs_value: true,
-        needs_values: false,
-        needs_second: false,
-    },
-    OpMeta {
-        op: FilterOperator::Le,
-        label: "≤ 小于等于",
-        needs_value: true,
-        needs_values: false,
-        needs_second: false,
-    },
-    OpMeta {
-        op: FilterOperator::Gt,
-        label: "> 大于",
-        needs_value: true,
-        needs_values: false,
-        needs_second: false,
-    },
-    OpMeta {
-        op: FilterOperator::Ge,
-        label: "≥ 大于等于",
-        needs_value: true,
-        needs_values: false,
-        needs_second: false,
-    },
-    OpMeta {
-        op: FilterOperator::Like,
-        label: "LIKE 模式",
-        needs_value: true,
-        needs_values: false,
-        needs_second: false,
-    },
-    OpMeta {
-        op: FilterOperator::NotLike,
-        label: "NOT LIKE 模式",
-        needs_value: true,
-        needs_values: false,
-        needs_second: false,
-    },
-    OpMeta {
-        op: FilterOperator::In,
-        label: "IN 列表",
-        needs_value: false,
-        needs_values: true,
-        needs_second: false,
-    },
-    OpMeta {
-        op: FilterOperator::NotIn,
-        label: "NOT IN 列表",
-        needs_value: false,
-        needs_values: true,
-        needs_second: false,
-    },
-    OpMeta {
-        op: FilterOperator::Between,
-        label: "BETWEEN 区间",
-        needs_value: true,
-        needs_values: false,
-        needs_second: true,
-    },
-    OpMeta {
-        op: FilterOperator::Null,
-        label: "IS NULL",
-        needs_value: false,
-        needs_values: false,
-        needs_second: false,
-    },
-    OpMeta {
-        op: FilterOperator::NotNull,
-        label: "IS NOT NULL",
-        needs_value: false,
-        needs_values: false,
-        needs_second: false,
-    },
+        op,
+        label,
+        needs_value,
+        needs_values,
+        needs_second,
+        text_match,
+    }
+}
+
+pub(crate) const OPS: [OpMeta; 18] = [
+    meta(FilterOperator::Eq, "= 等于", true, false, false, false),
+    meta(FilterOperator::Ne, "≠ 不等于", true, false, false, false),
+    meta(FilterOperator::Lt, "< 小于", true, false, false, false),
+    meta(FilterOperator::Le, "≤ 小于等于", true, false, false, false),
+    meta(FilterOperator::Gt, "> 大于", true, false, false, false),
+    meta(FilterOperator::Ge, "≥ 大于等于", true, false, false, false),
+    meta(FilterOperator::Like, "LIKE 模式", true, false, false, true),
+    meta(
+        FilterOperator::NotLike,
+        "NOT LIKE 模式",
+        true,
+        false,
+        false,
+        true,
+    ),
+    meta(
+        FilterOperator::Contains,
+        "包含子串",
+        true,
+        false,
+        false,
+        true,
+    ),
+    meta(
+        FilterOperator::StartsWith,
+        "前缀为",
+        true,
+        false,
+        false,
+        true,
+    ),
+    meta(FilterOperator::EndsWith, "后缀为", true, false, false, true),
+    meta(FilterOperator::Regex, "正则匹配", true, false, false, true),
+    meta(FilterOperator::In, "IN 列表", false, true, false, false),
+    meta(
+        FilterOperator::NotIn,
+        "NOT IN 列表",
+        false,
+        true,
+        false,
+        false,
+    ),
+    meta(
+        FilterOperator::Between,
+        "BETWEEN 区间",
+        true,
+        false,
+        true,
+        false,
+    ),
+    meta(FilterOperator::Null, "IS NULL", false, false, false, false),
+    meta(
+        FilterOperator::NotNull,
+        "IS NOT NULL",
+        false,
+        false,
+        false,
+        false,
+    ),
+    meta(
+        FilterOperator::Empty,
+        "为空（NULL 或空串）",
+        false,
+        false,
+        false,
+        false,
+    ),
 ];
 
 pub(crate) fn op_meta(op: FilterOperator) -> &'static OpMeta {
     OPS.iter().find(|m| m.op == op).unwrap_or(&OPS[0])
 }
 
-/// 在 OPS 表内向后循环切换到下一个操作符。
-pub(crate) fn next_op(op: FilterOperator) -> FilterOperator {
-    let i = OPS.iter().position(|m| m.op == op).unwrap_or(0);
-    OPS[(i + 1) % OPS.len()].op
+/// 当前方言是否支持该 op（behavior.md §13.6：SQL Server 无原生正则）。
+pub(crate) fn op_supported(kind: DatabaseKind, op: FilterOperator) -> bool {
+    !(op == FilterOperator::Regex && kind == DatabaseKind::Mssql)
+}
+
+/// 不支持时的提示文案；可用则 None。
+pub(crate) fn op_unsupported_hint(kind: DatabaseKind, op: FilterOperator) -> Option<&'static str> {
+    if op_supported(kind, op) {
+        return None;
+    }
+    match (kind, op) {
+        (DatabaseKind::Mssql, FilterOperator::Regex) => {
+            Some("SQL Server 无原生正则，后端会返回 POLYDB_ERR_NOT_SUPPORTED")
+        }
+        _ => Some("当前数据库不支持该操作符"),
+    }
+}
+
+/// 在 OPS 表内向后循环切换到下一个**该方言可用**的操作符。
+pub(crate) fn next_op(kind: DatabaseKind, op: FilterOperator) -> FilterOperator {
+    let n = OPS.len();
+    let start = OPS.iter().position(|m| m.op == op).unwrap_or(0);
+    for step in 1..=n {
+        let cand = OPS[(start + step) % n].op;
+        if op_supported(kind, cand) {
+            return cand;
+        }
+    }
+    op
 }
 
 /// 字符串→操作符（未知回落 Eq），供预设反序列化。
@@ -193,12 +262,16 @@ pub(crate) fn parse_wire_value(raw: &str) -> Value {
     }
 }
 
-/// 草稿行 → `FilterCondition`；无列、IN 列表空集返回 None（该行不参与，对齐 Web condToWire）。
-pub(crate) fn draft_to_condition(d: &FilterDraft) -> Option<FilterCondition> {
+/// 草稿行 → `FilterCondition`；无列、IN 列表空集、当前方言不支持该 op 返回 None
+/// （该行不参与请求，对齐 Web `condToWire`）。
+pub(crate) fn draft_to_condition(d: &FilterDraft, kind: DatabaseKind) -> Option<FilterCondition> {
     if d.column.is_empty() {
         return None;
     }
     let m = op_meta(d.op);
+    if !op_supported(kind, d.op) {
+        return None;
+    }
     let mut c = FilterCondition {
         column: d.column.clone(),
         op: d.op,
@@ -226,6 +299,10 @@ pub(crate) fn draft_to_condition(d: &FilterDraft) -> Option<FilterCondition> {
         }
         c.values = vals;
     }
+    // 仅文本匹配类 op 下发；其余 op 后端本就忽略，不发以免污染日志与契约对拍。
+    if m.text_match {
+        c.case_sensitive = d.case_mode.to_wire();
+    }
     Some(c)
 }
 
@@ -241,6 +318,13 @@ pub(crate) struct SavedCondition {
     pub second: String,
     #[serde(default)]
     pub values: String,
+    /// 旧预设没有该字段，`default` 字符串回落 `CaseMode::Default`（线格式省略=方言默认）。
+    #[serde(default = "default_case_mode")]
+    pub case_mode: String,
+}
+
+fn default_case_mode() -> String {
+    CaseMode::Default.as_str().to_string()
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
@@ -263,6 +347,7 @@ impl FilterPreset {
                     value: d.value.clone(),
                     second: d.second.clone(),
                     values: d.values.clone(),
+                    case_mode: d.case_mode.as_str().to_string(),
                 })
                 .collect(),
             logic: if and_logic { "and".into() } else { "or".into() },
@@ -278,6 +363,7 @@ impl FilterPreset {
                 value: s.value.clone(),
                 second: s.second.clone(),
                 values: s.values.clone(),
+                case_mode: CaseMode::parse(&s.case_mode),
             })
             .collect()
     }
@@ -298,6 +384,136 @@ mod tests {
             value: v.into(),
             second: second.into(),
             values: values.into(),
+            case_mode: CaseMode::Default,
+        }
+    }
+
+    fn with_case(mut d: FilterDraft, m: CaseMode) -> FilterDraft {
+        d.case_mode = m;
+        d
+    }
+
+    /// 多数单测用 SQLite；MSSQL 仅用于能力矩阵。
+    const SQLITE: DatabaseKind = DatabaseKind::Sqlite;
+
+    #[test]
+    fn op_table_covers_18_ops_with_text_match_flags() {
+        assert_eq!(OPS.len(), 18);
+        let mut names: Vec<&str> = OPS.iter().map(|m| m.op.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), 18, "op 表不得重复");
+        let text: Vec<&str> = OPS
+            .iter()
+            .filter(|m| m.text_match)
+            .map(|m| m.op.as_str())
+            .collect();
+        assert_eq!(
+            text,
+            vec![
+                "like",
+                "not_like",
+                "contains",
+                "starts_with",
+                "ends_with",
+                "regex"
+            ]
+        );
+        // 无值槽的三个 op
+        for op in ["null", "not_null", "empty"] {
+            let m = OPS.iter().find(|m| m.op.as_str() == op).unwrap();
+            assert!(!(m.needs_value || m.needs_values || m.needs_second), "{op}");
+        }
+        // needsValues 与其余互斥；needsSecond 只随 between 出现
+        for m in OPS.iter() {
+            if m.needs_values {
+                assert!(!m.needs_value && !m.needs_second);
+            }
+            if m.needs_second {
+                assert_eq!(m.op, FilterOperator::Between);
+            }
+        }
+    }
+
+    #[test]
+    fn case_mode_three_states() {
+        assert_eq!(CaseMode::Default.to_wire(), None);
+        assert_eq!(CaseMode::Sensitive.to_wire(), Some(true));
+        assert_eq!(CaseMode::Insensitive.to_wire(), Some(false));
+        assert_eq!(CaseMode::parse("insensitive"), CaseMode::Insensitive);
+        assert_eq!(CaseMode::parse("bogus"), CaseMode::Default);
+        for m in [
+            CaseMode::Default,
+            CaseMode::Sensitive,
+            CaseMode::Insensitive,
+        ] {
+            assert_eq!(CaseMode::parse(m.as_str()), m);
+        }
+    }
+
+    #[test]
+    fn case_sensitive_only_on_text_match_ops() {
+        let c = draft_to_condition(
+            &with_case(
+                draft("nm", FilterOperator::Contains, "ali", "", ""),
+                CaseMode::Sensitive,
+            ),
+            SQLITE,
+        )
+        .unwrap();
+        assert_eq!(c.case_sensitive, Some(true));
+        // 比较类 op 即便设了也不下发（后端本就忽略，发了会让契约对拍出现噪声）
+        let e = draft_to_condition(
+            &with_case(
+                draft("id", FilterOperator::Eq, "1", "", ""),
+                CaseMode::Sensitive,
+            ),
+            SQLITE,
+        )
+        .unwrap();
+        assert_eq!(e.case_sensitive, None);
+        // default 三态省略字段
+        let d =
+            draft_to_condition(&draft("nm", FilterOperator::Like, "%a%", "", ""), SQLITE).unwrap();
+        assert_eq!(d.case_sensitive, None);
+        assert_eq!(d.value, Value::String("%a%".into()));
+    }
+
+    #[test]
+    fn mssql_regex_is_dropped_not_sent() {
+        assert!(!op_supported(DatabaseKind::Mssql, FilterOperator::Regex));
+        assert!(op_supported(SQLITE, FilterOperator::Regex));
+        assert!(op_supported(DatabaseKind::Postgres, FilterOperator::Regex));
+        let d = draft("nm", FilterOperator::Regex, "^a", "", "");
+        assert!(draft_to_condition(&d, DatabaseKind::Mssql).is_none());
+        assert!(draft_to_condition(&d, SQLITE).is_some());
+        assert!(
+            op_unsupported_hint(DatabaseKind::Mssql, FilterOperator::Regex)
+                .unwrap()
+                .contains("NOT_SUPPORTED")
+        );
+        assert!(op_unsupported_hint(SQLITE, FilterOperator::Regex).is_none());
+    }
+
+    #[test]
+    fn op_cycle_skips_unsupported_and_wraps() {
+        assert_eq!(next_op(SQLITE, FilterOperator::Eq), FilterOperator::Ne);
+        assert_eq!(
+            next_op(SQLITE, FilterOperator::EndsWith),
+            FilterOperator::Regex
+        );
+        // MSSQL：从后缀直接跳到 IN 列表，跳过正则
+        assert_eq!(
+            next_op(DatabaseKind::Mssql, FilterOperator::EndsWith),
+            FilterOperator::In
+        );
+        // 回到起点（新表尾 op 为空），且永不落在不支持的 op 上
+        assert_eq!(next_op(SQLITE, FilterOperator::Empty), FilterOperator::Eq);
+        for m in OPS.iter() {
+            assert!(op_supported(
+                DatabaseKind::Mssql,
+                next_op(DatabaseKind::Mssql, m.op)
+            ));
         }
     }
 
@@ -315,22 +531,27 @@ mod tests {
 
     #[test]
     fn no_column_or_empty_in_dropped() {
-        assert!(draft_to_condition(&draft("", FilterOperator::Eq, "1", "", "")).is_none());
-        assert!(draft_to_condition(&draft("id", FilterOperator::In, "", "", " , , ")).is_none());
+        assert!(draft_to_condition(&draft("", FilterOperator::Eq, "1", "", ""), SQLITE).is_none());
+        assert!(
+            draft_to_condition(&draft("id", FilterOperator::In, "", "", " , , "), SQLITE).is_none()
+        );
     }
 
     #[test]
     fn condition_shapes() {
-        let c = draft_to_condition(&draft("id", FilterOperator::Eq, "5", "", "")).unwrap();
+        let c = draft_to_condition(&draft("id", FilterOperator::Eq, "5", "", ""), SQLITE).unwrap();
         assert_eq!(c.value, Value::Integer(5));
-        let b = draft_to_condition(&draft("n", FilterOperator::Between, "1", "9", "")).unwrap();
+        let b =
+            draft_to_condition(&draft("n", FilterOperator::Between, "1", "9", ""), SQLITE).unwrap();
         assert_eq!(
             (b.value, b.second_value),
             (Value::Integer(1), Value::Integer(9))
         );
-        let l = draft_to_condition(&draft("s", FilterOperator::Like, "%a%", "", "")).unwrap();
+        let l =
+            draft_to_condition(&draft("s", FilterOperator::Like, "%a%", "", ""), SQLITE).unwrap();
         assert_eq!(l.value, Value::String("%a%".into()));
-        let i = draft_to_condition(&draft("k", FilterOperator::In, "", "", "1, 2, x")).unwrap();
+        let i =
+            draft_to_condition(&draft("k", FilterOperator::In, "", "", "1, 2, x"), SQLITE).unwrap();
         assert_eq!(
             i.values,
             vec![
@@ -339,15 +560,30 @@ mod tests {
                 Value::String("x".into())
             ]
         );
-        let nl = draft_to_condition(&draft("t", FilterOperator::Null, "", "", "")).unwrap();
+        let nl = draft_to_condition(&draft("t", FilterOperator::Null, "", "", ""), SQLITE).unwrap();
         assert_eq!(nl.value, Value::Null);
+        // 新增 op 的取值形态：三个包裹类取单值，empty 不取值
+        for op in [
+            FilterOperator::Contains,
+            FilterOperator::StartsWith,
+            FilterOperator::EndsWith,
+        ] {
+            let x = draft_to_condition(&draft("s", op, "a%b", "", ""), SQLITE).unwrap();
+            assert_eq!(x.value, Value::String("a%b".into()));
+        }
+        let e = draft_to_condition(
+            &draft("s", FilterOperator::Empty, "ignored", "", ""),
+            SQLITE,
+        )
+        .unwrap();
+        assert_eq!(e.value, Value::Null);
     }
 
     #[test]
     fn op_cycle_wraps() {
-        assert_eq!(next_op(FilterOperator::Eq), FilterOperator::Ne);
-        assert_eq!(next_op(FilterOperator::NotNull), FilterOperator::Eq);
         assert_eq!(parse_op("between"), FilterOperator::Between);
+        assert_eq!(parse_op("starts_with"), FilterOperator::StartsWith);
+        assert_eq!(parse_op("empty"), FilterOperator::Empty);
         assert_eq!(parse_op("bogus"), FilterOperator::Eq);
     }
 
@@ -355,7 +591,10 @@ mod tests {
     fn preset_roundtrip() {
         let drafts = vec![
             draft("id", FilterOperator::Gt, "10", "", ""),
-            draft("nm", FilterOperator::In, "", "", "a,b"),
+            with_case(
+                draft("nm", FilterOperator::In, "", "", "a,b"),
+                CaseMode::Insensitive,
+            ),
         ];
         let p = FilterPreset::from_drafts("P1", &drafts, false);
         assert_eq!(p.logic, "or");
@@ -364,5 +603,15 @@ mod tests {
         let json = serde_json::to_string(&p).unwrap();
         let p2: FilterPreset = serde_json::from_str(&json).unwrap();
         assert_eq!(p2, p);
+    }
+
+    #[test]
+    fn legacy_preset_without_case_mode_still_loads() {
+        // G2 时期落盘的预设没有 case_mode 字段，必须回落方言默认。
+        let legacy = r#"{"name":"P0","conditions":[{"column":"nm","op":"like","value":"%a%","second":"","values":""}],"logic":"and"}"#;
+        let p: FilterPreset = serde_json::from_str(legacy).unwrap();
+        let d = &p.to_drafts()[0];
+        assert_eq!(d.case_mode, CaseMode::Default);
+        assert_eq!(draft_to_condition(d, SQLITE).unwrap().case_sensitive, None);
     }
 }
