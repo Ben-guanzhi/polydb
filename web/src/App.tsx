@@ -521,7 +521,9 @@ export default function App() {
         onClose={() => setQsOpen(false)}
         conn={conn}
         connections={connections}
+        openTabs={openState.tabs}
         onOpenTable={handleOpenTable}
+        onSelectTab={(id) => mutateOpenTabs((s) => ({ ...s, activeId: id }))}
         onSwitchConn={(c) => { setConn(c); setContext(null); }}
       />
       <ShortcutPanel open={shortcutOpen} onClose={() => setShortcutOpen(false)} />

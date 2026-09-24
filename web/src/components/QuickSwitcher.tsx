@@ -2,16 +2,19 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ConnectionInfo } from '../api';
 import * as api from '../lib/api';
 import { rankTables, type SearchableTable } from '../lib/tableSearch';
+import { tableTabId, type OpenTab } from '../lib/openTabs';
 import { DbIcon, TableIcon } from './Icons';
 
-// U3 Quick Switcher（Ctrl+P，参考 TablePro Cmd+P 直达表视图）：搜表 + 切连接。
+// U3 Quick Switcher（Ctrl+P，参考 TablePro Cmd+P 直达表视图）：跳转已打开 tab + 搜表 + 切连接。
 
 interface Props {
   open: boolean;
   onClose: () => void;
   conn: ConnectionInfo | null;
   connections: ConnectionInfo[];
+  openTabs: OpenTab[];
   onOpenTable: (schema: string, table: string) => void;
+  onSelectTab: (id: string) => void;
   onSwitchConn: (c: ConnectionInfo) => void;
 }
 
@@ -38,10 +41,11 @@ export function invalidateTableCache(connId: string) {
 }
 
 type Row =
+  | { kind: 'tab'; id: string; label: string }
   | { kind: 'table'; schema: string; table: string; rowCount?: number | null }
   | { kind: 'conn'; conn: ConnectionInfo };
 
-export default function QuickSwitcher({ open, onClose, conn, connections, onOpenTable, onSwitchConn }: Props) {
+export default function QuickSwitcher({ open, onClose, conn, connections, openTabs, onOpenTable, onSelectTab, onSwitchConn }: Props) {
   const [query, setQuery] = useState('');
   const [selIdx, setSelIdx] = useState(0);
   const [tables, setTables] = useState<SearchableTable[]>([]);
@@ -69,13 +73,29 @@ export default function QuickSwitcher({ open, onClose, conn, connections, onOpen
   }, [open, conn]);
 
   const rows: Row[] = useMemo(() => {
-    const q = query.trim();
-    const tableRows: Row[] = rankTables(q, tables).map((t) => ({ kind: 'table', ...t }));
+    const q = query.trim().toLowerCase();
+    const matches = (label: string) => q === '' || label.toLowerCase().includes(q);
+    const tabRows: Row[] = [];
+    for (const t of openTabs) {
+      if (t.kind === 'workbench') {
+        if (matches('SQL 工作台')) tabRows.push({ kind: 'tab', id: t.id, label: 'SQL 工作台' });
+      } else {
+        const label = `${t.schema}.${t.table}`;
+        if (matches(label)) tabRows.push({ kind: 'tab', id: t.id, label });
+      }
+    }
+    const openIdSet = new Set(
+      openTabs.filter((t): t is Extract<OpenTab, { kind: 'table' }> => t.kind === 'table').map((t) => t.id),
+    );
+    // 全部表搜索：排除已打开（避免与跳转分组重复）。
+    const tableRows: Row[] = rankTables(query, tables)
+      .filter((t) => !openIdSet.has(tableTabId(t.schema, t.table)))
+      .map((t) => ({ kind: 'table', ...t }));
     const connRows: Row[] = connections
       .filter((c) => c.id !== conn?.id)
       .map((c) => ({ kind: 'conn' as const, conn: c }));
-    return [...tableRows, ...connRows];
-  }, [query, tables, connections, conn?.id]);
+    return [...tabRows, ...tableRows, ...connRows];
+  }, [query, tables, connections, conn?.id, openTabs]);
 
   useEffect(() => {
     if (selIdx >= rows.length) setSelIdx(Math.max(0, rows.length - 1));
@@ -91,14 +111,15 @@ export default function QuickSwitcher({ open, onClose, conn, connections, onOpen
         e.preventDefault(); e.stopPropagation();
         const r = rows[selIdx];
         if (!r) return;
-        if (r.kind === 'table') onOpenTable(r.schema, r.table);
+        if (r.kind === 'tab') onSelectTab(r.id);
+        else if (r.kind === 'table') onOpenTable(r.schema, r.table);
         else onSwitchConn(r.conn);
         onClose();
       } else if (e.key === 'Tab') { e.preventDefault(); setSelIdx((n) => (n + 1) % Math.max(1, rows.length)); }
     };
     window.addEventListener('keydown', h, true);
     return () => window.removeEventListener('keydown', h, true);
-  }, [open, rows, selIdx, onClose, onOpenTable, onSwitchConn]);
+  }, [open, rows, selIdx, onClose, onOpenTable, onSelectTab, onSwitchConn]);
 
   useEffect(() => {
     const el = listRef.current?.querySelector<HTMLElement>(`[data-idx="${selIdx}"]`);
@@ -144,13 +165,15 @@ export default function QuickSwitcher({ open, onClose, conn, connections, onOpen
           )}
           {rows.map((r, idx) => {
             const selected = idx === selIdx;
+            const rowKey = r.kind === 'tab' ? r.id : r.kind === 'table' ? `${r.schema}.${r.table}` : r.conn.id;
             return (
               <div
-                key={r.kind === 'table' ? `${r.schema}.${r.table}` : r.conn.id}
+                key={rowKey}
                 data-idx={idx}
                 onMouseEnter={() => setSelIdx(idx)}
                 onClick={() => {
-                  if (r.kind === 'table') onOpenTable(r.schema, r.table);
+                  if (r.kind === 'tab') onSelectTab(r.id);
+                  else if (r.kind === 'table') onOpenTable(r.schema, r.table);
                   else onSwitchConn(r.conn);
                   onClose();
                 }}
@@ -159,9 +182,14 @@ export default function QuickSwitcher({ open, onClose, conn, connections, onOpen
                   : { display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px', borderRadius: 3, cursor: 'pointer' }}
               >
                 <span className="icon" style={{ color: 'var(--muted)' }}>
-                  {r.kind === 'table' ? <TableIcon /> : <DbIcon kind={r.conn.kind} />}
+                  {r.kind === 'conn' ? <DbIcon kind={r.conn.kind} /> : <TableIcon />}
                 </span>
-                {r.kind === 'table' ? (
+                {r.kind === 'tab' ? (
+                  <>
+                    <span className="mono" style={{ fontSize: 13 }}>{r.label}</span>
+                    <span className="muted" style={{ marginLeft: 'auto', fontSize: 10 }}>已打开</span>
+                  </>
+                ) : r.kind === 'table' ? (
                   <>
                     <span className="mono" style={{ fontSize: 13 }}>{r.table}</span>
                     <span className="muted" style={{ fontSize: 11 }}>{r.schema}</span>
