@@ -31,18 +31,24 @@ func (m *model) viewHelp() []helpEntry {
 			{"↑/↓ · k/j", "上下选择连接"},
 			{"Enter", "连接并进入库表"},
 			{"n", "新建连接"},
+			{"e", "编辑选中连接"},
 			{"t", "测试连接"},
 			{"d", "删除（连按两次确认）"},
 			{"r", "刷新列表"},
 			{"q", "退出"},
 		}
 	case viewForm:
-		return []helpEntry{
+		entries := []helpEntry{
 			{"Tab · Shift+Tab", "切换字段"},
 			{"←/→", "切换连接类型"},
 			{"Enter", "提交新建"},
 			{"Esc", "返回连接列表"},
 		}
+		if m.form.editing {
+			entries[1] = helpEntry{"←/→", "移动光标（类型不可修改）"}
+			entries[2] = helpEntry{"Enter", "保存修改"}
+		}
+		return entries
 	case viewTables:
 		return []helpEntry{
 			{"↑/↓", "选择表"},
@@ -155,7 +161,7 @@ func (m *model) viewHelp() []helpEntry {
 // helpView 渲染覆盖式快捷键帮助面板：全局面板 + 当前视图面板。
 func (m *model) helpView() string {
 	secs := []helpSection{
-		{"当前视图 · " + viewTitles[m.view], m.viewHelp()},
+		{"当前视图 · " + m.title(), m.viewHelp()},
 		{"全局", globalHelp()},
 	}
 	keyWidth := 0

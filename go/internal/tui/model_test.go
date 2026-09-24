@@ -1344,3 +1344,81 @@ func TestModelQuickOpenFlow(t *testing.T) {
 		t.Fatalf("u columns=%+v, want email present", mm.tableDetail.columns)
 	}
 }
+
+// TestModelConnectionEdit 覆盖 T4.2：e 进入编辑表单（预填 + 类型锁定），
+// 保存走 UpdateConnection 的 partial update —— 未下发字段（只读标记）必须原样保留。
+func TestModelConnectionEdit(t *testing.T) {
+	app, id := setupApp(t)
+	ro := true
+	if _, err := app.UpdateConnection(id, &protocol.UpdateConnectionRequest{ReadOnly: &ro}); err != nil {
+		t.Fatalf("seed read_only: %v", err)
+	}
+	var m tea.Model = New(transport.NewLocal(app))
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = drive(t, m, m.Init())
+	var cmd tea.Cmd
+	m, cmd = m.Update(runeKey('r')) // 刷新列表，带回 read_only
+	m = drive(t, m, cmd)
+
+	m, _ = m.Update(runeKey('e'))
+	mm := md(m)
+	if mm.view != viewForm || !mm.form.editing || mm.form.connID != id {
+		t.Fatalf("e 应进入编辑表单：view=%v editing=%v id=%q", mm.view, mm.form.editing, mm.form.connID)
+	}
+	if !mm.form.kindLocked {
+		t.Fatal("编辑态类型必须锁定（协议里 update 无 kind 字段）")
+	}
+	if got := mm.form.fields[0].input.Value(); got != "tui-test" {
+		t.Fatalf("名称未预填：%q", got)
+	}
+	if got := mm.form.fields[4].input.Value(); got != ":memory:" {
+		t.Fatalf("数据库未预填：%q", got)
+	}
+	if v := m.View(); !strings.Contains(v, "编辑连接") {
+		t.Fatalf("标题应区分编辑态：\n%s", v)
+	}
+
+	// ←/→ 不得改动类型
+	m, _ = m.Update(key(tea.KeyRight))
+	if md(m).form.kind() != protocol.DatabaseKindSQLite {
+		t.Fatalf("编辑态不应切换类型：%v", md(m).form.kind())
+	}
+
+	// 改名 → 焦点移到最后字段 → Enter 保存
+	md(m).form.fields[0].input.SetValue("改名库")
+	md(m).form.setFocus(len(md(m).form.fields) - 1)
+	m, cmd = m.Update(key(tea.KeyEnter))
+	m = drive(t, m, cmd)
+	mm = md(m)
+	if mm.view != viewConns {
+		t.Fatalf("保存后应返回连接列表：view=%v status=%q", mm.view, mm.status)
+	}
+	if !strings.Contains(mm.status, "已保存") {
+		t.Fatalf("status=%q", mm.status)
+	}
+	if len(mm.conns) != 1 || mm.conns[0].Name != "改名库" {
+		t.Fatalf("应原地更新而非追加：%+v", mm.conns)
+	}
+	got, err := app.GetConnection(id)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got.Name != "改名库" {
+		t.Fatalf("落库名称=%q", got.Name)
+	}
+	if got.ReadOnly == nil || !*got.ReadOnly {
+		t.Fatalf("只读标记应保留（表单未下发该字段）：%+v", got.ReadOnly)
+	}
+
+	// 名称清空时拒绝提交，不发请求
+	m, _ = m.Update(runeKey('e'))
+	md(m).form.fields[0].input.SetValue("   ")
+	md(m).form.setFocus(len(md(m).form.fields) - 1)
+	m, cmd = m.Update(key(tea.KeyEnter))
+	if cmd != nil {
+		t.Fatal("空名称不应提交")
+	}
+	if !strings.Contains(md(m).status, "名称不能为空") {
+		t.Fatalf("status=%q", md(m).status)
+	}
+}

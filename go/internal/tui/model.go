@@ -59,9 +59,16 @@ var viewTitles = map[view]string{
 	viewQuickOpen: "搜索表",
 }
 
-type model struct {
-	app transport.Client
+// title 返回当前视图标题；表单视图按新建/编辑区分。
+func (m *model) title() string {
+	if m.view == viewForm && m.form.editing {
+		return "编辑连接"
+	}
+	return viewTitles[m.view]
+}
 
+type model struct {
+	app    transport.Client
 	view   view
 	width  int
 	height int
@@ -272,12 +279,29 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case createdMsg:
 		m.busy = ""
 		if msg.err != nil {
-			m.status = "创建失败: " + msg.err.Error()
+			// 失败留在表单里，便于就地改；状态栏已给出原因。
+			m.status = "保存失败: " + msg.err.Error()
 			return m, nil
 		}
-		m.conns = append(m.conns, msg.conn)
-		m.status = "已创建「" + msg.conn.Name + "」"
 		m.view = viewConns
+		replaced := false
+		for i, c := range m.conns {
+			if c.ID == msg.conn.ID {
+				m.conns[i] = msg.conn
+				m.connCursor = i
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			m.conns = append(m.conns, msg.conn)
+			m.connCursor = len(m.conns) - 1
+		}
+		if msg.create {
+			m.status = "已创建「" + msg.conn.Name + "」"
+		} else {
+			m.status = "已保存「" + msg.conn.Name + "」"
+		}
 		return m, nil
 	case deletedMsg:
 		m.busy = ""
@@ -602,6 +626,13 @@ func (m *model) connsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "n":
 			m.form = newForm()
 			m.view = viewForm
+		case "e":
+			if len(m.conns) == 0 {
+				return m, nil
+			}
+			m.form = newEditForm(m.conns[m.connCursor])
+			m.view = viewForm
+			m.pendingDel = ""
 		case "d":
 			if len(m.conns) == 0 {
 				return m, nil
@@ -642,27 +673,35 @@ func (m *model) formKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyEnter:
 		if m.form.focus == len(m.form.fields)-1 {
-			req := m.form.request()
-			if strings.TrimSpace(req.Name) == "" {
-				m.status = "名称不能为空"
-				return m, nil
-			}
-			m.busy = "创建中 …"
-			return m, createCmd(m.app, &req)
+			return m.submitForm()
 		}
 	}
 	f, submitted := m.form.updateKey(msg)
 	m.form = f
 	if submitted {
-		req := m.form.request()
-		if strings.TrimSpace(req.Name) == "" {
+		return m.submitForm()
+	}
+	return m, nil
+}
+
+// submitForm 按表单态分派：新建走 CreateConnection，编辑走 UpdateConnection。
+func (m *model) submitForm() (tea.Model, tea.Cmd) {
+	if m.form.editing {
+		req := m.form.updateRequest()
+		if req.Name == nil || strings.TrimSpace(*req.Name) == "" {
 			m.status = "名称不能为空"
 			return m, nil
 		}
-		m.busy = "创建中 …"
-		return m, createCmd(m.app, &req)
+		m.busy = "保存中 …"
+		return m, updateCmd(m.app, m.form.connID, &req)
 	}
-	return m, nil
+	req := m.form.request()
+	if strings.TrimSpace(req.Name) == "" {
+		m.status = "名称不能为空"
+		return m, nil
+	}
+	m.busy = "创建中 …"
+	return m, createCmd(m.app, &req)
 }
 
 // ─── 库表浏览 ────────────────────────────────────────────────
@@ -1963,7 +2002,7 @@ func (m *model) View() string {
 
 func (m *model) frame(body string) string {
 	var b strings.Builder
-	title := "polydb TUI · " + viewTitles[m.view]
+	title := "polydb TUI · " + m.title()
 	if m.selectedID != "" {
 		title += " · " + m.selectedID[:min(8, len(m.selectedID))]
 	}
@@ -1992,7 +2031,7 @@ func colorStatus(s string) string {
 func (m *model) footer() string {
 	switch m.view {
 	case viewConns:
-		return "↑/↓ 选择 · Enter 打开 · n 新建 · t 测试 · d 删除 · r 刷新 · q 退出"
+		return "↑/↓ 选择 · Enter 打开 · n 新建 · e 编辑 · t 测试 · d 删除 · r 刷新 · q 退出"
 	case viewForm:
 		return "Tab 切换字段 · ←/→ 切换类型 · Enter 提交 · Esc 返回"
 	case viewTables:

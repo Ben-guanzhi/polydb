@@ -23,8 +23,9 @@ type (
 		err error
 	}
 	createdMsg struct {
-		conn protocol.ConnectionInfo
-		err  error
+		conn   protocol.ConnectionInfo
+		err    error
+		create bool // true=新建（追加到列表）；false=编辑（原地替换）
 	}
 	deletedMsg struct {
 		err error
@@ -156,6 +157,14 @@ func heartbeatCmd() tea.Cmd {
 func createCmd(a transport.Client, req *protocol.CreateConnectionRequest) tea.Cmd {
 	return func() tea.Msg {
 		conn, err := a.CreateConnection(req)
+		return createdMsg{conn: conn, err: err, create: true}
+	}
+}
+
+// updateCmd 保存连接编辑（T4.2）。partial update 语义见 storage.ConnectionRepository.Update。
+func updateCmd(a transport.Client, id string, req *protocol.UpdateConnectionRequest) tea.Cmd {
+	return func() tea.Msg {
+		conn, err := a.UpdateConnection(id, req)
 		return createdMsg{conn: conn, err: err}
 	}
 }
