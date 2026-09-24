@@ -1036,8 +1036,142 @@ func TestKVViewNavigation(t *testing.T) {
 	}
 }
 
-// ─── 主题 token 化（NO_COLOR / dark-light / 强制档位）────────
+// kvStubClient 只覆盖 KV 写回路径用到的 SetValue / GetValue；其余方法留在
+// 嵌入的 nil 接口上，一旦被调用即 panic，暴露误用（本机无常驻 Redis 可测）。
+type kvStubClient struct {
+	transport.Client
+	setKey   string
+	setVal   protocol.RedisValue
+	setErr   error
+	stored   protocol.RedisValue
+	getCalls int
+}
 
+func (s *kvStubClient) SetValue(_ context.Context, _, key string, v protocol.RedisValue) error {
+	s.setKey, s.setVal = key, v
+	if s.setErr != nil {
+		return s.setErr
+	}
+	s.stored = v
+	return nil
+}
+
+func (s *kvStubClient) GetValue(_ context.Context, _, _ string) (protocol.RedisValue, error) {
+	s.getCalls++
+	return s.stored, nil
+}
+
+// newKVEditModel 构造处于 KV 视图、已加载 string 键值的模型。
+func newKVEditModel() (tea.Model, *kvStubClient) {
+	stub := &kvStubClient{}
+	m := New(stub)
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	mm := md(m)
+	mm.view = viewKV
+	mm.selectedID = "redis-1"
+	mm.conns = []protocol.ConnectionInfo{{ID: "redis-1", Kind: protocol.DatabaseKindRedis}}
+	mm.kvKeys = []protocol.RedisKeyInfo{{Key: "greeting", Type: protocol.RedisKeyTypeString}}
+	mm.kvValueKey = "greeting"
+	mm.kvValue = protocol.RedisValue{Type: protocol.RedisKeyTypeString, Value: "hello"}
+	return m, stub
+}
+
+// TestModelKVWriteBack 覆盖 T4.3：string 键 e 就地写回（门禁 + 写后回读 + 失败留在编辑态）。
+func TestModelKVWriteBack(t *testing.T) {
+	// 门禁一：未加载值。
+	m, _ := newKVEditModel()
+	md(m).kvValueKey = ""
+	m2, cmd := m.Update(runeKey('e'))
+	if cmd != nil || md(m2).kvEdit || !strings.Contains(md(m2).status, "先用 Enter 加载键值") {
+		t.Fatalf("e without loaded value: cmd=%v edit=%v status=%q", cmd != nil, md(m2).kvEdit, md(m2).status)
+	}
+
+	// 门禁二：非 string 类型指向命令行。
+	m, _ = newKVEditModel()
+	md(m).kvValue = protocol.RedisValue{Type: protocol.RedisKeyTypeHash, Value: map[string]string{"f": "v"}}
+	m2, cmd = m.Update(runeKey('e'))
+	if cmd != nil {
+		t.Fatalf("hash type must not issue a write cmd")
+	}
+	if md(m2).kvEdit || !strings.Contains(md(m2).status, "仅 string") || !strings.Contains(md(m2).status, "c 命令行") {
+		t.Fatalf("non-string gate: edit=%v status=%q", md(m2).kvEdit, md(m2).status)
+	}
+
+	// 门禁三：只读连接。
+	m, _ = newKVEditModel()
+	ro := true
+	md(m).conns[0].ReadOnly = &ro
+	m2, cmd = m.Update(runeKey('e'))
+	if cmd != nil || md(m2).kvEdit || !strings.Contains(md(m2).status, "只读") {
+		t.Fatalf("read-only gate: cmd=%v edit=%v status=%q", cmd != nil, md(m2).kvEdit, md(m2).status)
+	}
+
+	// 正常写回：进入编辑（预填原值）→ 改值 → Enter 提交并回读。
+	m, stub := newKVEditModel()
+	m2, cmd = m.Update(runeKey('e'))
+	m2 = drive(t, m2, cmd)
+	if !md(m2).kvEdit || md(m2).kvEditBox.Value() != "hello" {
+		t.Fatalf("e should open editor prefilled with value: edit=%v val=%q", md(m2).kvEdit, md(m2).kvEditBox.Value())
+	}
+	if v := m2.View(); !strings.Contains(v, "写回 greeting") {
+		t.Fatalf("edit line missing:\n%s", v)
+	}
+	md(m2).kvEditBox.SetValue("你好")
+	_, cmd = m2.Update(key(tea.KeyEnter))
+	m3 := drive(t, m2, cmd)
+	if stub.setKey != "greeting" || stub.setVal.Type != protocol.RedisKeyTypeString {
+		t.Fatalf("SetValue args = %q %+v", stub.setKey, stub.setVal)
+	}
+	if s, ok := stub.setVal.Value.(string); !ok || s != "你好" {
+		t.Fatalf("SetValue value must be a plain string, got %#v", stub.setVal.Value)
+	}
+	if stub.getCalls != 1 {
+		t.Fatalf("write must be confirmed by one read-back, getCalls=%d", stub.getCalls)
+	}
+	mm := md(m3)
+	if mm.kvEdit || mm.busy != "" || !strings.Contains(mm.status, "已写入") {
+		t.Fatalf("after write: edit=%v busy=%q status=%q", mm.kvEdit, mm.busy, mm.status)
+	}
+	if got, _ := mm.kvValue.Value.(string); got != "你好" {
+		t.Fatalf("read-back value = %#v", mm.kvValue.Value)
+	}
+
+	// Esc 放弃：不发写命令。
+	m, stub = newKVEditModel()
+	m2, cmd = m.Update(runeKey('e'))
+	m2 = drive(t, m2, cmd)
+	_, cmd = m2.Update(key(tea.KeyEsc))
+	if cmd != nil {
+		t.Fatalf("esc must not issue a write cmd")
+	}
+	if stub.setKey != "" {
+		t.Fatalf("esc must not write, setKey=%q", stub.setKey)
+	}
+	if md(m2).kvEdit {
+		t.Fatalf("esc should close editor")
+	}
+	if !strings.Contains(md(m2).status, "已放弃写入") {
+		t.Fatalf("esc status = %q", md(m2).status)
+	}
+
+	// 写失败：留在编辑态、保留输入、不回读。
+	m, stub = newKVEditModel()
+	m2, cmd = m.Update(runeKey('e'))
+	m2 = drive(t, m2, cmd)
+	md(m2).kvEditBox.SetValue("重试值")
+	stub.setErr = &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: "READONLY"}
+	_, cmd = m2.Update(key(tea.KeyEnter))
+	m3 = drive(t, m2, cmd)
+	mm = md(m3)
+	if !mm.kvEdit || mm.kvEditBox.Value() != "重试值" {
+		t.Fatalf("failed write should keep editor with input: edit=%v val=%q", mm.kvEdit, mm.kvEditBox.Value())
+	}
+	if !strings.Contains(mm.status, "写入失败") || stub.getCalls != 0 {
+		t.Fatalf("failed write: status=%q getCalls=%d", mm.status, stub.getCalls)
+	}
+}
+
+// ─── 主题 token 化（NO_COLOR / dark-light / 强制档位）────────
 func TestListWindow(t *testing.T) {
 	cases := []struct {
 		total, cursor, avail int

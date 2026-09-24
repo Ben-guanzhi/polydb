@@ -183,6 +183,9 @@ type model struct {
 	kvFilterOn bool
 	kvCmd      textinput.Model
 	kvCmdOn    bool
+	// kvEdit 是 string 键的就地写回编辑子模式（T4.3；其余类型走 kvCmd 命令行）。
+	kvEdit    bool
+	kvEditBox textinput.Model
 }
 
 func New(app transport.Client) *model {
@@ -199,6 +202,9 @@ func New(app transport.Client) *model {
 	filter.Placeholder = "键模式（* 或 user:*）"
 	km := textinput.New()
 	km.Placeholder = "Redis 命令（GET user:1 / EXPIRE user:1 60 …）"
+	kve := textinput.New()
+	kve.Prompt = "" // 渲染行自带「> 写回 key」前缀，避免双提示符
+	kve.Placeholder = "新的 string 值（Enter 写回，Esc 放弃）"
 	qo := textinput.New()
 	qo.Placeholder = "输入表名过滤（schema.table 模糊匹配）…"
 	bv := textinput.New()
@@ -210,6 +216,7 @@ func New(app transport.Client) *model {
 		queryInput: ta,
 		kvFilter:   filter,
 		kvCmd:      km,
+		kvEditBox:  kve,
 		qoInput:    qo,
 		brVal:      bv,
 		brLogic:    protocol.FilterLogicAnd,
@@ -497,6 +504,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.kvFilter.SetValue(msg.pattern)
 		m.kvFilterOn = false
 		m.kvFilter.Blur()
+		m.kvEdit = false // 重新扫描后旧编辑态无意义
+		m.kvEditBox.Blur()
 		m.view = viewKV
 		return m, nil
 	case kvValueMsg:
@@ -510,6 +519,19 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.kvValueKey = msg.key
 		}
 		return m, nil
+	case kvSetMsg:
+		m.busy = ""
+		if msg.err != nil {
+			// 失败留在编辑态并保留已输入内容，便于改正重试。
+			m.kvEdit = true
+			m.kvEditBox.Focus()
+			m.status = "写入失败: " + msg.err.Error()
+			return m, nil
+		}
+		m.status = "已写入「" + truncate(msg.key, 30) + "」"
+		// 写后回读：驱动静默失败不能让界面显示旧值却报成功。
+		m.busy = "回读值 …"
+		return m, kvValueCmd(m.app, m.selectedID, msg.key)
 	case kvExecMsg:
 		m.busy = ""
 		m.kvCmdOn = false
@@ -1669,7 +1691,10 @@ func (m *model) cancelInflight() (tea.Model, tea.Cmd) {
 // ─── Redis KV 视图 ──────────────────────────────────────────
 
 func (m *model) kvKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// 输入子模式：/ 键模式过滤、c 命令输入，其余键路由给焦点输入框。
+	// 输入子模式：e 写回 string 值、/ 键模式过滤、c 命令输入，其余键路由给焦点输入框。
+	if m.kvEdit {
+		return m.kvEditKey(msg)
+	}
 	if m.kvFilterOn {
 		var cmd tea.Cmd
 		m.kvFilter, cmd = m.kvFilter.Update(msg)
@@ -1746,6 +1771,8 @@ func (m *model) kvKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.kvFilter.Focus()
 			m.kvFilterOn = true
 			return m, nil
+		case "e":
+			return m.kvStartEdit()
 		case "r":
 			m.kvValueKey = ""
 			m.kvValueErr = nil
@@ -1772,6 +1799,47 @@ func (m *model) kvKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// kvStartEdit 进入 string 键的就地写回子模式。
+// 只有 string 能整值替换：list/hash/set 等需按元素操作，走 c 命令行（RPUSH/HSET …）。
+func (m *model) kvStartEdit() (tea.Model, tea.Cmd) {
+	if m.kvValueKey == "" || m.kvValueErr != nil {
+		m.status = "先用 Enter 加载键值"
+		return m, nil
+	}
+	if _, ro := m.connKindReadOnly(); ro {
+		m.status = "连接标记为只读，不能写入"
+		return m, nil
+	}
+	if m.kvValue.Type != protocol.RedisKeyTypeString {
+		m.status = fmt.Sprintf("仅 string 支持就地写回，当前类型 %s；请用 c 命令行（RPUSH/HSET …）", m.kvValue.Type)
+		return m, nil
+	}
+	m.kvEditBox.SetValue(fmt.Sprint(m.kvValue.Value))
+	m.kvEditBox.CursorEnd()
+	m.kvEditBox.Focus()
+	m.kvEdit = true
+	return m, nil
+}
+
+// kvEditKey 处理写回子模式按键：Enter 提交并回读、Esc 放弃，其余给输入框。
+func (m *model) kvEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	m.kvEditBox, cmd = m.kvEditBox.Update(msg)
+	switch msg.Type {
+	case tea.KeyEnter:
+		m.kvEdit = false
+		m.kvEditBox.Blur()
+		m.busy = "写入 …"
+		return m, kvSetCmd(m.app, m.selectedID, m.kvValueKey, m.kvEditBox.Value())
+	case tea.KeyEsc:
+		m.kvEdit = false
+		m.kvEditBox.Blur()
+		m.status = "已放弃写入"
+		return m, nil
+	}
+	return m, cmd
 }
 
 // kvRunCommand 解析命令并下发 ExecCommand（引号拆分与 Web 端 splitArgs 一致）。
@@ -1836,10 +1904,12 @@ func (m *model) kvView() string {
 	if m.kvReply != nil {
 		b.WriteString("上次回复: " + redisReplyText(m.kvReply) + "\n")
 	}
-	if m.kvCmdOn {
+	if m.kvEdit {
+		b.WriteString("> 写回 " + truncate(m.kvValueKey, 30) + "  " + m.kvEditBox.View() + "  (Enter 提交 / Esc 放弃)\n")
+	} else if m.kvCmdOn {
 		b.WriteString("> " + m.kvCmd.View() + "\n")
 	} else {
-		b.WriteString("> 按 c 输入 Redis 命令\n")
+		b.WriteString("> 按 c 输入 Redis 命令 · e 写回 string 值\n")
 	}
 	return b.String()
 }
@@ -2047,13 +2117,16 @@ func (m *model) footer() string {
 		}
 		return "Tab 补全表/列 · F5 / Ctrl+E 执行 · F8 取消 · F4 历史 · F6 导航结果 · Esc 返回"
 	case viewKV:
+		if m.kvEdit {
+			return "编辑值 · Enter 写回并回读 · Esc 放弃"
+		}
 		if m.kvFilterOn {
 			return "输入模式 · Enter 应用 · Esc 取消"
 		}
 		if m.kvCmdOn {
 			return "输入命令 · Enter 执行 · Esc 返回列表"
 		}
-		return "↑/↓ 键 · Enter 值 · / 过滤 · g 更多 · b 换db · c 命令 · r 刷新 · Esc 返回"
+		return "↑/↓ 键 · Enter 值 · / 过滤 · g 更多 · b 换db · c 命令 · e 写回 string · r 刷新 · Esc 返回"
 	case viewResults:
 		if m.cellFull {
 			return "Enter 刷新全值 · Esc 关闭全值（再按返回查询）"

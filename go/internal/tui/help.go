@@ -84,6 +84,7 @@ func (m *model) viewHelp() []helpEntry {
 			{"g", "加载更多键"},
 			{"b", "切换 db"},
 			{"c", "命令行模式"},
+			{"e", "写回 string 值（Enter 提交并回读 · Esc 放弃）"},
 			{"r", "刷新"},
 			{"Esc", "返回连接列表"},
 		}

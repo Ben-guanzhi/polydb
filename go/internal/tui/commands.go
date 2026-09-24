@@ -100,6 +100,11 @@ type (
 		val protocol.RedisValue
 		err error
 	}
+	// kvSetMsg 承载一次 string 键写回结果；成功后紧随一次 GetValue 回读。
+	kvSetMsg struct {
+		key string
+		err error
+	}
 	kvExecMsg struct {
 		reply *protocol.RedisReply
 		err   error
@@ -357,6 +362,15 @@ func kvValueCmd(a transport.Client, id, key string) tea.Cmd {
 	return func() tea.Msg {
 		v, err := a.GetValue(context.Background(), id, key)
 		return kvValueMsg{key: key, val: v, err: err}
+	}
+}
+
+// kvSetCmd 就地写回 string 键值（其余类型走 c 命令行）。成功后由调用方回读确认。
+func kvSetCmd(a transport.Client, id, key, value string) tea.Cmd {
+	return func() tea.Msg {
+		rv := protocol.RedisValue{Type: protocol.RedisKeyTypeString, Value: value}
+		err := a.SetValue(context.Background(), id, key, rv)
+		return kvSetMsg{key: key, err: err}
 	}
 }
 
