@@ -49,6 +49,14 @@ type Client interface {
 	// BrowseRowsCount 对同过滤条件执行精确 COUNT(*)（behavior.md §13.1，只读操作）。
 	BrowseRowsCount(ctx context.Context, id, schema, table string, req *protocol.TableRowsRequest) (uint64, error)
 
+	// 事务（T3 变更跟踪编辑；单次 finalize 语义见 spec/behavior.md §10）。
+	// Begin 在连接上开启事务；ExecuteInTx 在事务内跑一条参数化 SQL；
+	// Commit/Rollback 二选一 finalize（重复 finalize 返回 TRANSACTION_NOT_FOUND）。
+	BeginTransaction(ctx context.Context, id string) (*protocol.TransactionInfo, error)
+	ExecuteInTx(ctx context.Context, txID, sql string, args ...protocol.Value) (*protocol.QueryResult, error)
+	CommitTransaction(ctx context.Context, txID string) (*protocol.TransactionInfo, error)
+	RollbackTransaction(ctx context.Context, txID string) (*protocol.TransactionInfo, error)
+
 	// Redis KV（M6 前端 Redis 模式；读写受连接 read_only 约束，见 app-core）。
 	SelectDB(ctx context.Context, id string, index int) error
 	ScanKeys(ctx context.Context, id string, cursor uint64, pattern string, count int) (*protocol.RedisScanPage, error)

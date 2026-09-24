@@ -91,6 +91,24 @@ func (l *Local) BrowseRowsCount(ctx context.Context, id, schema, table string, r
 	return l.app.BrowseRowsCount(ctx, id, schema, table, req)
 }
 
+// ─── 事务（T3）─────────────────────────────────────────────
+
+func (l *Local) BeginTransaction(ctx context.Context, id string) (*protocol.TransactionInfo, error) {
+	return l.app.BeginTransaction(ctx, &protocol.BeginTransactionRequest{ConnectionID: id})
+}
+
+func (l *Local) ExecuteInTx(ctx context.Context, txID, sql string, args ...protocol.Value) (*protocol.QueryResult, error) {
+	return l.app.ExecuteInTx(ctx, txID, sql, args...)
+}
+
+func (l *Local) CommitTransaction(ctx context.Context, txID string) (*protocol.TransactionInfo, error) {
+	return l.app.CommitTransaction(txID)
+}
+
+func (l *Local) RollbackTransaction(ctx context.Context, txID string) (*protocol.TransactionInfo, error) {
+	return l.app.RollbackTransaction(txID)
+}
+
 // ─── Redis KV ───────────────────────────────────────────────
 
 func (l *Local) SelectDB(ctx context.Context, id string, index int) error {

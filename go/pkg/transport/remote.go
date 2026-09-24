@@ -267,6 +267,45 @@ func (r *Remote) BrowseRowsCount(ctx context.Context, id, schema, table string, 
 	return out.Count, nil
 }
 
+// ─── 事务（T3）─────────────────────────────────────────────
+
+func (r *Remote) BeginTransaction(ctx context.Context, id string) (*protocol.TransactionInfo, error) {
+	var out protocol.TransactionInfo
+	path := "/api/connections/" + url.PathEscape(id) + "/transactions"
+	if err := r.do(http.MethodPost, path, &protocol.BeginTransactionRequest{ConnectionID: id}, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (r *Remote) ExecuteInTx(ctx context.Context, txID, sql string, args ...protocol.Value) (*protocol.QueryResult, error) {
+	req := protocol.QueryRequest{SQL: sql, Params: args}
+	var out protocol.QueryResult
+	path := "/api/transactions/" + url.PathEscape(txID) + "/execute"
+	if err := r.do(http.MethodPost, path, &req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (r *Remote) CommitTransaction(ctx context.Context, txID string) (*protocol.TransactionInfo, error) {
+	var out protocol.TransactionInfo
+	path := "/api/transactions/" + url.PathEscape(txID) + "/commit"
+	if err := r.do(http.MethodPost, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func (r *Remote) RollbackTransaction(ctx context.Context, txID string) (*protocol.TransactionInfo, error) {
+	var out protocol.TransactionInfo
+	path := "/api/transactions/" + url.PathEscape(txID) + "/rollback"
+	if err := r.do(http.MethodPost, path, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // ─── Redis KV ──────────────────────────────────────────────
 
 func (r *Remote) SelectDB(ctx context.Context, id string, index int) error {
