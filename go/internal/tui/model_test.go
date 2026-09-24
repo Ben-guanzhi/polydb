@@ -833,6 +833,42 @@ func TestListWindow(t *testing.T) {
 	}
 }
 
+// TestModelHelpPanel 验证 F1 开合覆盖式帮助面板，打开时任意键仅关闭、不透传给视图。
+func TestModelHelpPanel(t *testing.T) {
+	m := New(nil)
+	v := m.View()
+	if strings.Contains(v, "快捷键") {
+		t.Fatalf("help panel should be closed by default:\n%s", v)
+	}
+	if !strings.Contains(v, "F1 帮助") {
+		t.Fatalf("footer should hint F1:\n%s", v)
+	}
+	// F1 打开
+	mm, _ := m.Update(key(tea.KeyF1))
+	m = md(mm)
+	if !m.helpOpen {
+		t.Fatalf("F1 should open help")
+	}
+	v = m.View()
+	if !strings.Contains(v, "快捷键") || !strings.Contains(v, "Ctrl+C") {
+		t.Fatalf("help view missing content:\n%s", v)
+	}
+	// 打开态任意键只关闭，不触发视图动作（此处 q 不应退出）
+	mm, _ = m.Update(runeKey('q'))
+	m = md(mm)
+	if m.helpOpen {
+		t.Fatalf("any key should close help")
+	}
+	if m.quit {
+		t.Fatalf("q while help open must not quit")
+	}
+	// 关闭后 q 正常退出
+	mm, _ = m.Update(runeKey('q'))
+	if !md(mm).quit {
+		t.Fatalf("q after closing help should quit")
+	}
+}
+
 func TestThemeProfileSelection(t *testing.T) {
 	keys := []string{"NO_COLOR", "POLYDB_TUI_NO_COLOR", "POLYDB_TUI_COLOR", "POLYDB_TUI_THEME"}
 	for _, k := range keys {

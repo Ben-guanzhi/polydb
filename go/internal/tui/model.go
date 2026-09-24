@@ -66,6 +66,8 @@ type model struct {
 	busy   string
 	status string
 
+	helpOpen bool // F1 快捷键帮助面板覆盖开关
+
 	form       formModel
 	conns      []protocol.ConnectionInfo
 	connCursor int
@@ -422,6 +424,15 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if msg.Type == tea.KeyCtrlC {
 			return m, tea.Quit
 		}
+		return m, nil
+	}
+	// F1 快捷键帮助面板：任意键开合，打开时拦截所有键。
+	if msg.Type == tea.KeyF1 {
+		m.helpOpen = !m.helpOpen
+		return m, nil
+	}
+	if m.helpOpen {
+		m.helpOpen = false
 		return m, nil
 	}
 	switch m.view {
@@ -1481,6 +1492,9 @@ func (m *model) View() string {
 	if m.quit {
 		return ""
 	}
+	if m.helpOpen {
+		return m.helpView()
+	}
 	var body string
 	switch m.view {
 	case viewConns:
@@ -1520,7 +1534,7 @@ func (m *model) frame(body string) string {
 	} else if m.status != "" {
 		b.WriteString(colorStatus(m.status))
 	} else {
-		b.WriteString(m.footer())
+		b.WriteString(m.footer() + " · F1 帮助")
 	}
 	return b.String()
 }
