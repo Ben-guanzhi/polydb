@@ -3,37 +3,14 @@ import type { DatabaseKind, FilterCondition, FilterOperator, SortDirection, Tabl
 import * as api from '../lib/api';
 import { ApiError } from '../lib/api';
 import { ChangeQueue, buildStatements, commitInTransaction, dialectFor, valuesEqual } from '../lib/changes';
+import { CASE_MODES, FILTER_OPS, condToWire, emptyCondRow, opMeta, opSupported, opUnsupportedHint, type CaseMode, type CondRow } from '../lib/filterOps';
 import { toCsv, toTsv, toJson, toNdjson, toMarkdown, toSqlInsert, toInClause, download } from '../lib/exporters';
 import ContextMenu, { type ContextMenuEntry } from './ContextMenu';
 import CellPreviewPanel from './CellPreview';
 
 // ─── M11 表数据浏览器（behavior.md §13）：服务端分页/排序/过滤 ───
 
-const OPS: { value: FilterOperator; label: string; needsValue: boolean; needsValues: boolean; needsSecond: boolean }[] = [
-  { value: 'eq', label: '= 等于', needsValue: true, needsValues: false, needsSecond: false },
-  { value: 'ne', label: '≠ 不等于', needsValue: true, needsValues: false, needsSecond: false },
-  { value: 'lt', label: '< 小于', needsValue: true, needsValues: false, needsSecond: false },
-  { value: 'le', label: '≤ 小于等于', needsValue: true, needsValues: false, needsSecond: false },
-  { value: 'gt', label: '> 大于', needsValue: true, needsValues: false, needsSecond: false },
-  { value: 'ge', label: '≥ 大于等于', needsValue: true, needsValues: false, needsSecond: false },
-  { value: 'like', label: 'LIKE 模式', needsValue: true, needsValues: false, needsSecond: false },
-  { value: 'not_like', label: 'NOT LIKE 模式', needsValue: true, needsValues: false, needsSecond: false },
-  { value: 'in', label: 'IN 列表', needsValue: false, needsValues: true, needsSecond: false },
-  { value: 'not_in', label: 'NOT IN 列表', needsValue: false, needsValues: true, needsSecond: false },
-  { value: 'between', label: 'BETWEEN 区间', needsValue: true, needsValues: false, needsSecond: true },
-  { value: 'null', label: 'IS NULL', needsValue: false, needsValues: false, needsSecond: false },
-  { value: 'not_null', label: 'IS NOT NULL', needsValue: false, needsValues: false, needsSecond: false },
-];
-
 const PAGE_SIZES = [50, 200, 1000];
-
-interface CondRow {
-  column: string;
-  op: FilterOperator;
-  value: string;
-  second: string;
-  values: string;
-}
 
 const btn: CSSProperties = {
   fontFamily: 'inherit', fontSize: 12, padding: '3px 10px',
@@ -52,21 +29,6 @@ const th: CSSProperties = {
   ...cell, position: 'sticky', top: 0, background: 'var(--bg-alt, rgba(0,0,0,0.08))',
   cursor: 'pointer', userSelect: 'none', textAlign: 'left', fontWeight: 600,
 };
-
-function condToWire(r: CondRow): FilterCondition | null {
-  if (!r.column) return null;
-  const meta = OPS.find((o) => o.value === r.op);
-  if (!meta) return null;
-  const numish = (s: string): number | string => (/^-?\d+(\.\d+)?$/.test(s.trim()) ? Number(s) : s);
-  const wire: FilterCondition = { column: r.column, op: r.op };
-  if (meta.needsValue) wire.value = numish(r.value);
-  if (meta.needsSecond) wire.second_value = numish(r.second);
-  if (meta.needsValues) {
-    wire.values = r.values.split(',').map((s) => numish(s.trim())).filter((v) => v !== '');
-    if (wire.values.length === 0) return null;
-  }
-  return wire;
-}
 
 interface Props {
   connId: string;
@@ -138,7 +100,7 @@ export default function TableDataView({ connId, kind, schema, table, onOpenSql, 
   // U6.2 消费 tab 带入的一次性等值过滤。
   useEffect(() => {
     if (!initialCond) return;
-    setConds([{ column: initialCond.column, op: 'eq', value: String(initialCond.value), second: '', values: '' }]);
+    setConds([{ ...emptyCondRow('eq'), column: initialCond.column, value: String(initialCond.value) }]);
     setOffset(0);
     setShowFilter(true);
     onInitialCondConsumed?.();
@@ -146,15 +108,15 @@ export default function TableDataView({ connId, kind, schema, table, onOpenSql, 
   }, [initialCond?.column, initialCond?.value]);
 
   const buildReq = useCallback(() => {
-    const conditions = conds.map(condToWire).filter((c): c is FilterCondition => c !== null);
+    const conditions = conds.map((c) => condToWire(c, kind)).filter((c): c is FilterCondition => c !== null);
     return {
       conditions,
-      logic: conds.some((c) => condToWire(c)) ? logic : undefined,
+      logic: conds.some((c) => condToWire(c, kind)) ? logic : undefined,
       order_by: sortKey ? [{ column: sortKey.column, dir: sortKey.dir }] : undefined,
       offset,
       limit: pageSize,
     };
-  }, [conds, logic, sortKey, offset, pageSize]);
+  }, [conds, logic, sortKey, offset, pageSize, kind]);
 
   const load = useCallback(async () => {
     const seq = ++reqSeq.current;
@@ -399,7 +361,7 @@ export default function TableDataView({ connId, kind, schema, table, onOpenSql, 
           <button style={btn} onClick={addNewRow} disabled={!result}>+ 新行</button>
         )}
         <button style={btn} onClick={() => setShowFilter((v) => !v)}>
-          过滤{conds.filter((c) => condToWire(c)).length > 0 ? ` · ${conds.filter((c) => condToWire(c)).length}` : ''}
+          过滤{conds.filter((c) => condToWire(c, kind)).length > 0 ? ` · ${conds.filter((c) => condToWire(c, kind)).length}` : ''}
         </button>
         <button style={btn} onClick={loadAndDiscard}>刷新</button>
         <button style={btn} onClick={() => onOpenSql(schema, table)}>在 SQL 中打开</button>
@@ -454,11 +416,13 @@ export default function TableDataView({ connId, kind, schema, table, onOpenSql, 
               <option value="or">Match any (OR)</option>
             </select>
             <span style={{ flex: 1 }} />
-            <button style={btn} onClick={() => setConds((cs) => [...cs, { column: '', op: 'eq', value: '', second: '', values: '' }])}>+ 条件</button>
+            <button style={btn} onClick={() => setConds((cs) => [...cs, emptyCondRow()])}>+ 条件</button>
             <button style={btn} onClick={() => { if (guardDiscard('清空过滤')) { setConds([]); setOffset(0); } }}>清空</button>
           </div>
           {conds.map((c, i) => {
-            const meta = OPS.find((o) => o.value === c.op);
+            const meta = opMeta(c.op);
+            const supported = opSupported(kind, c.op);
+            const hint = opUnsupportedHint(kind, c.op);
             return (
               <div key={i} style={{ display: 'flex', gap: 6, alignItems: 'center', marginBottom: 4 }}>
                 <select style={{ ...input, width: 140 }} value={c.column}
@@ -468,19 +432,31 @@ export default function TableDataView({ connId, kind, schema, table, onOpenSql, 
                     <option key={name} value={name}>{name}</option>
                   ))}
                 </select>
-                <select style={{ ...input, width: 140 }} value={c.op}
+                <select style={{ ...input, width: 150, opacity: supported ? 1 : 0.5 }} value={c.op} title={hint}
                   onChange={(e) => setConds((cs) => cs.map((x, j) => (j === i ? { ...x, op: e.target.value as FilterOperator } : x)))}>
-                  {OPS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  {FILTER_OPS.map((o) => {
+                    const ok = opSupported(kind, o.value);
+                    return <option key={o.value} value={o.value} disabled={!ok}
+                      title={opUnsupportedHint(kind, o.value)}>{ok ? o.label : `${o.label}（不支持）`}</option>;
+                  })}
                 </select>
-                {meta?.needsValue && (
+                {meta?.textMatch && (
+                  <select style={input} value={c.caseMode}
+                    title="大小写：默认=沿用方言排序规则；其余为强制区分/不区分（behavior.md §13.5）"
+                    onChange={(e) => setConds((cs) => cs.map((x, j) => (j === i ? { ...x, caseMode: e.target.value as CaseMode } : x)))}>
+                    {CASE_MODES.map((m) => <option key={m.value} value={m.value}>Aa {m.label}</option>)}
+                  </select>
+                )}
+                {!supported && <span style={{ color: 'var(--danger, #c0392b)' }}>{hint}</span>}
+                {supported && meta?.needsValue && (
                   <input style={{ ...input, width: 160 }} placeholder="值" value={c.value}
                     onChange={(e) => setConds((cs) => cs.map((x, j) => (j === i ? { ...x, value: e.target.value } : x)))} />
                 )}
-                {meta?.needsSecond && (
+                {supported && meta?.needsSecond && (
                   <input style={{ ...input, width: 160 }} placeholder="上限" value={c.second}
                     onChange={(e) => setConds((cs) => cs.map((x, j) => (j === i ? { ...x, second: e.target.value } : x)))} />
                 )}
-                {meta?.needsValues && (
+                {supported && meta?.needsValues && (
                   <input style={{ ...input, width: 220 }} placeholder="逗号分隔值列表" value={c.values}
                     onChange={(e) => setConds((cs) => cs.map((x, j) => (j === i ? { ...x, values: e.target.value } : x)))} />
                 )}
