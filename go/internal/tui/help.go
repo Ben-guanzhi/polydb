@@ -92,6 +92,21 @@ func (m *model) viewHelp() []helpEntry {
 			{"Esc", "返回查询编辑器"},
 		}
 	case viewBrowse:
+		if m.brReview {
+			return []helpEntry{
+				{"↑/↓", "查看变更语句"},
+				{"Enter · y", "提交（单事务，任一失败全部回滚）"},
+				{"u", "撤销最近一次暂存"},
+				{"Esc · n", "返回数据浏览"},
+			}
+		}
+		if m.brCellEdit {
+			return []helpEntry{
+				{"输入", "新值（输入 NULL 清空）"},
+				{"Enter", "暂存变更"},
+				{"Esc", "取消编辑"},
+			}
+		}
 		if m.brEditing {
 			return []helpEntry{
 				{"Tab · Shift+Tab", "切换字段（列/操作符/值）"},
@@ -113,6 +128,9 @@ func (m *model) viewHelp() []helpEntry {
 			{"Shift+←/→", "移动列"},
 			{"Enter", "查看完整值"},
 			{"/ · Tab", "进入过滤栏编辑"},
+			{"e", "编辑当前单元格（需主键 · 非只读）"},
+			{"u", "撤销最近一次暂存"},
+			{"w", "审阅并提交（单事务 · 失败回滚）"},
 			{"s", "按当前列切换排序（升/降）"},
 			{"p", "循环页大小（50/200/1000）"},
 			{"c", "精确计数（COUNT(*)）"},

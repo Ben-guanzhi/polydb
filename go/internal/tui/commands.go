@@ -2,9 +2,11 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/polydb/polydb/pkg/changes"
 	"github.com/polydb/polydb/pkg/protocol"
 	"github.com/polydb/polydb/pkg/transport"
 )
@@ -61,6 +63,18 @@ type (
 	browseCountMsg struct {
 		count uint64
 		err   error
+	}
+	// browseColsMsg 承载浏览表的列元数据（T3：主键/只读判定）。
+	browseColsMsg struct {
+		schema  string
+		table   string
+		columns []protocol.ColumnInfo
+		err     error
+	}
+	// applyResultMsg 承载一次事务化提交的结果（T3）。
+	applyResultMsg struct {
+		applied int
+		err     error
 	}
 	columnsLoadedMsg struct {
 		table   string
@@ -242,6 +256,51 @@ func browseCountCmd(a transport.Client, id, schema, table string, req *protocol.
 		n, err := a.BrowseRowsCount(context.Background(), id, schema, table, req)
 		return browseCountMsg{count: n, err: err}
 	}
+}
+
+// browseColsCmd 拉取浏览表的列元数据（T3：推导主键用于编辑定位）。
+func browseColsCmd(a transport.Client, id, schema, table string) tea.Cmd {
+	return func() tea.Msg {
+		cols, err := a.ListColumns(context.Background(), id, schema, table)
+		return browseColsMsg{schema: schema, table: table, columns: cols, err: err}
+	}
+}
+
+// applyChangesCmd 在一个事务内顺序提交变更，逐条校验影响行数；
+// 任一条出错或行数不符即回滚并返回错误（spec/behavior.md §10 单次 finalize）。
+func applyChangesCmd(a transport.Client, id, schema, table string, pk []string, kind protocol.DatabaseKind, chs []changes.RowChange) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		stmts := changes.BuildStatements(chs, schema, table, pk, kind)
+		tx, err := a.BeginTransaction(ctx, id)
+		if err != nil {
+			return applyResultMsg{err: err}
+		}
+		for i, s := range stmts {
+			res, err := a.ExecuteInTx(ctx, tx.ID, s.ParamSQL, s.Params...)
+			if err != nil {
+				_ = rollbackQuiet(a, ctx, tx.ID)
+				return applyResultMsg{err: err}
+			}
+			var actual uint64
+			if res != nil {
+				actual = uint64(res.AffectedRows)
+			}
+			if changes.RowsMismatch(s, actual) {
+				_ = rollbackQuiet(a, ctx, tx.ID)
+				return applyResultMsg{err: fmt.Errorf("第 %d 条影响行数 %d 与期望 %d 不符，已回滚", i+1, actual, s.ExpectAffected)}
+			}
+		}
+		if _, err := a.CommitTransaction(ctx, tx.ID); err != nil {
+			return applyResultMsg{err: err}
+		}
+		return applyResultMsg{applied: len(stmts)}
+	}
+}
+
+func rollbackQuiet(a transport.Client, ctx context.Context, txID string) error {
+	_, err := a.RollbackTransaction(ctx, txID)
+	return err
 }
 
 // ─── Redis KV（M6 前端 Redis 模式）────────────────────────

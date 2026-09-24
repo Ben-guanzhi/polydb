@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/polydb/polydb/pkg/changes"
 	"github.com/polydb/polydb/pkg/protocol"
 	"github.com/polydb/polydb/pkg/transport"
 )
@@ -123,6 +124,20 @@ type model struct {
 	brCount   *uint64
 	brCountOK bool
 
+	// 变更跟踪编辑（T3）：本地队列 + 主键/方言元数据 + 单元格编辑/Review 态。
+	brQueue     *changes.Queue
+	brColumns   []protocol.ColumnInfo // 列元数据（含主键标识）
+	brPK        []string              // 主键列名（有序）；空则不可编辑
+	brKind      protocol.DatabaseKind
+	brReadOnly  bool
+	brCellEdit  bool                // 正在编辑当前单元格（brVal 承载新值输入）
+	brEditCol   string              // 被编辑列名
+	brEditRow   int                 // 被编辑行（brRes 内绝对行号）
+	brEditOrig  string              // 被编辑单元格原值（仅展示用）
+	brReview    bool                // Review 面板：列出待提交语句
+	brReviewCur int                 // Review 面板光标
+	brStmts     []changes.Statement // Review 面板预览的语句
+
 	// autocomplete 状态：在查询视图中 Ctrl+Space 触发，↑/↓ 选择，Enter/Tab 接受，Esc 关闭。
 	acWord       string
 	acCandidates []string
@@ -182,6 +197,7 @@ func New(app transport.Client) *model {
 		qoInput:    qo,
 		brVal:      bv,
 		brLogic:    protocol.FilterLogicAnd,
+		brQueue:    changes.New(),
 	}
 	return m
 }
@@ -367,6 +383,28 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.brCountOK = true
 		m.busy = ""
 		return m, nil
+	case browseColsMsg:
+		if msg.err != nil {
+			m.status = "加载列信息失败: " + msg.err.Error()
+			return m, nil
+		}
+		if msg.table != m.brTable || msg.schema != m.brSchema {
+			return m, nil
+		}
+		m.applyBrowseColumns(msg.columns)
+		return m, nil
+	case applyResultMsg:
+		m.busy = ""
+		if msg.err != nil {
+			m.status = "提交失败: " + msg.err.Error()
+			return m, nil
+		}
+		m.brQueue = changes.New()
+		m.brStmts = nil
+		m.status = fmt.Sprintf("提交成功：%d 项变更已应用", msg.applied)
+		m.brRow, m.brCol, m.brFull = 0, 0, false
+		m.busy = "加载数据 …"
+		return m, browseCmd(m.app, m.selectedID, m.brSchema, m.brTable, m.browseRequest(m.brOffset))
 	case columnsLoadedMsg:
 		if msg.err != nil {
 			m.status = "加载列失败: " + msg.err.Error()
@@ -998,9 +1036,19 @@ func (m *model) startBrowse() (tea.Model, tea.Cmd) {
 	m.brLogic = protocol.FilterLogicAnd
 	m.brFocus, m.brEditing = 0, false
 	m.brCount, m.brCountOK = nil, false
+	// T3：重置变更跟踪态并按连接补种方言/只读/主键元数据。
+	m.brQueue = changes.New()
+	m.brColumns = nil
+	m.brPK = nil
+	m.brKind, m.brReadOnly = m.connKindReadOnly()
+	m.brCellEdit, m.brReview = false, false
+	m.brStmts = nil
 	m.view = viewBrowse
 	m.busy = "加载数据 …"
-	return m, browseCmd(m.app, m.selectedID, m.brSchema, m.brTable, m.browseRequest(0))
+	return m, tea.Batch(
+		browseCmd(m.app, m.selectedID, m.brSchema, m.brTable, m.browseRequest(0)),
+		browseColsCmd(m.app, m.selectedID, m.brSchema, m.brTable),
+	)
 }
 
 // browsePage 拉取上一页/下一页（dir<0 回退，>0 前进，首页不回退）。
@@ -1028,6 +1076,12 @@ func (m *model) browsePage(dir int) (tea.Model, tea.Cmd) {
 //
 //	/ 或 Tab 进入过滤栏 · d 删除末条过滤 · o 切换 AND/OR · Esc 返回。
 func (m *model) browseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.brReview {
+		return m.reviewKey(msg)
+	}
+	if m.brCellEdit {
+		return m.browseCellKey(msg)
+	}
 	if m.brEditing {
 		return m.browseFilterKey(msg)
 	}
@@ -1107,6 +1161,12 @@ func (m *model) browseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.toggleSortCurrentColumn()
 		case "p":
 			return m.cyclePageSize()
+		case "e":
+			return m.enterCellEdit()
+		case "u":
+			return m.undoBrowseChange()
+		case "w":
+			return m.openReview()
 		}
 	}
 	return m, nil
@@ -1114,10 +1174,10 @@ func (m *model) browseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // currentBrowseColumn 返回光标所在列名（无数据时返回空串）。
 func (m *model) currentBrowseColumn() string {
-	if m.brRes == nil || len(m.brRes.Columns) == 0 {
+	if m.brRes == nil || m.brCol >= len(m.brRes.Columns) {
 		return ""
 	}
-	return m.brRes.Columns[min(m.brCol, len(m.brRes.Columns)-1)].Name
+	return m.brRes.Columns[m.brCol].Name
 }
 
 // enterFilterEdit 进入过滤栏编辑态：草稿默认落在当前列、eq、值聚焦。
@@ -1349,6 +1409,9 @@ func (m *model) cyclePageSize() (tea.Model, tea.Cmd) {
 
 // browseView 渲染当前页数据表格（带行/列光标）+ 可选完整值面板。
 func (m *model) browseView() string {
+	if m.brReview {
+		return m.reviewView()
+	}
 	var b strings.Builder
 	head := fmt.Sprintf("浏览 %s.%s", m.brSchema, m.brTable)
 	if m.brErr != nil {
@@ -1358,7 +1421,7 @@ func (m *model) browseView() string {
 	if r == nil {
 		return head + "\n（无数据）"
 	}
-	maxRows := max(3, m.height-20)
+	maxRows := max(3, m.height-22)
 	start := 0
 	if m.brRow >= maxRows {
 		start = m.brRow - maxRows/2
@@ -1375,7 +1438,8 @@ func (m *model) browseView() string {
 	}
 	b.WriteString(hdr + "\n")
 	b.WriteString(m.browseFilterBar() + "\n")
-	b.WriteString(renderTable(r.Columns, r.Rows, max(m.width-4, 20), maxRows, start, m.brRow, m.brCol))
+	b.WriteString(m.browseEditBar() + "\n")
+	b.WriteString(renderTableDecorated(r.Columns, r.Rows, max(m.width-4, 20), maxRows, start, m.brRow, m.brCol, m.dirtyDecorator()))
 	if m.brFull && len(r.Columns) > 0 && m.brRow < len(r.Rows) {
 		col := min(m.brCol, len(r.Columns)-1)
 		var v protocol.Value
@@ -1909,13 +1973,19 @@ func (m *model) footer() string {
 		}
 		return "↑/↓/←/→ 移动 · Enter 完整值（JSON 自动美化）· Esc 返回查询"
 	case viewBrowse:
+		if m.brReview {
+			return "Enter/y 提交 · Esc/n 返回 · u 撤销末项 · ↑/↓ 查看"
+		}
+		if m.brCellEdit {
+			return "输入新值（NULL 清空）· Enter 暂存 · Esc 取消"
+		}
 		if m.brEditing {
 			return "Tab 切字段 · ←/→ 调整 · Enter 应用 · Esc 取消"
 		}
 		if m.brFull {
 			return "Enter 刷新全值 · Esc 关闭全值（再按返回列表）"
 		}
-		return "↑/↓ 行 · ←/→ 翻页 · / 过滤 · c 计数 · s 排序 · p 页大小 · o 且/或 · d 删过滤 · Esc 返回"
+		return "↑/↓ 行 · ←/→ 翻页 · e 编辑 · u 撤销 · w 审阅 · / 过滤 · c 计数 · s 排序 · p 页 · o 且/或 · d 删过滤 · Esc 返回"
 	case viewQuickOpen:
 		return "↑/↓ 选择 · Enter 打开 · Esc 返回"
 	}

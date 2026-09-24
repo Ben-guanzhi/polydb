@@ -568,15 +568,7 @@ func TestModelBrowseNavigation(t *testing.T) {
 // enterBrowse 驱动模型进入 viewBrowse（表 t：id=1, name=hello 单行）。
 func enterBrowse(t *testing.T) tea.Model {
 	t.Helper()
-	app, _ := setupApp(t)
-	var m tea.Model = New(transport.NewLocal(app))
-	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
-	m = drive(t, m, m.Init())
-	var cmd tea.Cmd
-	m, cmd = m.Update(key(tea.KeyEnter))
-	m = drive(t, m, cmd)
-	m, cmd = m.Update(key(tea.KeyF7))
-	m = drive(t, m, cmd)
+	m, _ := enterBrowseApp(t)
 	return m
 }
 
@@ -651,6 +643,127 @@ func TestModelBrowseCountSort(t *testing.T) {
 	m = drive(t, m, cmd)
 	if d := md(m).brSort[0].Dir; d != protocol.SortDesc {
 		t.Fatalf("second sort toggle should be desc, got %s", d)
+	}
+}
+
+// enterBrowseApp 同 enterBrowse，但额外返回 appcore 以便直接核对库内数据。
+func enterBrowseApp(t *testing.T) (tea.Model, *appcore.AppCore) {
+	t.Helper()
+	app, _ := setupApp(t)
+	var m tea.Model = New(transport.NewLocal(app))
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = drive(t, m, m.Init())
+	var cmd tea.Cmd
+	m, cmd = m.Update(key(tea.KeyEnter))
+	m = drive(t, m, cmd)
+	m, cmd = m.Update(key(tea.KeyF7))
+	m = drive(t, m, cmd)
+	return m, app
+}
+
+// TestModelBrowseEditCommit 覆盖 T3 端到端：单元格编辑入队 → 脏格显示 → 审阅 →
+// 单事务提交 → 重新拉取后新值落库；并覆盖撤销与只读/无主键门禁。
+func TestModelBrowseEditCommit(t *testing.T) {
+	m, app := enterBrowseApp(t)
+	mm := md(m)
+	if mm.brErr != nil || len(mm.brRes.Rows) != 1 {
+		t.Fatalf("setup browse: err=%v rows=%+v", mm.brErr, mm.brRes)
+	}
+	if len(mm.brPK) != 1 || mm.brPK[0] != "id" {
+		t.Fatalf("PK 应经 ListColumns 推导为 [id]，实际 %v", mm.brPK)
+	}
+	// 光标移到 name 列（id 在 col 0）
+	m = drive(t, m, func() tea.Msg { return key(tea.KeyShiftRight) })
+	if mm := md(m); mm.brCol != 1 || mm.currentBrowseColumn() != "name" {
+		t.Fatalf("列光标未移动：col=%d name=%q", mm.brCol, mm.currentBrowseColumn())
+	}
+	// e 进入单元格编辑
+	m = drive(t, m, func() tea.Msg { return runeKey('e') })
+	mm = md(m)
+	if !mm.brCellEdit || mm.brEditCol != "name" || mm.brEditOrig != "hello" {
+		t.Fatalf("未进入单元格编辑：%+v", mm)
+	}
+	m = typeInto(t, m, "world")
+	if v := md(m).brVal.Value(); v != "world" {
+		t.Fatalf("输入值 = %q", v)
+	}
+	// Enter 暂存
+	m = drive(t, m, func() tea.Msg { return key(tea.KeyEnter) })
+	mm = md(m)
+	if mm.brCellEdit || mm.brQueue.Size() != 1 {
+		t.Fatalf("暂存后：editing=%v size=%d", mm.brCellEdit, mm.brQueue.Size())
+	}
+	if !strings.Contains(mm.status, "已暂存 1 项变更") {
+		t.Fatalf("status = %q", mm.status)
+	}
+	if v := m.View(); !strings.Contains(v, "world") || !strings.Contains(v, "待提交 1 项") {
+		t.Errorf("脏格/待提交栏未渲染：\n%s", v)
+	}
+	// u 撤销后队列清空，脏格消失
+	m = drive(t, m, func() tea.Msg { return runeKey('u') })
+	if mm := md(m); mm.brQueue.Size() != 0 || !strings.Contains(mm.status, "已撤销") {
+		t.Fatalf("撤销失败：size=%d status=%q", mm.brQueue.Size(), mm.status)
+	}
+	// 重新编辑并提交
+	m = drive(t, m, func() tea.Msg { return runeKey('e') })
+	m = typeInto(t, m, "world")
+	m = drive(t, m, func() tea.Msg { return key(tea.KeyEnter) })
+	// w 打开审阅：应生成一条 UPDATE
+	m = drive(t, m, func() tea.Msg { return runeKey('w') })
+	mm = md(m)
+	if !mm.brReview || len(mm.brStmts) != 1 {
+		t.Fatalf("审阅面板：review=%v stmts=%+v", mm.brReview, mm.brStmts)
+	}
+	stmt := mm.brStmts[0].SQL
+	if !strings.Contains(stmt, `SET "name" = 'world'`) || !strings.Contains(stmt, `WHERE "id" = 1`) {
+		t.Fatalf("审阅 SQL 不符：%s", stmt)
+	}
+	if v := m.View(); !strings.Contains(v, "审阅变更（1 项）") {
+		t.Errorf("审阅面板未渲染：\n%s", v)
+	}
+	// Enter 提交（单事务），随后自动重拉当前页
+	m = drive(t, m, func() tea.Msg { return key(tea.KeyEnter) })
+	mm = md(m)
+	if strings.Contains(mm.status, "提交失败") {
+		t.Fatalf("提交失败：%s", mm.status)
+	}
+	if !strings.Contains(mm.status, "提交成功") {
+		t.Fatalf("status = %q", mm.status)
+	}
+	if mm.brQueue.Size() != 0 || mm.brReview {
+		t.Fatalf("提交后未复位：size=%d review=%v", mm.brQueue.Size(), mm.brReview)
+	}
+	if got := cellString(mm.brRes.Rows[0][1]); got != "world" {
+		t.Fatalf("重拉结果未反映新值：%q", got)
+	}
+	// 直接核对库内数据
+	res, err := app.Execute(context.Background(), mm.selectedID, "SELECT name FROM t WHERE id=1")
+	if err != nil {
+		t.Fatalf("校验查询失败: %v", err)
+	}
+	if len(res.Rows) != 1 || cellString(res.Rows[0][0]) != "world" {
+		t.Fatalf("库内值未更新：%+v", res.Rows)
+	}
+}
+
+// TestModelBrowseEditGates 覆盖编辑门禁：只读连接与无主键表都不进入编辑态。
+func TestModelBrowseEditGates(t *testing.T) {
+	m, _ := enterBrowseApp(t)
+	md(m).brReadOnly = true
+	m = drive(t, m, func() tea.Msg { return runeKey('e') })
+	if mm := md(m); mm.brCellEdit || !strings.Contains(mm.status, "只读") {
+		t.Fatalf("只读连接应拦住编辑：editing=%v status=%q", mm.brCellEdit, mm.status)
+	}
+	md(m).brReadOnly = false
+	md(m).brPK = nil
+	m = drive(t, m, func() tea.Msg { return runeKey('e') })
+	if mm := md(m); mm.brCellEdit || !strings.Contains(mm.status, "无主键") {
+		t.Fatalf("无主键应拦住编辑：editing=%v status=%q", mm.brCellEdit, mm.status)
+	}
+	// 无变更时 w 只提示，不进审阅
+	m = drive(t, m, func() tea.Msg { return runeKey('w') })
+	if mm := md(m); mm.brReview || !strings.Contains(mm.status, "无待提交变更") {
+		t.Fatalf("空队列不应打开审阅：review=%v status=%q", mm.brReview, mm.status)
 	}
 }
 

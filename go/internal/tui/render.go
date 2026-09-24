@@ -91,9 +91,18 @@ func headerLabel(c protocol.ResultColumn) string {
 	return c.Name + " (" + c.DataType + ")"
 }
 
-// renderTable 表格渲染核心：startRow 起窗口渲染 maxRows 行，
-// (curRow, curCol) 单元格反显高亮（-1 表示无光标）。
+// cellDecorator 按 (行下标, 列下标) 返回该单元格的覆盖显示文本与脏标记。
+// 用于浏览网格高亮已暂存（未提交）的编辑值。返回 dirty=false 表示不覆盖。
+type cellDecorator func(rowIdx, colIdx int) (display string, dirty bool)
+
+// renderTable 表格渲染核心（无装饰）：见 renderTableDecorated。
 func renderTable(cols []protocol.ResultColumn, rows [][]protocol.Value, maxWidth, maxRows, startRow, curRow, curCol int) string {
+	return renderTableDecorated(cols, rows, maxWidth, maxRows, startRow, curRow, curCol, nil)
+}
+
+// renderTableDecorated 表格渲染核心：startRow 起窗口渲染 maxRows 行，
+// (curRow, curCol) 单元格反显高亮（-1 表示无光标）；decor 非空时覆盖脏格显示并标色。
+func renderTableDecorated(cols []protocol.ResultColumn, rows [][]protocol.Value, maxWidth, maxRows, startRow, curRow, curCol int, decor cellDecorator) string {
 	if len(cols) == 0 {
 		return "（无结果集）"
 	}
@@ -140,7 +149,7 @@ func renderTable(cols []protocol.ResultColumn, rows [][]protocol.Value, maxWidth
 	}
 
 	var b strings.Builder
-	line := func(cells []string, ri int) string {
+	line := func(cells []string, ri int, dirty []bool) string {
 		var sb strings.Builder
 		sb.WriteString(" ")
 		for i, c := range cells {
@@ -148,8 +157,11 @@ func renderTable(cols []protocol.ResultColumn, rows [][]protocol.Value, maxWidth
 				sb.WriteString(" │ ")
 			}
 			s := pad(truncate(c, widths[i]), widths[i])
-			if ri == curRow && i == curCol {
+			switch {
+			case ri == curRow && i == curCol:
 				s = selected(s)
+			case dirty != nil && i < len(dirty) && dirty[i]:
+				s = warnText(s)
 			}
 			sb.WriteString(s)
 		}
@@ -159,13 +171,13 @@ func renderTable(cols []protocol.ResultColumn, rows [][]protocol.Value, maxWidth
 	for i, c := range cols {
 		headers[i] = headerLabel(c)
 	}
-	b.WriteString(line(headers, -1))
+	b.WriteString(line(headers, -1, nil))
 	b.WriteString("\n")
 	sep := make([]string, len(cols))
 	for i := range cols {
 		sep[i] = strings.Repeat("─", widths[i])
 	}
-	b.WriteString(line(sep, -2))
+	b.WriteString(line(sep, -2, nil))
 	b.WriteString("\n")
 	if startRow > len(rows) {
 		startRow = len(rows)
@@ -173,14 +185,24 @@ func renderTable(cols []protocol.ResultColumn, rows [][]protocol.Value, maxWidth
 	end := min(startRow+maxRows, len(rows))
 	for i := startRow; i < end; i++ {
 		cells := make([]string, len(cols))
+		var dirty []bool
 		for j := range cols {
 			if j < len(rows[i]) {
 				cells[j] = cellString(rows[i][j])
 			} else {
 				cells[j] = ""
 			}
+			if decor != nil {
+				if disp, d := decor(i, j); d {
+					cells[j] = disp
+					if dirty == nil {
+						dirty = make([]bool, len(cols))
+					}
+					dirty[j] = true
+				}
+			}
 		}
-		b.WriteString(line(cells, i))
+		b.WriteString(line(cells, i, dirty))
 		if i < end-1 {
 			b.WriteString("\n")
 		}
