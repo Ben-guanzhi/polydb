@@ -260,7 +260,7 @@ export interface BatchQueryResult {
   total_execution_time_ms: number;
 }
 
-export type FilterOperator = 'between' | 'eq' | 'ge' | 'gt' | 'in' | 'le' | 'like' | 'lt' | 'ne' | 'not_in' | 'not_like' | 'not_null' | 'null';
+export type FilterOperator = 'between' | 'contains' | 'empty' | 'ends_with' | 'eq' | 'ge' | 'gt' | 'in' | 'le' | 'like' | 'lt' | 'ne' | 'not_in' | 'not_like' | 'not_null' | 'null' | 'regex' | 'starts_with';
 
 export type FilterLogic = 'and' | 'or';
 
@@ -270,8 +270,10 @@ export interface FilterCondition {
   /** Column name; server quotes it as an identifier (never interpolated raw) */
   column: string;
   op: FilterOperator;
-  /** Single value for eq/ne/lt/le/gt/ge/like/not_like; ignored for null/not_null */
+  /** Single value for eq/ne/lt/le/gt/ge/like/not_like/contains/starts_with/ends_with/regex; ignored for null/not_null/empty */
   value?: Value;
+  /** Match-case for the text ops only (like/not_like/contains/starts_with/ends_with/regex). true=force case-sensitive, false=force case-insensitive, absent=dialect default (behavior.md §13.5). Ignored by all other ops. */
+  case_sensitive?: boolean;
   /** Upper bound for between */
   second_value?: Value;
   /** List for in/not_in (must be non-empty) */

@@ -107,7 +107,7 @@
     "FilterOperator": {
       "type": "string",
       "description": "Filter operators for table data browsing (behavior.md §13)",
-      "enum": ["eq", "ne", "lt", "le", "gt", "ge", "like", "not_like", "in", "not_in", "between", "null", "not_null"]
+      "enum": ["eq", "ne", "lt", "le", "gt", "ge", "like", "not_like", "in", "not_in", "between", "null", "not_null", "contains", "starts_with", "ends_with", "empty", "regex"]
     },
     "FilterLogic": {
       "type": "string",
@@ -131,7 +131,11 @@
         "op": { "$ref": "#/definitions/FilterOperator" },
         "value": {
           "$ref": "common.json#/definitions/Value",
-          "description": "Single value for eq/ne/lt/le/gt/ge/like/not_like; ignored for null/not_null"
+          "description": "Single value for eq/ne/lt/le/gt/ge/like/not_like/contains/starts_with/ends_with/regex; ignored for null/not_null/empty"
+        },
+        "case_sensitive": {
+          "type": "boolean",
+          "description": "Match-case for the text ops only (like/not_like/contains/starts_with/ends_with/regex). true=force case-sensitive, false=force case-insensitive, absent=dialect default (behavior.md §13.5). Ignored by all other ops."
         },
         "second_value": {
           "$ref": "common.json#/definitions/Value",

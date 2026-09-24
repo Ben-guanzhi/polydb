@@ -270,13 +270,67 @@
 | `in` / `not_in` | `col IN (?[, ?...])` | `values` 为空数组 → `POLYDB_ERR_INVALID_PARAM` |
 | `between` | `col BETWEEN ? AND ?` | 用 `value` + `second_value` |
 | `null` / `not_null` | `col IS NULL` / `col IS NOT NULL` | 忽略 value |
+| `contains` / `starts_with` / `ends_with` | `col LIKE ? ESCAPE '!'` | 值先按 `!`→`!!`、`%`→`!%`、`_`→`!_` 转义，再分别包成 `%v%` / `v%` / `%v`；值缺失 → `POLYDB_ERR_INVALID_PARAM` |
+| `empty` | `(col IS NULL OR col = '')` | 「空」含 NULL；忽略 value |
+| `regex` | 见 §13.5 | 值必填；方言无原生正则 → `POLYDB_ERR_NOT_SUPPORTED` |
 
 - 多条件用 `logic`（`and`/`or`，缺省 `and`）以同层平铺连接，不支持括号分组（前端需要复杂
   条件时引导用户写 SQL）。
 - 未知 op / 空列名 / 非法列名（渲染失败）→ `POLYDB_ERR_INVALID_PARAM`。
 - 列不存在由数据库报错，映射 `POLYDB_ERR_QUERY_FAILED`。
+- `ESCAPE '!'` 而非 `ESCAPE '\'`：MySQL 字符串字面量里反斜杠自身要转义，`'\'` 会解析成空串，
+  故选无歧义的 `!` 作为转义符，六方言语义一致。
 
 ### 13.4 驱动能力
 
 - `SqlDriver` 新增 `browse_rows` / `browse_rows_count`；五个 SQL 驱动（sqlite/mysql/pg/mssql/oracle）
   双端全部实现，方言差异（标识符引用、LIMIT 风格）封在共享构造器 + 每驱动一份 dialect 声明。
+
+### 13.5 大小写敏感与正则的方言渲染
+
+`FilterCondition.case_sensitive`（可选布尔）**只作用于文本匹配类 op**：
+`like` / `not_like` / `contains` / `starts_with` / `ends_with` / `regex`。
+其余 op（`eq`/`in`/`between`/…）忽略该字段，避免对数值、日期列注入 `CAST`/`COLLATE` 而报错。
+
+三态语义（向后兼容是第一位的）：
+
+| 取值 | 语义 |
+|---|---|
+| 缺席 | **完全沿用 §13.3 形态**，不注入任何大小写处理，等价各方言默认排序规则（旧客户端零影响） |
+| `true` | 强制区分大小写 |
+| `false` | 强制不区分大小写 |
+
+文本匹配类 op 的具体形态（`LIKE` 代表 `NOT LIKE` 同理，正则单列）：
+
+| 方言 | `false`（强制不区分） | `true`（强制区分） | `regex` |
+|---|---|---|---|
+| PostgreSQL | `col ILIKE ?` | `col LIKE ?` | `col ~ ?` / `~* ?` |
+| MySQL | `LOWER(col) LIKE LOWER(?) ESCAPE '!'` | `CAST(col AS BINARY) LIKE CAST(? AS BINARY) ESCAPE '!'` | `col REGEXP ?` / `CAST(col AS BINARY) REGEXP CAST(? AS BINARY)` |
+| MSSQL | `LOWER(col) LIKE LOWER(?) ESCAPE '!'` | `col COLLATE Latin1_General_CS_AS LIKE ? ESCAPE '!'` | **无原生正则** → `POLYDB_ERR_NOT_SUPPORTED` |
+| Oracle | `LOWER(col) LIKE LOWER(?) ESCAPE '!'` | `col LIKE ?`（默认即区分） | `REGEXP_LIKE(col, ?)` / `REGEXP_LIKE(col, ?, 'i')` |
+| SQLite | `col LIKE ?`（ASCII 不区分，非 ASCII 区分） | `col GLOB ?` / `col NOT GLOB ?`（见下） | `col REGEXP ?`（UDF，见下） |
+
+- **SQLite 强制区分走 GLOB**：GLOB 天然区分大小写，故把 LIKE 模式翻译成 GLOB 模式——
+  `%`→`*`、`_`→`?`，并把 GLOB 的元字符按反斜杠转义（`\`→`\\`、`*`→`\*`、`?`→`\?`、`[`→`\[`）。
+  `contains`/`starts_with`/`ends_with` 直接对原始值做该转义再包 `*`。GLOB 的转义符默认就是 `\`，
+  不需要 `ESCAPE` 子句。
+- **SQLite 的 `REGEXP` 是驱动注册的标量函数**（`rusqlite` `create_scalar_function` /
+  modernc `ConnectHook`），语义为 `x REGEXP y` ⇔ `regexp(y, x)`。两端在连接建立时注册同一实现；
+  非法正则由数据库报错，映射 `POLYDB_ERR_QUERY_FAILED`。强制不区分写作
+  `lower(col) REGEXP lower(?)`（SQLite `lower()` 仅覆盖 ASCII）。
+- 强制不区分统一用 `LOWER(col) LIKE LOWER(?)`（除 PG 用 `ILIKE`）：正确性优先于走索引，
+  过滤栏本就是交互式收窄手段。代价是 SQLite/MySQL 的 `lower()` 对非 ASCII 无效，
+  即**非 ASCII 文本的「不区分大小写」不保证**；MSSQL `COLLATE …_CS_AS` 只适用于文本列。
+- 能力不足的组合必须**显式报错**（`POLYDB_ERR_NOT_SUPPORTED`），不得静默降级成不等价的 SQL；
+  前端据 §13.6 的能力矩阵把不可用 op 置灰。
+
+### 13.6 op × 方言能力矩阵（前端置灰依据）
+
+| 方言 | contains / starts_with / ends_with / empty | regex | case_sensitive 三态 |
+|---|---|---|---|
+| sqlite | ✓ | ✓（驱动注册 UDF） | ✓（不区分仅 ASCII） |
+| postgres | ✓ | ✓ | ✓ |
+| mysql | ✓ | ✓ | ✓ |
+| oracle | ✓ | ✓ | ✓ |
+| mssql | ✓ | ✗ `NOT_SUPPORTED` | ✓（区分靠 `COLLATE`，仅文本列） |
+| redis | 不适用（KV 无浏览过滤） | 不适用 | 不适用 |
