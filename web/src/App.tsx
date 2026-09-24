@@ -432,7 +432,7 @@ export default function App() {
               />
             ) : conn && conn.kind === 'redis' ? (
               <CollapsiblePane title="Redis 键浏览" variant="main">
-                <div className="pane-body"><RedisBrowser connId={conn.id} /></div>
+                <div className="pane-body"><RedisBrowser connId={conn.id} readOnly={!!conn.read_only} /></div>
               </CollapsiblePane>
             ) : (
               <CollapsiblePane title="库表" variant="main">
@@ -456,7 +456,7 @@ export default function App() {
         <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
           {conn ? (
             conn.kind === 'redis' ? (
-              <RedisBrowser connId={conn.id} />
+              <RedisBrowser connId={conn.id} readOnly={!!conn.read_only} />
             ) : (
               <>
                 <ObjectTabStrip

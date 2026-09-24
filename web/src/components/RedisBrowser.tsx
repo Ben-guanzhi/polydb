@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { RedisKeyInfo, RedisReply, RedisValue, RedisZSetMember } from '../api';
 import * as api from '../lib/api';
+import { redisWriteBlock } from '../lib/redisWrite';
 import CollapsiblePane from './CollapsiblePane';
 
 interface Props {
   connId: string;
+  readOnly?: boolean;
 }
 
 interface ConsoleEntry {
@@ -15,7 +17,7 @@ interface ConsoleEntry {
 
 const DBS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
-export default function RedisBrowser({ connId }: Props) {
+export default function RedisBrowser({ connId, readOnly }: Props) {
   const [db, setDb] = useState(0);
   const [pattern, setPattern] = useState('*');
   const [keys, setKeys] = useState<RedisKeyInfo[]>([]);
@@ -25,6 +27,10 @@ export default function RedisBrowser({ connId }: Props) {
   const [selKey, setSelKey] = useState<string | null>(null);
   const [value, setValue] = useState<RedisValue | null>(null);
   const [valueError, setValueError] = useState<string | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [consoleInput, setConsoleInput] = useState('');
   const [consoleEntries, setConsoleEntries] = useState<ConsoleEntry[]>([]);
   const [history, setHistory] = useState<string[]>([]);
@@ -78,11 +84,46 @@ export default function RedisBrowser({ connId }: Props) {
     setSelKey(key);
     setValue(null);
     setValueError(null);
+    setEditing(false);
+    setSaveError(null);
     try {
       setValue(await api.kvGetValue(connId, key));
     } catch (e) {
       setValueError(e instanceof Error ? e.message : String(e));
     }
+  };
+
+  const startEdit = () => {
+    const why = redisWriteBlock(value, readOnly);
+    if (why) {
+      setSaveError(why);
+      return;
+    }
+    setSaveError(null);
+    setDraft(String(value?.value ?? ''));
+    setEditing(true);
+  };
+
+  const commitEdit = async () => {
+    if (!selKey || saving) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await api.kvSetValue(connId, { key: selKey, value: { type: 'string', value: draft } });
+      setEditing(false);
+      // 写后回读：服务端静默失败不能让界面停在旧值上却显示成功。
+      setValue(await api.kvGetValue(connId, selKey));
+    } catch (e) {
+      // 失败留在编辑态并保留输入，便于改正重试。
+      setSaveError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const cancelEdit = () => {
+    setEditing(false);
+    setSaveError(null);
   };
 
   const runCommand = async (raw: string) => {
@@ -195,7 +236,46 @@ export default function RedisBrowser({ connId }: Props) {
         <div className="pane-body" style={{ display: 'flex', flexDirection: 'column', gap: 10, overflow: 'auto' }}>
           {valueError && <div className="error-box">{valueError}</div>}
           {selKey && <div className="mono muted" style={{ fontSize: 12 }}>{selKey}</div>}
-          {value && <ValueView value={value} />}
+          {saveError && <div className="error-box">{saveError}</div>}
+          {value && !editing && (
+            <div className="row" style={{ gap: 6, alignItems: 'center' }}>
+              <button onClick={startEdit} title={redisWriteBlock(value, readOnly) ?? '整值写回（仅 string）'}>
+                ✎ 写回整值
+              </button>
+              {value.type !== 'string' && (
+                <span className="muted" style={{ fontSize: 12 }}>非 string：请用下方命令行改元素</span>
+              )}
+            </div>
+          )}
+          {value && editing && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <textarea
+                value={draft}
+                rows={5}
+                autoFocus
+                className="mono"
+                style={{ fontSize: 12, whiteSpace: 'pre-wrap' }}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    e.preventDefault();
+                    cancelEdit();
+                  } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                    e.preventDefault();
+                    void commitEdit();
+                  }
+                }}
+              />
+              <div className="row" style={{ gap: 6 }}>
+                <button className="primary" disabled={saving} onClick={() => void commitEdit()}>
+                  {saving ? '写入…' : '保存并回读'}
+                </button>
+                <button disabled={saving} onClick={cancelEdit}>取消（Esc）</button>
+                <span className="muted" style={{ fontSize: 12, alignSelf: 'center' }}>Ctrl+Enter 提交</span>
+              </div>
+            </div>
+          )}
+          {value && !editing && <ValueView value={value} />}
           {!selKey && !value && <div className="empty">从左侧选择一个键查看值，或在下方执行 Redis 命令。</div>}
           <div
             className="pane"

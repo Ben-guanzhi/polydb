@@ -144,7 +144,10 @@
   `lib/explain.ts` / TUI `go/pkg/explain` 同语义、输出逐字一致），顶栏「⚙ 执行计划」+ `F9` /
   `Ctrl+Shift+E` 触发，绝对定位浮层展平渲染 `├─/└─/│` 计划行、可一键复制、`Esc`/点击外部关闭；
   Redis 连接不渲染入口并提示「Redis 无执行计划」，重新执行查询即作废旧快照。无 spec 变更。
-- **D4** Redis string 整值写回：Web + GUI 对齐 TUI 的 `e`。
+- **D4** ✅（2026-09-25）Redis string 整值写回：Web + GUI 对齐 TUI 的 `e`。后端 PUT 早已齐备，
+  本轮纯前端接线、零 spec 变更；门禁三态顺序（未加载 → 只读 → 非 string）三端一致，
+  提交后回读确认、写失败保留输入。Web 门禁抽为 `lib/redisWrite.ts` + 单测，GUI 抽为
+  `util::redis_write_block` + 单测。见 `docs/frontends.md`「Redis 整值写回（三端一致，D4）」。
 - 仍不排期（各自需新里程碑再拆）：Rewind 快照（需存储层）、Compare & Sync、Server Dashboard、
   左缘连接条 rail。
 
@@ -212,4 +215,4 @@
   只读连接禁用全部写入口；`Ctrl+P` Quick-open。
 - 差异（有意保留）：终端无鼠标习惯 → TUI 不做拖拽选区；取消入口三端形态不同（`F8` / 顶栏按钮 / `Ctrl+Esc`）；
   执行计划三端均已具备（阶段 D 补齐 GUI，触发形态各异：`F9` / 工具栏按钮 / 顶栏按钮）；
-  Redis 整值写回仅 TUI（Web 走命令行、GUI 只读）。
+  Redis 整值写回三端均已具备（阶段 D 补齐 Web/GUI，见 D4；list/hash/set 仍只有命令行）。

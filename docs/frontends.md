@@ -68,8 +68,8 @@ polydb 有多个前端，均遵守 AGENTS.md 铁律：**只经 `app-core`（进�
     「运行 EXPLAIN」，走 `lib/explain.ts`；GUI 顶栏「⚙ 执行计划」+ `F9`/`Ctrl+Shift+E`，
     走 `rust/crates/ui-gui/src/explain.rs`（三端各自实现、输出逐字一致，见「执行计划」一节）。
   - 连接编辑：三端均有表单（TUI 连接列表 `e`，Web/GUI 走连接列表编辑入口）。
-  - Redis 值写回：TUI `e` 放开 string 整值写回（Enter 提交并回读）；Web 走命令行
-    `exec_command`；GUI 为只读子集。
+  - Redis 值写回：三端同为 **string 整值写回**（TUI `e`、GUI/Web 键值面板「✎ 写回整值」），
+    提交后回读确认；list/hash/set/zset 仍走命令行 `exec_command` 按元素改（见「Redis 整值写回」一节）。
   - Quick Switcher：三端同为 `Ctrl+P`（语义各异：TUI 跨 schema 搜表、Web 搜表、GUI 在已开对象 tab 间跳转）。
 
 ## GUI（M1 扩展，Rust + GPUI）
@@ -81,7 +81,7 @@ polydb 有多个前端，均遵守 AGENTS.md 铁律：**只经 `app-core`（进�
 - 形态（阶段 A G1–G6 后）：对象 tab 壳层（workbench 常驻 + 表 tab 多开，rails 概览/数据/结构/关系）、
   侧栏 schema→表→列树 + schema 切换、数据浏览（过滤栏 18 op + 大小写三态/排序/页大小/精确计数/Inspector 尾板/
   虚拟滚动网格）、变更跟踪编辑（Review + 单事务提交/回滚 + 撤销栈 + 只读门禁）、连接 CRUD 表单、
-  结果导出 CSV/TSV/JSON/NDJSON/Markdown/INSERT、Redis 键浏览（只读子集）、SQL 编辑器选区/剪贴板/
+  结果导出 CSV/TSV/JSON/NDJSON/Markdown/INSERT、Redis 键浏览 + string 整值写回、SQL 编辑器选区/剪贴板/
   undo-redo + Quick Switcher（`Ctrl+P` 在已开对象 tab 间跳转）、执行计划浮层（`F9`）。
   主题走 `theme.rs` token（dark 默认 + light）。
 - 顶栏「■ 取消」为多语句尽力而为取消（当前语句跑完、剩余跳过）；驱动层无中断，故不是即时取消。
@@ -136,3 +136,26 @@ polydb 有多个前端，均遵守 AGENTS.md 铁律：**只经 `app-core`（进�
 - 树渲染展平为 `├─ / └─ / │` 缩进行，GUI 浮层里以等宽文本显示，可一键复制。
 - GUI 门禁：Redis 连接顶栏不渲染该按钮，`F9`/`Ctrl+Shift+E` 走同一入口时状态栏提示
   「Redis 无执行计划」；重新执行查询会清掉已过期的计划快照。
+
+## Redis 整值写回（三端一致，D4）
+
+- 后端**早已齐备**（`PUT /api/connections/{id}/kv/keys/{key}` ↔ `spec/schemas/redis.json#RedisSetRequest`、
+  Rust/Go `KvDriver::set_value`），本轮零 spec 变更、纯前端接线：把此前只有 TUI 的整值写回补齐到 Web/GUI。
+- **门禁三态同一顺序**（值未加载 → 只读连接 → 非 string），三端各自实现同一语义：Web
+  `web/src/lib/redisWrite.ts`、GUI `util::redis_write_block`、TUI `kvStartEdit`。非 string 一律提示
+  走命令行按元素改（`RPUSH`/`HSET` …），不做「整值 JSON 覆盖」这种隐式 widening。
+- **提交后必须回读**：写成功再 `get_value` 刷新展示值，避免服务端静默失败时界面停在旧值却报成功；
+  回读失败则清空展示值并提示重点键名确认。写失败**留在编辑态并保留输入**，改完即可重试。
+- 交互入口：TUI 键列表 `e`（`Enter` 提交回读 / `Esc` 放弃）；GUI 键值面板「✎ 写回整值」→ 单行编辑框
+  （`Enter` 提交回读 / `Esc` 放弃 / `Ctrl+V` 粘贴，与模式输入共用面板焦点，按状态优先分发）；Web
+  键值面板同按钮 → `textarea`（`Ctrl+Enter` 提交 / `Esc` 放弃）。切库、重扫、换键一律丢弃编辑态。
+- 只读连接（`read_only`）三端都禁写：Web 经 `App.tsx` 透传 `readOnly`，GUI 走 `is_read_only()`，
+  TUI 在 `kvStartEdit` 门禁中判定。
+
+## 已知未验证项
+
+- 三端 Redis 写回**未端到端跑过**：链路需要真实 Redis 实例，本机没有常驻服务。离线门禁只保证
+  纯函数层（Web `redisWrite.test.ts`、GUI `util::tests::redis_write_block_gates`）；`PUT /kv/keys`
+  两端的 set/get 对拍在 `test/contract/contract_test.go` 的 `set *` / `get *` 步骤里，Redis
+  不可达时按既有 soft-skip 整段跳过，因此本轮没有服务端验证数字。
+- GUI 编辑框（GPUI 单行输入 + `▏` 光标）与 Web `textarea` 的渲染效果未做肉眼验证。

@@ -606,6 +606,11 @@ pub struct PolyDBApp {
     pub(crate) redis_loading: bool,
     pub(crate) redis_selected: Option<String>,
     pub(crate) redis_value: Option<RedisValue>,
+    /// D4 string 值整值写回子模式（对齐 TUI 的 `e`；其余类型走不了整值替换）。
+    pub(crate) redis_val_editing: bool,
+    /// 写回缓冲 + 字节光标（单行，与 TUI textinput 同形态）。
+    pub(crate) redis_val_buf: String,
+    pub(crate) redis_val_cursor: usize,
 
     // ── 壳层标签 ──
     pub(crate) active: ActiveView,
@@ -677,6 +682,9 @@ impl PolyDBApp {
             redis_loading: false,
             redis_selected: None,
             redis_value: None,
+            redis_val_editing: false,
+            redis_val_buf: String::new(),
+            redis_val_cursor: 0,
             active: ActiveView::Workbench,
             tabs: Vec::new(),
             quick_open: false,
@@ -803,6 +811,7 @@ impl PolyDBApp {
         self.redis_keys.clear();
         self.redis_selected = None;
         self.redis_value = None;
+        self.redis_val_editing = false;
         self.redis_scan_cursor = 0;
     }
 
@@ -1173,7 +1182,7 @@ impl PolyDBApp {
         .detach();
     }
 
-    // ─── G4.4 Redis 键浏览（只读子集：选库 / SCAN / 取值）───
+    // ─── G4.4 Redis 键浏览（选库 / SCAN / 取值）+ D4 string 整值写回 ───
 
     pub(crate) fn is_redis(&self) -> bool {
         self.sel_kind() == Some(DatabaseKind::Redis)
@@ -1194,6 +1203,7 @@ impl PolyDBApp {
         let pattern = self.redis_pat();
         self.redis_selected = None;
         self.redis_value = None;
+        self.redis_val_editing = false;
         self.redis_loading = true;
         cx.notify();
         self.io(
@@ -1228,6 +1238,7 @@ impl PolyDBApp {
         let pattern = self.redis_pat();
         self.redis_selected = None;
         self.redis_value = None;
+        self.redis_val_editing = false;
         self.redis_loading = true;
         cx.notify();
         self.io(
@@ -1286,6 +1297,7 @@ impl PolyDBApp {
         let Some(id) = self.sel_id() else { return };
         self.redis_selected = Some(key.clone());
         self.redis_value = None;
+        self.redis_val_editing = false;
         cx.notify();
         self.io(
             cx,
@@ -1300,6 +1312,101 @@ impl PolyDBApp {
         );
     }
 
+    // ─── D4 string 值整值写回（对齐 TUI 的 `e`：仅 string、写后回读、失败留输入）───
+
+    fn redis_write_block(&self) -> Option<&'static str> {
+        crate::util::redis_write_block(self.redis_value.as_ref(), self.is_read_only())
+    }
+
+    /// 进入写回子模式，缓冲预填当前值。
+    pub(crate) fn redis_start_edit_value(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(why) = self.redis_write_block() {
+            self.status = why.to_string();
+            cx.notify();
+            return;
+        }
+        let raw = match self.redis_value.as_ref() {
+            Some(RedisValue::String(s)) => s.clone(),
+            _ => String::new(),
+        };
+        self.redis_editing = false;
+        self.redis_val_buf = raw;
+        self.redis_val_cursor = self.redis_val_buf.len();
+        self.redis_val_editing = true;
+        window.focus(&self.redis_focus);
+        cx.notify();
+    }
+
+    pub(crate) fn redis_cancel_edit_value(&mut self, cx: &mut Context<Self>) {
+        self.redis_val_editing = false;
+        self.status = "已放弃写入".into();
+        cx.notify();
+    }
+
+    /// 提交整值并回读确认：写失败留在编辑态保留输入，回读失败不把旧值当新值显示。
+    pub(crate) fn redis_commit_edit_value(&mut self, cx: &mut Context<Self>) {
+        let (Some(id), Some(key)) = (self.sel_id(), self.redis_selected.clone()) else {
+            return;
+        };
+        self.redis_val_editing = false;
+        cx.notify();
+        let buf = self.redis_val_buf.clone();
+        self.io(
+            cx,
+            move |t| {
+                Box::pin(async move {
+                    match t.set_value(id, &key, RedisValue::String(buf)).await {
+                        Ok(()) => (None, Some(t.get_value(id, &key).await)),
+                        Err(e) => (Some(e.to_string()), None),
+                    }
+                })
+            },
+            move |this, out, cx| {
+                let (err, readback) = out;
+                if let Some(e) = err {
+                    this.redis_val_editing = true;
+                    this.status = format!("写入失败: {e}");
+                } else if let Some(Ok(v)) = readback {
+                    this.redis_value = Some(v);
+                    this.status = "已写入并回读确认".into();
+                } else {
+                    this.redis_value = None;
+                    this.status = "已写入，但回读失败：点击键名重试确认".into();
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    /// 写回子模式按键：Enter 提交并回读、Esc 放弃，其余走单行编辑。
+    fn on_redis_value_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+        let ks = &ev.keystroke;
+        if ks.key == "escape" {
+            self.redis_cancel_edit_value(cx);
+            return;
+        }
+        if ks.key == "enter" {
+            self.redis_commit_edit_value(cx);
+            return;
+        }
+        let mut cursor = self.redis_val_cursor;
+        let pasted = if (ks.modifiers.control || ks.modifiers.platform) && ks.key == "v" {
+            cx.read_from_clipboard()
+                .and_then(|i| i.text().map(|t| t.to_string()))
+        } else {
+            None
+        };
+        if let Some(text) = pasted {
+            let at = char_ceil(&self.redis_val_buf, cursor.min(self.redis_val_buf.len()));
+            self.redis_val_buf.insert_str(at, &text);
+            self.redis_val_cursor = at + text.len();
+            cx.notify();
+        } else if edit_line(&mut self.redis_val_buf, &mut cursor, ks) {
+            self.redis_val_cursor = cursor;
+            cx.notify();
+        }
+    }
+
     pub(crate) fn focus_redis_pattern(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.redis_editing = true;
         self.redis_cursor = self.redis_pattern.len();
@@ -1308,6 +1415,11 @@ impl PolyDBApp {
     }
 
     pub(crate) fn on_redis_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+        // 面板级键分发：整值写回优先于模式输入（两者共用 redis_focus）。
+        if self.redis_val_editing {
+            self.on_redis_value_key(ev, cx);
+            return;
+        }
         if !self.redis_editing {
             return;
         }

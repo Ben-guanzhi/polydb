@@ -1,7 +1,7 @@
-//! 纯函数工具：值渲染、单元格预览辅助、光标字节定位、多语句拆分。
+//! 纯函数工具：值渲染、单元格预览辅助、光标字节定位、多语句拆分、Redis 写回门禁。
 
 use gpui::Keystroke;
-use polydb_core::Value;
+use polydb_core::{RedisValue, Value};
 
 // 单行文本编辑器：把一次按键作用到字符串 + 光标（字节下标）上，返回是否有改动。
 // Ctrl/平台键交回上层（剪贴板等）处理，此处直接返回 false。
@@ -341,6 +341,25 @@ pub(crate) fn split_statements(sql: &str) -> Vec<String> {
     out
 }
 
+/// Redis 整值写回门禁（D4，与 TUI `kvStartEdit` / Web `redisWriteBlock` 同语义）：
+/// 只有**已加载的 string 值**且连接非只读才能整值替换；list/hash/set 需按元素操作，走命令行。
+/// 返回提示语，`None` 表示可以写。
+pub(crate) fn redis_write_block(
+    value: Option<&RedisValue>,
+    read_only: bool,
+) -> Option<&'static str> {
+    let Some(v) = value else {
+        return Some("先从左侧点击键加载值");
+    };
+    if read_only {
+        return Some("连接标记为只读，不能写入");
+    }
+    if !matches!(v, RedisValue::String(_)) {
+        return Some("仅 string 支持整值写回，其余类型请用命令行（RPUSH/HSET …）");
+    }
+    None
+}
+
 // 多语句日志用的单行摘要。
 pub(crate) fn stmt_preview(s: &str) -> String {
     let one: String = s.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
@@ -353,6 +372,28 @@ mod tests {
 
     fn split(s: &str) -> Vec<String> {
         split_statements(s)
+    }
+
+    #[test]
+    fn redis_write_block_gates() {
+        use polydb_core::RedisValue;
+        let string = RedisValue::String("v".into());
+        let list = RedisValue::List(vec!["a".into()]);
+        assert_eq!(redis_write_block(None, false), Some("先从左侧点击键加载值"));
+        // 只读门禁优先于类型门禁（与 TUI 提示顺序一致）。
+        assert_eq!(
+            redis_write_block(Some(&list), true),
+            Some("连接标记为只读，不能写入")
+        );
+        assert_eq!(
+            redis_write_block(Some(&list), false),
+            Some("仅 string 支持整值写回，其余类型请用命令行（RPUSH/HSET …）")
+        );
+        assert_eq!(
+            redis_write_block(Some(&string), true),
+            Some("连接标记为只读，不能写入")
+        );
+        assert_eq!(redis_write_block(Some(&string), false), None);
     }
 
     #[test]

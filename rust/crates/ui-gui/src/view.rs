@@ -742,7 +742,8 @@ impl PolyDBApp {
             .into_any_element()
     }
 
-    /// G4.4 Redis 键浏览面板（只读）：选库 + SCAN 模式 + 键列表 + 取值详情。
+    /// G4.4 Redis 键浏览面板：选库 + SCAN 模式 + 键列表 + 取值详情；
+    /// D4 起 string 值可整值写回（其余类型仍只读，需走命令行）。
     fn render_redis_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let th = self.theme;
         let db = self.redis_db;
@@ -753,6 +754,9 @@ impl PolyDBApp {
         let pcur = self.redis_cursor;
         let keys = self.redis_keys.clone();
         let selected = self.redis_selected.clone();
+        let vediting = self.redis_val_editing;
+        let vbuf = self.redis_val_buf.clone();
+        let vcur = self.redis_val_cursor;
 
         let db_chips: Vec<Stateful<Div>> = (0..16u32)
             .map(|i| {
@@ -866,10 +870,41 @@ impl PolyDBApp {
                     if selected.is_some() {
                         "读取中…"
                     } else {
-                        "点击左侧键查看值（只读）"
+                        "点击左侧键查看值"
                     },
                 )],
             ),
+        };
+        let has_value = self.redis_value.is_some();
+        let is_string = matches!(&self.redis_value, Some(RedisValue::String(_)));
+        // 写回子模式下单行缓冲就地显示光标；否则展示驱动回读的值行。
+        let val_body: AnyElement = if vediting {
+            let mut s = vbuf.clone();
+            let at = vcur.min(s.len());
+            s.insert(at, '▏');
+            div()
+                .id("rd-val-edit")
+                .w_full()
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded(px(4.0))
+                .bg(th.surface2)
+                .border(px(1.0))
+                .border_color(th.accent)
+                .font_family("monospace")
+                .text_size(px(12.0))
+                .text_color(th.fg)
+                .cursor(CursorStyle::IBeam)
+                .child(s)
+                .on_click(cx.listener(|this, _ev: &ClickEvent, window, _cx| {
+                    window.focus(&this.redis_focus);
+                }))
+                .into_any_element()
+        } else {
+            div()
+                .font_family("monospace")
+                .children(vlines)
+                .into_any_element()
         };
 
         div()
@@ -971,9 +1006,32 @@ impl PolyDBApp {
                                                     .unwrap_or_else(|| "（未选择键）".into()),
                                             ),
                                     )
-                                    .when_some(type_label, |d, tl| d.child(badge(tl, th.ok, &th))),
+                                    .when_some(type_label, |d, tl| d.child(badge(tl, th.ok, &th)))
+                                    .when(vediting, |d| {
+                                        d.child(
+                                            div()
+                                                .text_size(px(11.0))
+                                                .text_color(th.fg_dim)
+                                                .child("Enter 提交并回读 · Esc 放弃"),
+                                        )
+                                    })
+                                    .when(!vediting && has_value && is_string, |d| {
+                                        d.child(btn("rd-val-write", "✎ 写回整值", &th).on_click(
+                                            cx.listener(|this, _ev: &ClickEvent, window, cx| {
+                                                this.redis_start_edit_value(window, cx);
+                                            }),
+                                        ))
+                                    })
+                                    .when(!vediting && has_value && !is_string, |d| {
+                                        d.child(
+                                            div()
+                                                .text_size(px(11.0))
+                                                .text_color(th.fg_dim)
+                                                .child("仅 string 支持整值写回"),
+                                        )
+                                    }),
                             )
-                            .child(div().font_family("monospace").children(vlines)),
+                            .child(val_body),
                     ),
             )
             .into_any_element()
