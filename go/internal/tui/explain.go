@@ -66,7 +66,8 @@ func (m *model) explainView() string {
 	if m.explainRes == nil {
 		b.WriteString("（无执行计划：先 F9 分析当前 SQL）\n")
 		return b.String()
-	}	lines := m.explainRes.Lines()
+	}
+	lines := m.explainRes.Lines()
 	avail := m.explainAvail()
 	start := min(m.explainScroll, max(len(lines)-avail, 0))
 	end := min(start+avail, len(lines))
