@@ -1572,12 +1572,45 @@ func (m *model) footer() string {
 	return ""
 }
 
+// listWindow 计算列表视口：给定总行数、光标、可用行数，返回 [start,end)，
+// 尽量让光标居中；avail<=0（终端高度未探测）时返回全量，退化为不裁剪。
+func listWindow(total, cursor, avail int) (start, end int) {
+	if total <= 0 {
+		return 0, 0
+	}
+	if avail <= 0 || total <= avail {
+		return 0, total
+	}
+	start = cursor - avail/2
+	if start < 0 {
+		start = 0
+	}
+	if start+avail > total {
+		start = total - avail
+	}
+	return start, start + avail
+}
+
+// contentLines 返回可安全用于列表正文的行数（终端高度未探测时返回 0，令裁剪退化为不生效）。
+// 预留：标题 1 + 分隔线 1 + 状态/页脚 1 + 视口提示 1 ≈ 4 行。
+func (m *model) contentLines() int {
+	if m.height <= 4 {
+		return 0
+	}
+	return m.height - 4
+}
+
 func (m *model) connsView() string {
 	if len(m.conns) == 0 {
 		return "暂无连接，按 n 新建。\n"
 	}
+	start, end := listWindow(len(m.conns), m.connCursor, m.contentLines())
 	var b strings.Builder
-	for i, c := range m.conns {
+	if start > 0 {
+		fmt.Fprintf(&b, "↑ 上方还有 %d 项\n", start)
+	}
+	for i := start; i < end; i++ {
+		c := m.conns[i]
 		marker := "  "
 		if i == m.connCursor {
 			marker = "▸ "
@@ -1601,6 +1634,9 @@ func (m *model) connsView() string {
 		}
 		b.WriteString(line + "\n")
 	}
+	if end < len(m.conns) {
+		fmt.Fprintf(&b, "↓ 下方还有 %d 项\n", len(m.conns)-end)
+	}
 	return b.String()
 }
 
@@ -1619,7 +1655,13 @@ func (m *model) tablesView() string {
 		b.WriteString("（无表）")
 		return b.String()
 	}
-	for i, t := range m.tables {
+	// 表清单视口：预留 schema 头 1 行 + 提示 2 行。
+	start, end := listWindow(len(m.tables), m.tableCur, m.contentLines()-1)
+	if start > 0 {
+		fmt.Fprintf(&b, "↑ 上方还有 %d 张\n", start)
+	}
+	for i := start; i < end; i++ {
+		t := m.tables[i]
 		marker := "  "
 		if i == m.tableCur {
 			marker = "▸ "
@@ -1633,6 +1675,9 @@ func (m *model) tablesView() string {
 		}
 		b.WriteString(line + "\n")
 	}
+	if end < len(m.tables) {
+		fmt.Fprintf(&b, "↓ 下方还有 %d 张\n", len(m.tables)-end)
+	}
 	return b.String()
 }
 
@@ -1645,7 +1690,13 @@ func (m *model) quickOpenView() string {
 	}
 	total := len(m.qoAll)
 	b.WriteString(fmt.Sprintf("匹配 %d / 共 %d 张表\n", len(m.qoFiltered), total))
-	for i, it := range m.qoFiltered {
+	// 候选视口：预留输入 1 + 统计 1 + 提示 2 行。
+	start, end := listWindow(len(m.qoFiltered), m.qoCur, m.contentLines()-2)
+	if start > 0 {
+		fmt.Fprintf(&b, "↑ 上方还有 %d 项\n", start)
+	}
+	for i := start; i < end; i++ {
+		it := m.qoFiltered[i]
 		marker := "  "
 		if i == m.qoCur {
 			marker = "▸ "
@@ -1655,6 +1706,9 @@ func (m *model) quickOpenView() string {
 			line = selected(line)
 		}
 		b.WriteString(line + "\n")
+	}
+	if end < len(m.qoFiltered) {
+		fmt.Fprintf(&b, "↓ 下方还有 %d 项\n", len(m.qoFiltered)-end)
 	}
 	return b.String()
 }

@@ -809,6 +809,30 @@ func TestKVViewNavigation(t *testing.T) {
 
 // ─── 主题 token 化（NO_COLOR / dark-light / 强制档位）────────
 
+func TestListWindow(t *testing.T) {
+	cases := []struct {
+		total, cursor, avail int
+		start, end           int
+	}{
+		{0, 0, 10, 0, 0},       // 空列表
+		{5, 2, 10, 0, 5},       //  avail 足够 → 全量
+		{100, 0, 10, 0, 10},    // 顶部光标
+		{100, 99, 10, 90, 100}, // 底部光标
+		{100, 50, 10, 45, 55},  // 居中
+		{20, 18, 5, 15, 20},    // 尾部贴边
+		{100, 3, 10, 0, 10},    // 光标靠上，窗口顶格
+	}
+	for _, c := range cases {
+		s, e := listWindow(c.total, c.cursor, c.avail)
+		if s != c.start || e != c.end {
+			t.Errorf("listWindow(%d,%d,%d) = (%d,%d), want (%d,%d)", c.total, c.cursor, c.avail, s, e, c.start, c.end)
+		}
+		if e < s || e > c.total || s < 0 {
+			t.Errorf("listWindow(%d,%d,%d) out of bounds: (%d,%d)", c.total, c.cursor, c.avail, s, e)
+		}
+	}
+}
+
 func TestThemeProfileSelection(t *testing.T) {
 	keys := []string{"NO_COLOR", "POLYDB_TUI_NO_COLOR", "POLYDB_TUI_COLOR", "POLYDB_TUI_THEME"}
 	for _, k := range keys {
