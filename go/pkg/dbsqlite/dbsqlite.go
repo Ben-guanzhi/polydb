@@ -313,8 +313,11 @@ func (c *Conn) CreateTableSQL(ctx context.Context, schema, table string) (string
 	return ddl, nil
 }
 
+// shouldQuery 判定是否走 Query 以取回行集。其余四家 Go 驱动一律把
+// StatementTypeOther 当查询（EXPLAIN / PRAGMA / SHOW 有行集），SQLite 此前落到
+// Exec 分支导致 EXPLAIN 结果被丢弃，这里对齐；DDL 与 DML 仍走 Exec 保留 affected_rows。
 func shouldQuery(stmtType protocol.StatementType, sql string) bool {
-	if stmtType == protocol.StatementTypeSelect {
+	if stmtType == protocol.StatementTypeSelect || stmtType == protocol.StatementTypeOther {
 		return true
 	}
 	return strings.Contains(strings.ToUpper(sql), "RETURNING")

@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/google/uuid"
 	"github.com/polydb/polydb/pkg/changes"
+	"github.com/polydb/polydb/pkg/explain"
 	"github.com/polydb/polydb/pkg/protocol"
 	"github.com/polydb/polydb/pkg/transport"
 )
@@ -28,6 +29,7 @@ const (
 	viewResults
 	viewBrowse
 	viewQuickOpen
+	viewExplain
 )
 
 // 心跳：每 30s ping 当前连接；测试经 TestMain 置 heartbeatDisabled，
@@ -57,6 +59,7 @@ var viewTitles = map[view]string{
 	viewResults:   "结果导航",
 	viewBrowse:    "数据浏览",
 	viewQuickOpen: "搜索表",
+	viewExplain:   "执行计划",
 }
 
 // title 返回当前视图标题；表单视图按新建/编辑区分。
@@ -104,6 +107,12 @@ type model struct {
 	queryCancel    context.CancelFunc
 	queryID        string
 	queryCancelled bool
+
+	// 执行计划（T4.4）：F9 用同一条在途通道跑 EXPLAIN，结果在 viewExplain 渲染。
+	explainPending bool
+	explainRes     *explain.Render
+	explainScroll  int
+	explainSQL     string
 
 	// 查询历史抽屉（T2.6）：F4 开合，消费本地 JSONL。
 	histOpen bool
@@ -386,8 +395,27 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			c() // 结束即释放 ctx，避免泄漏
 		}
 		m.queryCancel, m.queryID, m.queryCancelled = nil, "", false
-		if sql := m.querySQL; sql != "" {
+		// EXPLAIN 那一轮不入历史：querySQL 可能还留着上一条失败的语句，
+		// 无守卫会让每次 F9 都重复记一条。
+		if sql := m.querySQL; sql != "" && !m.explainPending {
 			_ = appendHistory(histEntry{Time: time.Now().Unix(), Conn: m.selectedID, SQL: sql})
+		}
+		if m.explainPending {
+			m.explainPending = false
+			if msg.err != nil {
+				if cancelled {
+					m.status = "EXPLAIN 已取消"
+				} else {
+					m.status = "EXPLAIN 失败: " + msg.err.Error()
+				}
+				return m, nil
+			}
+			kind, _ := m.connKindReadOnly()
+			r := explain.RenderResult(msg.res, kind)
+			m.explainRes, m.explainScroll = &r, 0
+			m.status = "执行计划 · " + string(kind)
+			m.view = viewExplain
+			return m, nil
 		}
 		if msg.err != nil {
 			m.queryErr = msg.err
@@ -605,6 +633,8 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.browseKey(msg)
 	case viewQuickOpen:
 		return m.quickOpenKey(msg)
+	case viewExplain:
+		return m.explainKey(msg)
 	}
 	return m, nil
 }
@@ -964,6 +994,8 @@ func (m *model) queryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyF5, tea.KeyCtrlE:
 		return m.runQuery()
+	case tea.KeyF9:
+		return m.runExplain()
 	case tea.KeyF6:
 		if m.queryResult != nil && len(m.queryResult.Columns) > 0 {
 			m.resRow, m.resCol, m.cellFull = 0, 0, false
@@ -1662,14 +1694,35 @@ func (m *model) runQuery() (tea.Model, tea.Cmd) {
 		m.status = "SQL 为空"
 		return m, nil
 	}
+	return m.runSQL(sql, true)
+}
+
+// runSQL 走统一的在途通道执行 sql（预生成 query_id + 可取消 ctx）。
+// toHistory=false 用于 EXPLAIN：不把分析语句灌进查询历史。
+func (m *model) runSQL(sql string, toHistory bool) (tea.Model, tea.Cmd) {
 	qid := uuid.NewString()
 	ctx, cancel := context.WithCancel(context.Background())
-	m.querySQL = sql
+	if toHistory {
+		m.querySQL = sql
+	}
 	m.queryID = qid
 	m.queryCancel = cancel
 	m.queryCancelled = false
 	m.busy = "执行中 …（F8 取消）"
 	return m, queryCmd(ctx, m.app, qid, m.selectedID, sql)
+}
+
+// runExplain 按当前连接方言把编辑器 SQL 包成 EXPLAIN 语句并执行（F9）。
+func (m *model) runExplain() (tea.Model, tea.Cmd) {
+	kind, _ := m.connKindReadOnly()
+	sql := explain.BuildSQL(m.queryInput.Value(), kind)
+	if sql == "" {
+		m.status = "无可分析的 SQL"
+		return m, nil
+	}
+	m.explainPending = true
+	m.explainSQL = sql
+	return m.runSQL(sql, false)
 }
 
 // cancelInflight 中断在途查询：本地取消 ctx，远程再打 cancel 端点让服务端中断执行。
@@ -2066,6 +2119,8 @@ func (m *model) View() string {
 		body = m.browseView()
 	case viewQuickOpen:
 		body = m.quickOpenView()
+	case viewExplain:
+		body = m.explainView()
 	}
 	return m.frame(body)
 }
@@ -2115,7 +2170,7 @@ func (m *model) footer() string {
 		if len(m.acCandidates) > 0 {
 			return "↑/↓ 选择 · Enter 接受 · Esc 关闭 · F5 执行"
 		}
-		return "Tab 补全表/列 · F5 / Ctrl+E 执行 · F8 取消 · F4 历史 · F6 导航结果 · Esc 返回"
+		return "Tab 补全表/列 · F5 / Ctrl+E 执行 · F9 执行计划 · F8 取消 · F4 历史 · F6 导航结果 · Esc 返回"
 	case viewKV:
 		if m.kvEdit {
 			return "编辑值 · Enter 写回并回读 · Esc 放弃"
@@ -2148,6 +2203,8 @@ func (m *model) footer() string {
 		return "↑/↓ 行 · ←/→ 翻页 · e 编辑 · u 撤销 · w 审阅 · / 过滤 · c 计数 · s 排序 · p 页 · o 且/或 · d 删过滤 · Esc 返回"
 	case viewQuickOpen:
 		return "↑/↓ 选择 · Enter 打开 · Esc 返回"
+	case viewExplain:
+		return "↑/↓ · j/k 滚动 · Esc / q 返回查询"
 	}
 	return ""
 }

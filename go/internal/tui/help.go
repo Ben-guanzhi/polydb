@@ -70,11 +70,18 @@ func (m *model) viewHelp() []helpEntry {
 		return []helpEntry{
 			{"Tab", "补全表 / 列"},
 			{"F5 · Ctrl+E", "执行查询"},
+			{"F9", "按方言生成并执行 EXPLAIN，查看计划树"},
 			{"F8", "取消在途查询"},
 			{"F4", "查询历史抽屉"},
 			{"F6", "导航结果"},
 			{"Ctrl+←/→", "词级左右移动"},
 			{"Esc", "返回库表结构"},
+		}
+	case viewExplain:
+		return []helpEntry{
+			{"↑/↓ · j/k", "滚动计划"},
+			{"F8", "取消在途的 EXPLAIN"},
+			{"Esc · q", "返回查询编辑器"},
 		}
 	case viewKV:
 		return []helpEntry{

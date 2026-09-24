@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/google/uuid"
 	"github.com/polydb/polydb/pkg/appcore"
+	"github.com/polydb/polydb/pkg/explain"
 	"github.com/polydb/polydb/pkg/keyring"
 	"github.com/polydb/polydb/pkg/protocol"
 	"github.com/polydb/polydb/pkg/storage"
@@ -1554,5 +1556,172 @@ func TestModelConnectionEdit(t *testing.T) {
 	}
 	if !strings.Contains(md(m).status, "名称不能为空") {
 		t.Fatalf("status=%q", md(m).status)
+	}
+}
+
+// enterQueryView 打通「连接 → 库表 → 表详情 → 查询编辑器」，返回处于 viewQuery 的模型。
+func enterQueryView(t *testing.T) tea.Model {
+	t.Helper()
+	app, _ := setupApp(t)
+	var m tea.Model = New(transport.NewLocal(app))
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = drive(t, m, m.Init())
+	var cmd tea.Cmd
+	m, cmd = m.Update(key(tea.KeyEnter))
+	m = drive(t, m, cmd)
+	m, cmd = m.Update(key(tea.KeyEnter))
+	m = drive(t, m, cmd)
+	m, _ = m.Update(runeKey('q'))
+	if md(m).view != viewQuery {
+		t.Fatalf("setup: view=%v", md(m).view)
+	}
+	return m
+}
+
+// TestModelExplain 覆盖 T4.4：F9 按方言生成 EXPLAIN、复用在途通道执行、计划树渲染。
+func TestModelExplain(t *testing.T) {
+	t.Setenv("POLYDB_DATA_DIR", t.TempDir())
+	m := enterQueryView(t)
+
+	// 空编辑器只提示，不发请求。
+	md(m).queryInput.SetValue("   ")
+	_, cmd := m.Update(key(tea.KeyF9))
+	if cmd != nil || !strings.Contains(md(m).status, "无可分析的 SQL") {
+		t.Fatalf("空 SQL: cmd!=nil=%v status=%q", cmd != nil, md(m).status)
+	}
+
+	// 先正常执行一次，留一份结果集供「不被 EXPLAIN 覆盖」断言。
+	md(m).queryInput.SetValue("SELECT id, name FROM t")
+	m, cmd = m.Update(key(tea.KeyF5))
+	m = drive(t, m, cmd)
+	if md(m).queryResult == nil {
+		t.Fatalf("setup: 普通查询应已有结果, status=%q", md(m).status)
+	}
+	before := md(m).queryResult
+
+	// F9：sqlite 方言前缀 + 不入历史 + 进入计划视图。
+	md(m).queryInput.SetValue("SELECT id, name FROM t;")
+	mm := md(m)
+	mm.explainRes = nil
+	m, cmd = m.Update(key(tea.KeyF9))
+	mm = md(m)
+	if !mm.explainPending || mm.explainSQL != "EXPLAIN QUERY PLAN SELECT id, name FROM t" {
+		t.Fatalf("F9 生成语句错误: pending=%v sql=%q", mm.explainPending, mm.explainSQL)
+	}
+	m = drive(t, m, cmd)
+	mm = md(m)
+	if mm.view != viewExplain || mm.explainRes == nil {
+		t.Fatalf("F9 后应进入 viewExplain: view=%v res=%+v status=%q", mm.view, mm.explainRes, mm.status)
+	}
+	if !mm.explainRes.Tree() {
+		t.Fatalf("sqlite 计划应为树模式, text=%v", mm.explainRes.Text)
+	}
+	if mm.explainPending {
+		t.Fatal("explainPending 应复位")
+	}
+	if mm.querySQL != "" {
+		t.Fatalf("EXPLAIN 不应写入查询历史: querySQL=%q", mm.querySQL)
+	}
+	if mm.queryResult != before {
+		t.Fatal("EXPLAIN 结果不应覆盖上一次查询结果")
+	}
+	v := mm.View()
+	if !strings.Contains(v, "EXPLAIN QUERY PLAN SELECT id, name FROM t") || !strings.Contains(v, "SCAN t") {
+		t.Fatalf("计划视图缺内容:\n%s", v)
+	}
+	if strings.Contains(v, "无可分析的 SQL") {
+		t.Fatalf("计划视图状态应刷新, 仍是上一轮:\n%s", v)
+	}
+
+	// 失败路径：状态标为 EXPLAIN 失败，视图留在原处。
+	mm2 := enterQueryView(t)
+	md(mm2).explainPending = true
+	_, _ = mm2.Update(queryMsg{err: &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: "no such table: nope"}})
+	if !strings.Contains(md(mm2).status, "EXPLAIN 失败") || md(mm2).view != viewQuery {
+		t.Fatalf("失败路径: status=%q view=%v", md(mm2).status, md(mm2).view)
+	}
+	if md(mm2).explainPending {
+		t.Fatal("失败后 explainPending 应复位")
+	}
+
+	// 失败轮会保留 querySQL 以便重试时记账；F9 不得把这条遗留语句重复灌进历史。
+	m3 := enterQueryView(t)
+	md(m3).queryInput.SetValue("SELECT * FROM nope")
+	var c3 tea.Cmd
+	m3, c3 = m3.Update(key(tea.KeyF5))
+	m3 = drive(t, m3, c3)
+	if md(m3).querySQL == "" {
+		t.Fatal("setup: 失败轮应保留 querySQL")
+	}
+	h0, err := loadHistory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m3, c3 = m3.Update(key(tea.KeyF9))
+	m3 = drive(t, m3, c3)
+	if !strings.Contains(md(m3).status, "EXPLAIN 失败") {
+		t.Fatalf("setup: F9 应失败: status=%q", md(m3).status)
+	}
+	h1, err := loadHistory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(h1) != len(h0) {
+		t.Fatalf("EXPLAIN 轮不应新增历史: %d → %d", len(h0), len(h1))
+	}
+
+	// Esc 返回查询编辑器。
+	m, _ = m.Update(key(tea.KeyEsc))
+	if md(m).view != viewQuery {
+		t.Fatalf("Esc 应返回 viewQuery, got %v", md(m).view)
+	}
+}
+
+// TestModelExplainScroll 覆盖计划视图滚动：Down 逐行、越界钳制、末尾提示。
+func TestModelExplainScroll(t *testing.T) {
+	var m tea.Model = New(nil)
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 40})
+	mm := md(m)
+	mm.view = viewExplain
+	lines := make([]string, 0, 40)
+	for i := 0; i < 40; i++ {
+		lines = append(lines, fmt.Sprintf("row %02d", i))
+	}
+	mm.explainRes = &explain.Render{Text: lines}
+	avail := mm.explainAvail()
+	if got := strings.Join(mm.explainRes.Lines()[avail:avail+1], ""); got != "row 28" {
+		t.Fatalf("setup: avail=%d", avail)
+	}
+	if v := mm.View(); !strings.Contains(v, "row 00") || strings.Contains(v, "row 28") {
+		t.Fatalf("初始窗口应只含前 %d 行:\n%s", avail, v)
+	}
+	var cmd tea.Cmd
+	for i := 0; i < 5; i++ {
+		m, cmd = m.Update(key(tea.KeyDown))
+		m = drive(t, m, cmd)
+	}
+	mm = md(m)
+	if mm.explainScroll != 5 {
+		t.Fatalf("Down 应逐行滚动, got %d", mm.explainScroll)
+	}
+	maxScroll := max(len(lines)-avail, 0)
+	for i := 5; i < maxScroll+3; i++ { // 越界后继续按，应停在末屏
+		m, cmd = m.Update(key(tea.KeyDown))
+		m = drive(t, m, cmd)
+	}
+	mm = md(m)
+	if mm.explainScroll != maxScroll {
+		t.Fatalf("滚动应钳制在 %d, got %d", maxScroll, mm.explainScroll)
+	}
+	if v := mm.View(); !strings.Contains(v, "row 39") {
+		t.Fatalf("末屏应含最后一行:\n%s", v)
+	}
+	m, _ = m.Update(runeKey('k'))
+	if md(m).explainScroll != max(len(lines)-avail, 0)-1 {
+		t.Fatalf("k 应上滚一行")
+	}
+	m, _ = m.Update(runeKey('q'))
+	if md(m).view != viewQuery {
+		t.Fatalf("q 应返回查询编辑器, got %v", md(m).view)
 	}
 }
