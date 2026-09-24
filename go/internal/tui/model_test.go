@@ -984,6 +984,57 @@ func TestModelHelpPanel(t *testing.T) {
 	}
 }
 
+func TestModelQueryHistory(t *testing.T) {
+	t.Setenv("POLYDB_DATA_DIR", t.TempDir())
+	app, _ := setupApp(t)
+	var m tea.Model = New(transport.NewLocal(app))
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = drive(t, m, m.Init())
+	var cmd tea.Cmd
+	m, cmd = m.Update(key(tea.KeyEnter)) // → tables
+	m = drive(t, m, cmd)
+	m, cmd = m.Update(key(tea.KeyEnter)) // → table detail
+	m = drive(t, m, cmd)
+	m, cmd = m.Update(runeKey('q')) // → query，预填 SELECT
+	if md(m).view != viewQuery {
+		t.Fatalf("setup: view=%v", md(m).view)
+	}
+	// 执行 → queryMsg 落一条历史
+	m, cmd = m.Update(key(tea.KeyF5))
+	m = drive(t, m, cmd)
+	if md(m).queryErr != nil || md(m).queryResult == nil {
+		t.Fatalf("query did not run: err=%v result=%v", md(m).queryErr, md(m).queryResult)
+	}
+	// F4 打开历史抽屉
+	m, cmd = m.Update(key(tea.KeyF4))
+	m = drive(t, m, cmd)
+	mm := md(m)
+	if !mm.histOpen || len(mm.hist) != 1 {
+		t.Fatalf("F4: open=%v hist=%d", mm.histOpen, len(mm.hist))
+	}
+	if v := m.View(); !strings.Contains(v, "查询历史") || !strings.Contains(v, "SELECT") {
+		t.Errorf("history view missing:\n%s", v)
+	}
+	// Enter 回填编辑器并关闭
+	m, cmd = m.Update(key(tea.KeyEnter))
+	m = drive(t, m, cmd)
+	mm = md(m)
+	if mm.histOpen {
+		t.Fatalf("Enter should close history")
+	}
+	if !strings.Contains(mm.queryInput.Value(), "SELECT") {
+		t.Fatalf("Enter should prefill editor, got %q", mm.queryInput.Value())
+	}
+	// 重复执行同一条 SQL 不应再增历史
+	m, cmd = m.Update(key(tea.KeyF5))
+	m = drive(t, m, cmd)
+	m, cmd = m.Update(key(tea.KeyF4))
+	m = drive(t, m, cmd)
+	if got := len(md(m).hist); got != 1 {
+		t.Fatalf("dedup failed: hist=%d, want 1", got)
+	}
+}
+
 func TestThemeProfileSelection(t *testing.T) {
 	keys := []string{"NO_COLOR", "POLYDB_TUI_NO_COLOR", "POLYDB_TUI_COLOR", "POLYDB_TUI_THEME"}
 	for _, k := range keys {

@@ -88,6 +88,11 @@ type model struct {
 	queryErr    error
 	querySQL    string
 
+	// 查询历史抽屉（T2.6）：F4 开合，消费本地 JSONL。
+	histOpen bool
+	hist     []histEntry
+	histCur  int
+
 	// 结果单元格导航（viewResults）：光标位置 + 完整值面板开关。
 	resRow   int
 	resCol   int
@@ -320,6 +325,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case queryMsg:
 		m.busy = ""
+		if sql := m.querySQL; sql != "" {
+			_ = appendHistory(histEntry{Time: time.Now().Unix(), Conn: m.selectedID, SQL: sql})
+		}
 		if msg.err != nil {
 			m.queryErr = msg.err
 			m.queryResult = nil
@@ -805,10 +813,15 @@ func (m *model) gotoQuery(prefill string) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) queryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.histOpen {
+		return m.historyKey(msg)
+	}
 	switch msg.Type {
 	case tea.KeyCtrlC:
 		m.quit = true
 		return m, tea.Quit
+	case tea.KeyF4:
+		return m.openHistory()
 	case tea.KeyEsc:
 		if len(m.acCandidates) > 0 {
 			m.acWord = ""
@@ -1809,6 +1822,9 @@ func (m *model) View() string {
 	if m.helpOpen {
 		return m.helpView()
 	}
+	if m.histOpen {
+		return m.frame(m.historyView())
+	}
 	var body string
 	switch m.view {
 	case viewConns:
@@ -1872,10 +1888,13 @@ func (m *model) footer() string {
 	case viewTable:
 		return "↑/↓ 切换表 · q 查询该表 · F7 浏览数据 · Esc 返回"
 	case viewQuery:
+		if m.histOpen {
+			return "↑/↓ · j/k 选择 · Enter 回填 · Esc / F4 关闭"
+		}
 		if len(m.acCandidates) > 0 {
 			return "↑/↓ 选择 · Enter 接受 · Esc 关闭 · F5 执行"
 		}
-		return "Tab 补全表/列 · F5 / Ctrl+E 执行 · F6 导航结果 · Esc 返回"
+		return "Tab 补全表/列 · F5 / Ctrl+E 执行 · F4 历史 · F6 导航结果 · Esc 返回"
 	case viewKV:
 		if m.kvFilterOn {
 			return "输入模式 · Enter 应用 · Esc 取消"
