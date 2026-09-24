@@ -1092,6 +1092,8 @@ func (m *model) browseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.toggleFilterLogic()
 		case "s":
 			return m.toggleSortCurrentColumn()
+		case "p":
+			return m.cyclePageSize()
 		}
 	}
 	return m, nil
@@ -1305,6 +1307,26 @@ func (m *model) toggleSortCurrentColumn() (tea.Model, tea.Cmd) {
 		dir = protocol.SortDesc
 	}
 	m.brSort = []protocol.OrderClause{{Column: col, Dir: dir}}
+	m.busy = "加载数据 …"
+	m.brOffset = 0
+	m.brRow, m.brCol, m.brFull = 0, 0, false
+	m.brCount, m.brCountOK = nil, false
+	return m, browseCmd(m.app, m.selectedID, m.brSchema, m.brTable, m.browseRequest(0))
+}
+
+// browsePageSizes 可选页大小（T2.3），按 p 循环。
+var browsePageSizes = []uint32{50, 200, 1000}
+
+// cyclePageSize 在 50/200/1000 间循环页大小并回首页重查。
+func (m *model) cyclePageSize() (tea.Model, tea.Cmd) {
+	idx := 0
+	for i, s := range browsePageSizes {
+		if s == m.brLimit {
+			idx = i
+			break
+		}
+	}
+	m.brLimit = browsePageSizes[(idx+1)%len(browsePageSizes)]
 	m.busy = "加载数据 …"
 	m.brOffset = 0
 	m.brRow, m.brCol, m.brFull = 0, 0, false
@@ -1874,7 +1896,7 @@ func (m *model) footer() string {
 		if m.brFull {
 			return "Enter 刷新全值 · Esc 关闭全值（再按返回列表）"
 		}
-		return "↑/↓ 行 · ←/→ 翻页 · / 过滤 · c 计数 · s 排序 · o 且/或 · d 删过滤 · Esc 返回"
+		return "↑/↓ 行 · ←/→ 翻页 · / 过滤 · c 计数 · s 排序 · p 页大小 · o 且/或 · d 删过滤 · Esc 返回"
 	case viewQuickOpen:
 		return "↑/↓ 选择 · Enter 打开 · Esc 返回"
 	}

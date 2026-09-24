@@ -654,6 +654,32 @@ func TestModelBrowseCountSort(t *testing.T) {
 	}
 }
 
+func TestModelBrowsePageSize(t *testing.T) {
+	m := enterBrowse(t)
+	if md(m).brLimit != 200 {
+		t.Fatalf("default page size = %d, want 200", md(m).brLimit)
+	}
+	var cmd tea.Cmd
+	m, cmd = m.Update(runeKey('p')) // 200 → 1000
+	m = drive(t, m, cmd)
+	if md(m).brLimit != 1000 {
+		t.Fatalf("after p = %d, want 1000", md(m).brLimit)
+	}
+	m, cmd = m.Update(runeKey('p')) // 1000 → 50
+	m = drive(t, m, cmd)
+	if md(m).brLimit != 50 {
+		t.Fatalf("after p = %d, want 50", md(m).brLimit)
+	}
+	m, cmd = m.Update(runeKey('p')) // 50 → 200 回环
+	m = drive(t, m, cmd)
+	if md(m).brLimit != 200 {
+		t.Fatalf("after p wrap = %d, want 200", md(m).brLimit)
+	}
+	if v := m.View(); !strings.Contains(v, "页 200") {
+		t.Errorf("page size missing in bar:\n%s", v)
+	}
+}
+
 func TestModelTestAndDelete(t *testing.T) {
 	app, id := setupApp(t)
 	var m tea.Model = New(transport.NewLocal(app))

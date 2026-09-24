@@ -217,6 +217,7 @@ func (m *model) browseFilterBar() string {
 		s := m.brSort[0]
 		seg = append(seg, "排序:"+s.Column+" "+string(s.Dir))
 	}
+	seg = append(seg, fmt.Sprintf("页 %d", m.brLimit))
 	if m.brCountOK && m.brCount != nil {
 		seg = append(seg, fmt.Sprintf("共 %d 行", *m.brCount))
 	}
