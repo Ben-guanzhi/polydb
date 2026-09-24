@@ -1196,10 +1196,12 @@ impl PolyDBApp {
                 this.redis_loading = false;
                 match out {
                     Ok(page) => {
-                        this.redis_db = index;
+                        // 服务端回显优先于本地记忆值（spec/behavior.md §1.3）。
+                        this.redis_db = page.db.unwrap_or(index);
+                        let db = this.redis_db;
                         this.redis_scan_cursor = page.cursor;
                         this.redis_keys = page.keys;
-                        this.status = format!("db{index} · 已载入 {} 键", this.redis_keys.len());
+                        this.status = format!("db{db} · 已载入 {} 键", this.redis_keys.len());
                     }
                     Err(e) => this.status = format!("切库失败: {e}"),
                 }
@@ -1212,7 +1214,6 @@ impl PolyDBApp {
     pub(crate) fn redis_scan(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.sel_id() else { return };
         let pattern = self.redis_pat();
-        let db = self.redis_db;
         self.redis_selected = None;
         self.redis_value = None;
         self.redis_loading = true;
@@ -1224,6 +1225,8 @@ impl PolyDBApp {
                 this.redis_loading = false;
                 match out {
                     Ok(page) => {
+                        this.redis_db = page.db.unwrap_or(this.redis_db);
+                        let db = this.redis_db;
                         this.redis_scan_cursor = page.cursor;
                         this.redis_keys = page.keys;
                         this.status = format!("db{db} · 已载入 {} 键", this.redis_keys.len());
@@ -1254,6 +1257,7 @@ impl PolyDBApp {
                 this.redis_loading = false;
                 match out {
                     Ok(page) => {
+                        this.redis_db = page.db.unwrap_or(this.redis_db);
                         this.redis_scan_cursor = page.cursor;
                         this.redis_keys.extend(page.keys);
                         this.status = format!("累计 {} 键", this.redis_keys.len());

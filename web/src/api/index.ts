@@ -336,6 +336,8 @@ export interface RedisKeyInfo {
 export interface RedisScanPage {
   /** Cursor for next scan iteration (0 = done) */
   cursor: number;
+  /** 回读：执行本次 SCAN 的那条专用连接当前所在 db。SELECT 是连接级状态且驱动独占该连接，故驱动跟踪值即服务端真值；可选，缺席时前端回落到本地记忆值 */
+  db?: number;
   keys: RedisKeyInfo[];
 }
 

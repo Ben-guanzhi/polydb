@@ -3,6 +3,7 @@
 //! 拨号与读/写超时兜底，避免不可达主机长挂。
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -21,6 +22,8 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 /// conn 为 Option：close() 时 take 掉并 drop，同步 Connection 在 Drop 时关闭 socket。
 pub struct RedisConn {
     conn: Mutex<Option<redis::Connection>>,
+    /// 该专用连接当前所在 db：SELECT 是连接级状态，驱动独占此连接，故即服务端真值。
+    db: AtomicU32,
     _addr: String,
 }
 
@@ -65,6 +68,7 @@ impl RedisConn {
         }
         Ok(Self {
             conn: Mutex::new(Some(conn)),
+            db: AtomicU32::new(db_index),
             _addr: format!("redis://{addr}/{db_index}"),
         })
     }
@@ -117,12 +121,17 @@ impl DatabaseDriver for RedisConn {
 #[async_trait]
 impl KvDriver for RedisConn {
     async fn select_db(&self, index: u32) -> CoreResult<()> {
-        let mut guard = self.conn.lock();
-        let conn = guard.as_mut().ok_or_else(Self::closed)?;
-        redis::cmd("SELECT")
-            .arg(index)
-            .query::<()>(conn)
-            .map_err(Self::err)
+        {
+            let mut guard = self.conn.lock();
+            let conn = guard.as_mut().ok_or_else(Self::closed)?;
+            redis::cmd("SELECT")
+                .arg(index)
+                .query::<()>(conn)
+                .map_err(Self::err)?;
+        }
+        // 只在服务端确认 OK 后更新：失败时连接的 db 未变。
+        self.db.store(index, Ordering::Relaxed);
+        Ok(())
     }
 
     async fn scan_keys(&self, cursor: u64, pattern: &str, count: u32) -> CoreResult<RedisScanPage> {
@@ -140,6 +149,7 @@ impl KvDriver for RedisConn {
             .map_err(Self::err)?;
         let mut page = RedisScanPage {
             cursor: next,
+            db: Some(self.db.load(Ordering::Relaxed)),
             keys: Vec::with_capacity(keys.len()),
         };
         for k in keys {

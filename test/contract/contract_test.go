@@ -648,11 +648,31 @@ func redisScenario(r *recorder, host string, port int64) {
 	r.step("get stream", "GET", "/api/connections/"+id+"/kv/keys/"+ks["stream"], nil, 200,
 		map[string]any{"type": "stream", "value": "{data=payload-1}"}, transform(onlyStreamData))
 
+	// 非零库回读：连接以 database "0" 创建，前端本地记忆恒 0，
+	// 只有服务端回读才能给出 1（缺失字段与回显 0 都无法区分）。
+	if status, _, err := r.s.c.Do("POST", "/api/connections/"+id+"/kv/select",
+		map[string]any{"index": int64(1)}); err != nil || status != 204 {
+		r.t.Logf("%s: SELECT 1 不可用 (status=%v err=%v) — 跳过非零库回读", r.s.b.name, status, err)
+	} else {
+		_, page, perr := r.s.c.Do("POST", "/api/connections/"+id+"/kv/scan",
+			map[string]any{"cursor": int64(0), "pattern": "ct:redis:*" + suffix, "count": int64(10)})
+		if perr != nil {
+			r.t.Errorf("%s / scan@db1: 请求失败: %v", r.s.b.name, perr)
+		} else if db := normalize(page).(map[string]any)["db"]; dbNum(db) != 1 {
+			r.t.Errorf("%s / scan@db1: db 回显 = %v, want 1", r.s.b.name, db)
+		}
+		r.step("select db 0 back", "POST", "/api/connections/"+id+"/kv/select",
+			map[string]any{"index": int64(0)}, 204, nil)
+	}
+
 	r.step("select db", "POST", "/api/connections/"+id+"/kv/select",
 		map[string]any{"index": int64(0)}, 204, nil)
 
 	// scan：SCAN 不保证单轮返回全部匹配，循环收集到 cursor=0 再断言键集合与类型。
-	scanned := scanAllKeys(r, id, "ct:redis:*"+suffix)
+	scanned, scannedDB := scanAllKeys(r, id, "ct:redis:*"+suffix)
+	if dbNum(scannedDB) != 0 {
+		r.t.Errorf("%s / scan: db 回显 = %v, want 0（字段缺席表示驱动未回读）", r.s.b.name, scannedDB)
+	}
 	wantTypes := map[string]string{
 		ks["string"]: "string", ks["list"]: "list", ks["set"]: "set",
 		ks["zset"]: "zset", ks["hash"]: "hash", ks["stream"]: "stream",
@@ -689,23 +709,42 @@ func redisScenario(r *recorder, host string, port int64) {
 	r.step("delete connection", "DELETE", "/api/connections/"+id, nil, 204, nil)
 }
 
-// scanAllKeys 循环 SCAN 直到 cursor=0，返回 key → 条目（type/ttl）映射。
-func scanAllKeys(r *recorder, id, pattern string) map[string]map[string]any {
+// dbNum 把 scan 页的 db 回显归一为 int64；字段缺席或类型异常返回 -1。
+// 两端 msgpack 对 u32 的具体解码类型不保证一致，故在此收口。
+func dbNum(v any) int64 {
+	switch t := v.(type) {
+	case int64:
+		return t
+	case int32:
+		return int64(t)
+	case uint64:
+		return int64(t)
+	case uint32:
+		return int64(t)
+	default:
+		return -1
+	}
+}
+
+// scanAllKeys 循环 SCAN 直到 cursor=0，返回 key → 条目（type/ttl）映射，以及末页回显的 db。
+func scanAllKeys(r *recorder, id, pattern string) (map[string]map[string]any, any) {
 	r.t.Helper()
 	cursor := int64(0)
 	keys := map[string]map[string]any{}
+	var db any
 	for i := 0; i < 100; i++ {
 		status, got, err := r.s.c.Do("POST", "/api/connections/"+id+"/kv/scan",
 			map[string]any{"cursor": cursor, "pattern": pattern, "count": int64(1000)})
 		if err != nil {
 			r.t.Errorf("%s / scan: request failed: %v", r.s.b.name, err)
-			return keys
+			return keys, db
 		}
 		if status != 200 {
 			r.t.Errorf("%s / scan: status = %d (body=%v)", r.s.b.name, status, got)
-			return keys
+			return keys, db
 		}
 		m := normalize(got).(map[string]any)
+		db = m["db"]
 		cursor, _ = m["cursor"].(int64)
 		if ks, ok := m["keys"].([]any); ok {
 			for _, e := range ks {
@@ -720,7 +759,7 @@ func scanAllKeys(r *recorder, id, pattern string) map[string]map[string]any {
 			break
 		}
 	}
-	return keys
+	return keys, db
 }
 
 // onlyStreamData 剥离流序列化开头的动态 ID（"<id> {data=...}" → "{data=...}"）。

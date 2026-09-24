@@ -32,6 +32,10 @@ pub struct RedisZSetMember {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RedisScanPage {
     pub cursor: u64,
+    /// 本次扫描所在 db（behavior.md §1.3）：驱动持有专用连接，SELECT 是连接级状态，
+    /// 故驱动跟踪值即服务端真值。None = 驱动无法确定，前端回落到本地记忆值。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub db: Option<u32>,
     pub keys: Vec<RedisKeyInfo>,
 }
 

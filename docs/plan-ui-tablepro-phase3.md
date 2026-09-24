@@ -133,7 +133,13 @@
 
 ### 阶段 D — 原「另案」落地（协议 + 小件）
 
-- **D2** kvDB 恒 0：经核查**非缺陷**——服务端未回读当前 db。需 spec 加回读字段 + 两端实现 + 前端显示。
+- **D2** ✅（2026-09-25）：Redis 当前 db 回读。`RedisScanPage` 加可选 `db`（`spec/schemas/redis.json`
+  + `behavior.md` §1.3，**non-breaking**）；两端驱动跟踪所在 db（专用连接 + `SELECT` 是连接级状态，
+  故跟踪值即服务端真值；`select_db` 仅在服务端 OK 后更新，`open` 以配置 `database` 初始化），
+  SCAN 页回显；三端以回显覆盖本地记忆值，字段缺席一律保持上次值（**不得回落到 0**）。
+  落点：`db-redis/src/lib.rs`（`AtomicU32`）、`pkg/dbredis/dbredis.go`、TUI `model.go` `kvScanMsg`、
+  GUI `app.rs` `redis_scan/redis_more/redis_set_db`、Web `RedisBrowser.tsx`；
+  契约 `redisScenario` 用 `SELECT 1` 证明非本地值。
 - **D3** Rust GUI 执行计划：补三端差异（Web `lib/explain.ts` / TUI `pkg/explain` 已有）。
 - **D4** Redis string 整值写回：Web + GUI 对齐 TUI 的 `e`。
 - 仍不排期（各自需新里程碑再拆）：Rewind 快照（需存储层）、Compare & Sync、Server Dashboard、
@@ -177,7 +183,7 @@
 - T4：`F8` 取消在途查询（ctx 贯穿 + 远程 cancel 端点，UUID `query_id`）；连接编辑
   （`UpdateConnection` 接线）；Redis string 值 `e` 就地写回 + 回读；`F9` 执行计划
   （新增 `go/pkg/explain` 语义层 + `viewExplain` 树渲染）；`docs/frontends.md` 键位总表。
-- §1.2 遗留项处置：kvDB 恒 0 经核查**非缺陷**（需 spec 回读字段，另案）；其余均已修复。
+- §1.2 遗留项处置：kvDB 恒 0 已按「真缺陷」处理并经 D2 交付（`RedisScanPage.db` 回读字段）；其余均已修复。
 - 附带后端修复：`go/pkg/dbsqlite` 把 `StatementTypeOther` 送去 `Exec`，导致 SQLite 的
   `EXPLAIN` / `PRAGMA` 行集被丢弃（另外四家 Go 驱动与 Rust 侧均按查询处理）——已对齐并补回归测试。
 - 门禁：`gofmt` + `go vet ./...` + `go build ./...` + `go test ./...` 全绿

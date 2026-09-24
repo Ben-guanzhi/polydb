@@ -519,6 +519,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.kvKeys = append(m.kvKeys, msg.page.Keys...)
 		}
+		// 服务端回显优先于本地记忆值（spec/behavior.md §1.3）。
+		if msg.page.DB != nil {
+			m.kvDB = int(*msg.page.DB)
+		}
 		m.kvPageCur = msg.page.Cursor
 		m.kvPattern = msg.pattern
 		if len(m.kvKeys) == 0 {

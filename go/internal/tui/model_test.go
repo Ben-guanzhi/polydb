@@ -1199,6 +1199,28 @@ func TestListWindow(t *testing.T) {
 }
 
 // TestModelHelpPanel 验证 F1 开合覆盖式帮助面板，打开时任意键仅关闭、不透传给视图。
+func TestModelKVScanReadsBackDB(t *testing.T) {
+	// 服务端回显优先于本地记忆值；字段缺席时保持本地值（spec/behavior.md §1.3）。
+	m, _ := newKVEditModel()
+	md(m).kvDB = 0
+	db := uint32(7)
+	page := &protocol.RedisScanPage{DB: &db, Keys: []protocol.RedisKeyInfo{{Key: "greeting", Type: protocol.RedisKeyTypeString}}}
+	m2, _ := m.Update(kvScanMsg{pattern: "*", page: page, reset: true})
+	if got := md(m2).kvDB; got != 7 {
+		t.Fatalf("页回显 db 应覆盖本地值: got=%d want=7", got)
+	}
+	if v := md(m2).kvView(); !strings.Contains(v, "db 7") {
+		t.Fatalf("页头未显示回读 db:\n%s", v)
+	}
+
+	m3, _ := m2.Update(kvScanMsg{pattern: "*", page: &protocol.RedisScanPage{
+		Keys: []protocol.RedisKeyInfo{{Key: "greeting", Type: protocol.RedisKeyTypeString}},
+	}, reset: true})
+	if got := md(m3).kvDB; got != 7 {
+		t.Fatalf("db 字段缺席时应保持上次回读值: got=%d want=7", got)
+	}
+}
+
 func TestModelHelpPanel(t *testing.T) {
 	m := New(nil)
 	v := m.View()

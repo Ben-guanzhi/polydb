@@ -108,3 +108,15 @@ polydb 有多个前端，均遵守 AGENTS.md 铁律：**只经 `app-core`（进�
   `case_sensitive` 三态（SQLite 真库：`GLOB`/`LIKE`/`REGEXP` UDF 三条路径）与 `empty`。
   MSSQL 的 `NOT_SUPPORTED` 由两端 `browse.rs`/`browse.go` 单元测覆盖——契约测试无 MSSQL 实例，
   该分支未走服务端对拍（如实披露）。
+
+## Redis 当前 db 回读（D2）
+
+- 背景：连接配置可带 `database`（即建连时的 `SELECT`），但 SCAN 响应里没有「当前所在 db」，
+  三端只能显示本地记忆值 → 配置 db 3 时界面仍写 `db 0`。
+- 现在：`RedisScanPage.db`（可选，`spec/schemas/redis.json` + `behavior.md` §1.3）由驱动回显。
+  驱动持有**专用连接**且 `SELECT` 是连接级状态，故驱动跟踪值即服务端真值；`select_db` 只在服务端
+  确认 OK 后更新，`open` 以配置 db 初始化。**无法确定时省略字段而非回 0**。
+- 三端消费：TUI `kvScanMsg` 与 GUI `redis_scan/redis_more/redis_set_db` 用回显覆盖本地值，
+  Web `RedisBrowser.loadKeys` 同理；字段缺席一律保持上次值（不当作 db 0）。
+- 契约：`redisScenario` 先 `SELECT 1` 再 SCAN，断言回显为 `1`（本地记忆恒 0，只有真回读能给出 1），
+  随后回 `db 0` 断言回显 `0`；Redis 不可达时整段按既有 soft-skip 跳过。

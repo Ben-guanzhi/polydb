@@ -42,6 +42,8 @@ export default function RedisBrowser({ connId }: Props) {
           count: 100,
         });
         setCursor(page.cursor);
+        // 服务端回显优先于本地选择值（spec/behavior.md §1.3）：连接配置可自带 db。
+        if (page.db != null) setDb(page.db);
         setKeys((prev) => (reset ? page.keys : [...prev, ...page.keys]));
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));

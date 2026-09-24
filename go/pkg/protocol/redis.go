@@ -23,8 +23,11 @@ type RedisZSetMember struct {
 }
 
 type RedisScanPage struct {
-	Cursor uint64         `json:"cursor" msgpack:"cursor"`
-	Keys   []RedisKeyInfo `json:"keys" msgpack:"keys"`
+	Cursor uint64 `json:"cursor" msgpack:"cursor"`
+	// DB 是本次扫描所在 db（behavior.md §1.3）：驱动持专用连接、SELECT 为连接级状态，
+	// 故驱动跟踪值即服务端真值；nil = 驱动未提供，前端回落到本地记忆值。
+	DB   *uint32        `json:"db,omitempty" msgpack:"db,omitempty"`
+	Keys []RedisKeyInfo `json:"keys" msgpack:"keys"`
 }
 
 type RedisKeyInfo struct {

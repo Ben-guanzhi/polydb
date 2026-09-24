@@ -26,6 +26,8 @@ type Conn struct {
 	client *redis.Client
 	conn   *redis.Conn
 	addr   string
+	// db 是该专用连接当前所在 db：SELECT 为连接级状态且本驱动独占此连接，故即服务端真值。
+	db int
 }
 
 // Open 连接 addr（host:port），初始 dbIndex 为 Redis db 编号；password 来自 keyring（可为空）。
@@ -43,7 +45,7 @@ func Open(ctx context.Context, addr string, dbIndex int, password string) (*Conn
 		return nil, fmt.Errorf("ping redis %s: %w", addr, err)
 	}
 	conn := client.Conn()
-	return &Conn{client: client, conn: conn, addr: addr}, nil
+	return &Conn{client: client, conn: conn, addr: addr, db: dbIndex}, nil
 }
 
 func (c *Conn) Kind() protocol.DatabaseKind     { return protocol.DatabaseKindRedis }
@@ -76,7 +78,12 @@ func (c *Conn) Close() error {
 func (c *Conn) SelectDB(ctx context.Context, index int) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.conn.Do(ctx, "SELECT", index).Err()
+	if err := c.conn.Do(ctx, "SELECT", index).Err(); err != nil {
+		return kvErr(err)
+	}
+	// 只在服务端确认后更新：失败时连接的 db 未变。
+	c.db = index
+	return nil
 }
 
 func (c *Conn) ScanKeys(ctx context.Context, cursor uint64, pattern string, count int) (*protocol.RedisScanPage, error) {
@@ -92,7 +99,8 @@ func (c *Conn) ScanKeys(ctx context.Context, cursor uint64, pattern string, coun
 	if err != nil {
 		return nil, kvErr(err)
 	}
-	page := &protocol.RedisScanPage{Cursor: next, Keys: []protocol.RedisKeyInfo{}}
+	cur := uint32(c.db)
+	page := &protocol.RedisScanPage{Cursor: next, DB: &cur, Keys: []protocol.RedisKeyInfo{}}
 	for _, k := range keys {
 		typ, err := c.conn.Type(ctx, k).Result()
 		if err != nil {
