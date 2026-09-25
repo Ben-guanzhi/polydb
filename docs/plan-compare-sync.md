@@ -111,8 +111,8 @@ Rust 无 HttpTransport ⇒ GUI 只能比较**本机 app-core 已打开的两个�
   （外键合成名、`IndexInfo.primary`、`on_update/on_delete`）+ 2 处 parity（`referenced_schema`、
   PRAGMA `id` 语义）。详见附录 A.9。
 - **E2 协议与服务端**：spec 改动 → `gen-protocol` → 两端 DTO + 两个端点 → 契约测试
-  （**SQLite 按两个连接/两个文件真跑**——ATTACH 的"同库两 schema"路径驱动层不支持，见 A.9 F6，
-  是否补做待拍板（§8-6）；PG/MySQL/MSSQL/Oracle 按既有 `connected:false` soft-skip）。
+  （**SQLite 按两个连接/两个文件真跑**——驱动不支持 schema 寻址，"同库两 schema"已定为 v1.1 待办，见 §8-6；
+  PG/MySQL/MSSQL/Oracle 按既有 `connected:false` soft-skip）。
   验收门禁：`check-protocol` + workspace clippy/test + `go vet` + 契约。
 - **E3 语句生成**：在服务端补齐生成器（ALTER COLUMN 的类型/可空/默认三态、CREATE/DROP TABLE、
   依赖排序、回滚脚本），Web 现成的 `alterSql.ts` 继续服务结构编辑器，**不作为 diff 的出口**
@@ -140,14 +140,12 @@ Rust 无 HttpTransport ⇒ GUI 只能比较**本机 app-core 已打开的两个�
 3. `generic_type` 的归一命名表由谁定：以 PG 命名为准、还是自创中立名（`int64`/`text`/`timestamp`…）？
 4. 差异条目里"仅目标库存在"要不要包含**数据不可逆**提示（drop column 会丢数据）——建议 v1 强制红标 + 默认不勾选。
 5. 表数上限：GUI 现有整 schema 外键扫描硬上限 200 表（`ui-gui/src/app.rs:2505-2529`），diff 场景动辄上千表，要不要在 E2 一并放宽/分页？
-6. **SQLite 的比对形态**（E2.0 实测后新增）：驱动层 `list_tables` 忽略 `schema` 入参、`PRAGMA table_info` 不支持
-   schema 前缀 ⇒ "同库两 schema"（ATTACH 后分别采快照）**目前不可行**。二选一：
-   (a) v1 只做"两个连接 / 两个文件"，SQLite 的 `schema` 参数固定 `main`（推荐，零驱动改动）；
-   (b) 给两端 SQLite 驱动加 ATTACH + `PRAGMA attached.tbl` 寻址（改动面大、且 `Connection` 是池化的，
-   ATTACH 只在单连接上有效，与连接池语义冲突）。
-7. **其余 4 个方言（PG/MySQL/MSSQL/Oracle）的 `on_update`/`on_delete` 与 `generic_type` 何时填**：
-   两端**五个 SQL 驱动全未填**，本轮只补了 SQLite。现在补等于**本机无法验证**（无实例），
-   只能靠读 information_schema / SHOW CREATE 文档写映射；建议随 E3 或有实例环境时一并补并复核。
+6. ~~**SQLite 的比对形态**~~ **已定（2026-09-25）：只做"两个连接 / 两个文件"**，SQLite 的 `schema` 参数固定 `main`。
+   依据：驱动层 `list_tables` 忽略 `schema` 入参、`PRAGMA table_info` 不支持 schema 前缀（E2.0 实测，附录 A.9 F6）；
+   而 ATTACH 只在单连接上有效，与现有连接池语义冲突。**"同库多 schema"记为 v1.1 待办**，spec 里 `schema` 保持可选。
+7. ~~**其余 4 个方言的 `on_update`/`on_delete` 与 `generic_type` 何时填**~~ **已定（2026-09-25）：随 E3 / 有实例环境一起补**。
+   理由：本轮只补了 SQLite，因为 SQLite 有 bundled 真引擎可实测；PG/MySQL/MSSQL/Oracle 现在补只能凭文档盲填、
+   契约测试全 soft-skip，等于"数字上已实现、实际未验证"。与 §8-3 的 `generic_type` 命名表定案绑定推进。
 
 ---
 
@@ -324,7 +322,7 @@ rusqlite / modernc.org/sqlite），所以 E2 的第一步不是补 spec DTO，�
 | F3 | `on_update` / `on_delete` 同样**五驱动两端全未填**——和 `generic_type` 同一类"字段存在但没人填"的死维度 | 外键动作差异（`CASCADE` vs `NO ACTION`）永远比对不出来，sync 会漏改 | SQLite 已补：`PRAGMA foreign_key_list` 里是 SQL 文本，两端各自映射到 `ForeignKeyAction`；`NO ACTION` 是 SQLite 的**默认值而非"无信息"**，必须映射成 `NoAction` 而不是 `None`（否则"无动作"和"显式 NO ACTION"分不清） |
 | F4 | `referenced_schema` 原先 Go 侧**回显请求参数** `schema`，Rust 侧硬编码 `"main"` | dev/prod 用不同 schema 名时引用表侧多出一个假差异 | 两端统一 `"main"` |
 | F5 | `PRAGMA foreign_key_list` 的 `id` 是 **SQLite 内部序**（实测 `products` 的 id=0、`customers` 的 id=1，与 DDL 声明顺序**相反**） | 误把它当声明序写测试会得到同义反复 | 测试**不断言**外键排序，只断言发射序列；两端读的是同一个 C 引擎故序一致，且 diff 配对不依赖它 |
-| F6 | SQLite 驱动**不做 schema 寻址**：`list_tables(_schema)` 忽略入参，`PRAGMA table_info("t")` 无 schema 前缀 | E1 假设的"同库两 schema"比对形态在 SQLite 上**目前不可行**（ATTACH 后也拿不到 `attached_db` 的表） | SQLite 比对只能退化为**两个连接 / 两个文件**。要不要实现 ATTACH + schema 限定 PRAGMA 待拍板（见 §8） |
+| F6 | SQLite 驱动**不做 schema 寻址**：`list_tables(_schema)` 忽略入参，`PRAGMA table_info("t")` 无 schema 前缀 | E1 假设的"同库两 schema"比对形态在 SQLite 上**目前不可行**（ATTACH 后也拿不到 `attached_db` 的表） | SQLite 比对只能退化为**两个连接 / 两个文件**。已定（§8-6）：v1 只做两连接，ATTACH 记 v1.1 待办 |
 | F7 | 真字符串上的归一（`VARCHAR(20)` → `varchar(20)`、`DEFAULT 1`、引号/大小写混杂的 DDL）行为与 E1 一致 | — | 真差异文件库测试（`real_differences_between_two_files_produce_expected_plan`）固化，相位序 20/60/70/80 与设计表逐字一致 |
 
 **E2.0 门禁数字（本机实测）**：Rust workspace `cargo test` **120 passed / 0 failed**（`db-sqlite` 7 单测 + 10 真快照集成）；
