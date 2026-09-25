@@ -1,0 +1,23 @@
+{
+  "name": "d19_oracle_dialect_not_supported",
+  "note": "Oracle 方言同 d16：显式拒绝",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "error_code": "POLYDB_ERR_NOT_SUPPORTED",
+  "error_message": "oracle 方言的 DDL 生成在 v1 未实现（当前只生成 sqlite）",
+  "source": {
+    "kind": "oracle",
+    "schema": "APP",
+    "tables": [
+      { "name": "t", "type": "table", "columns": [ { "name": "id", "data_type": "NUMBER(10)", "nullable": false, "ordinal_position": 1 } ], "indexes": [], "foreign_keys": [] }
+    ]
+  },
+  "target": {
+    "kind": "oracle",
+    "schema": "APP",
+    "tables": [
+      { "name": "t", "type": "table", "columns": [ { "name": "id", "data_type": "NUMBER(19)", "nullable": false, "ordinal_position": 1 } ], "indexes": [], "foreign_keys": [] }
+    ]
+  },
+  "expected": null,
+  "selected": null
+}

@@ -1,0 +1,176 @@
+{
+  "name": "d13_fk_drop_rebuild",
+  "note": "drop_foreign_key 同样恒走重建（取证 G1）。外键名只在手写快照里存在（真实 SQLite 快照恒为空），这里用它锁定「有名字也照旧只按列生成表级约束」的行为；重建只复制两侧同名列，所以搬运语句与源侧列序无关",
+  "options": { "ignore_defaults": false, "select_destructive": true },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "orders",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "user_id", "data_type": "INTEGER", "nullable": true, "ordinal_position": 2 },
+          { "name": "total", "data_type": "REAL", "nullable": true, "ordinal_position": 3 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_orders_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] }
+        ],
+        "foreign_keys": [
+          {
+            "name": "fk_user",
+            "columns": [ "user_id" ],
+            "referenced_schema": "main",
+            "referenced_table": "users",
+            "referenced_columns": [ "id" ],
+            "on_delete": "restrict",
+            "on_update": "no_action"
+          }
+        ]
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "orders",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "user_id", "data_type": "INTEGER", "nullable": true, "ordinal_position": 2 },
+          { "name": "total", "data_type": "REAL", "nullable": true, "ordinal_position": 3 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_orders_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": ["orders/fk_user/drop_foreign_key"],
+  "expected": {
+    "statements": [
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=OFF;",
+        "phase": 0,
+        "table": "",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "orders/fk_user/drop_foreign_key"
+        ],
+        "sql": "CREATE TABLE \"polydb_tmp_orders\"(\"id\" integer NOT NULL,\"user_id\" integer,\"total\" real,PRIMARY KEY (\"id\"));",
+        "phase": 10,
+        "table": "orders",
+        "warnings": [
+          "重建表会丢失该表上的触发器（快照不含触发器）",
+          "生成列会退化为普通列（快照不标注生成列）",
+          "CHECK 约束会丢失（快照不含 CHECK 约束）",
+          "主键整数列的 AUTOINCREMENT 关键字无法从快照还原"
+        ],
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "orders/fk_user/drop_foreign_key"
+        ],
+        "sql": "INSERT INTO \"polydb_tmp_orders\"(\"id\",\"user_id\",\"total\") SELECT \"id\",\"user_id\",\"total\" FROM \"orders\";",
+        "phase": 10,
+        "table": "orders",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "orders/fk_user/drop_foreign_key"
+        ],
+        "sql": "DROP TABLE \"orders\";",
+        "phase": 10,
+        "table": "orders",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "orders/fk_user/drop_foreign_key"
+        ],
+        "sql": "ALTER TABLE \"polydb_tmp_orders\" RENAME TO \"orders\";",
+        "phase": 10,
+        "table": "orders",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=ON;",
+        "phase": 255,
+        "table": "",
+        "non_reversible": false
+      }
+    ],
+    "rollback": [
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=OFF;",
+        "phase": 0,
+        "table": "",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "orders/fk_user/add_foreign_key"
+        ],
+        "sql": "CREATE TABLE \"polydb_tmp_orders\"(\"id\" integer NOT NULL,\"user_id\" integer,\"total\" real,PRIMARY KEY (\"id\"),FOREIGN KEY (\"user_id\") REFERENCES \"users\"(\"id\") ON DELETE RESTRICT ON UPDATE NO ACTION);",
+        "phase": 90,
+        "table": "orders",
+        "warnings": [
+          "重建表会丢失该表上的触发器（快照不含触发器）",
+          "生成列会退化为普通列（快照不标注生成列）",
+          "CHECK 约束会丢失（快照不含 CHECK 约束）",
+          "主键整数列的 AUTOINCREMENT 关键字无法从快照还原"
+        ],
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "orders/fk_user/add_foreign_key"
+        ],
+        "sql": "INSERT INTO \"polydb_tmp_orders\"(\"id\",\"user_id\",\"total\") SELECT \"id\",\"user_id\",\"total\" FROM \"orders\";",
+        "phase": 90,
+        "table": "orders",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "orders/fk_user/add_foreign_key"
+        ],
+        "sql": "DROP TABLE \"orders\";",
+        "phase": 90,
+        "table": "orders",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "orders/fk_user/add_foreign_key"
+        ],
+        "sql": "ALTER TABLE \"polydb_tmp_orders\" RENAME TO \"orders\";",
+        "phase": 90,
+        "table": "orders",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=ON;",
+        "phase": 255,
+        "table": "",
+        "non_reversible": false
+      }
+    ],
+    "pragmas_outside_tx": true,
+    "ddl_in_tx": true
+  },
+  "error_code": "",
+  "error_message": ""
+}

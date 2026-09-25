@@ -1,0 +1,40 @@
+{
+  "name": "d01_empty_selection",
+  "note": "空勾选必须产出空脚本（[] 而非 null）：即使两侧差异很大，未勾选就不生成任何语句，回滚同样为空",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "legacy",
+        "type": "table",
+        "columns": [{ "name": "a", "data_type": "text", "nullable": true, "ordinal_position": 1 }],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "users",
+        "type": "table",
+        "columns": [{ "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true }],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": [],
+  "expected": {
+    "statements": [],
+    "rollback": [],
+    "pragmas_outside_tx": false,
+    "ddl_in_tx": true
+  },
+  "error_code": "",
+  "error_message": ""
+}

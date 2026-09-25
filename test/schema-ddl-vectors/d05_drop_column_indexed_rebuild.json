@@ -1,0 +1,179 @@
+{
+  "name": "d05_drop_column_indexed_rebuild",
+  "note": "被索引引用的列删不掉（取证 G2：error in index … after drop column），改走整表重建；重建首尾必须包 PRAGMA，pragmas_outside_tx 置 true。该表的重建组里有两条条目（删列 + 删随之消失的索引），必须整组勾选；回滚方向承接重建，把列和索引一起还原回源侧定义",
+  "options": { "ignore_defaults": false, "select_destructive": true },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "note", "data_type": "TEXT", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "idx_note", "unique": false, "columns": [ { "name": "note", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": ["t/idx_note/drop_index", "t/note/drop_column"],
+  "expected": {
+    "statements": [
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=OFF;",
+        "phase": 0,
+        "table": "",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "t/idx_note/drop_index",
+          "t/note/drop_column"
+        ],
+        "sql": "CREATE TABLE \"polydb_tmp_t\"(\"id\" integer NOT NULL,PRIMARY KEY (\"id\"));",
+        "phase": 20,
+        "table": "t",
+        "warnings": [
+          "重建表会丢失该表上的触发器（快照不含触发器）",
+          "生成列会退化为普通列（快照不标注生成列）",
+          "CHECK 约束会丢失（快照不含 CHECK 约束）",
+          "主键整数列的 AUTOINCREMENT 关键字无法从快照还原"
+        ],
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/idx_note/drop_index",
+          "t/note/drop_column"
+        ],
+        "sql": "INSERT INTO \"polydb_tmp_t\"(\"id\") SELECT \"id\" FROM \"t\";",
+        "phase": 20,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/idx_note/drop_index",
+          "t/note/drop_column"
+        ],
+        "sql": "DROP TABLE \"t\";",
+        "phase": 20,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/idx_note/drop_index",
+          "t/note/drop_column"
+        ],
+        "sql": "ALTER TABLE \"polydb_tmp_t\" RENAME TO \"t\";",
+        "phase": 20,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=ON;",
+        "phase": 255,
+        "table": "",
+        "non_reversible": false
+      }
+    ],
+    "rollback": [
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=OFF;",
+        "phase": 0,
+        "table": "",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "t/note/add_column",
+          "t/idx_note/add_index"
+        ],
+        "sql": "CREATE TABLE \"polydb_tmp_t\"(\"id\" integer NOT NULL,\"note\" text,PRIMARY KEY (\"id\"));",
+        "phase": 60,
+        "table": "t",
+        "warnings": [
+          "重建表会丢失该表上的触发器（快照不含触发器）",
+          "生成列会退化为普通列（快照不标注生成列）",
+          "CHECK 约束会丢失（快照不含 CHECK 约束）",
+          "主键整数列的 AUTOINCREMENT 关键字无法从快照还原"
+        ],
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "t/note/add_column",
+          "t/idx_note/add_index"
+        ],
+        "sql": "INSERT INTO \"polydb_tmp_t\"(\"id\") SELECT \"id\" FROM \"t\";",
+        "phase": 60,
+        "table": "t",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "t/note/add_column",
+          "t/idx_note/add_index"
+        ],
+        "sql": "DROP TABLE \"t\";",
+        "phase": 60,
+        "table": "t",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "t/note/add_column",
+          "t/idx_note/add_index"
+        ],
+        "sql": "ALTER TABLE \"polydb_tmp_t\" RENAME TO \"t\";",
+        "phase": 60,
+        "table": "t",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "t/note/add_column",
+          "t/idx_note/add_index"
+        ],
+        "sql": "CREATE INDEX \"idx_note\" ON \"t\"(\"note\");",
+        "phase": 60,
+        "table": "t",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=ON;",
+        "phase": 255,
+        "table": "",
+        "non_reversible": false
+      }
+    ],
+    "pragmas_outside_tx": true,
+    "ddl_in_tx": true
+  },
+  "error_code": "",
+  "error_message": ""
+}

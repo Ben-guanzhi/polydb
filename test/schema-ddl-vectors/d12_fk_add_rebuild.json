@@ -1,0 +1,195 @@
+{
+  "name": "d12_fk_add_rebuild",
+  "note": "SQLite 无 ALTER TABLE ADD CONSTRAINT（取证 G1）⇒ add_foreign_key 恒走重建。快照里的外键一律无名（PRAGMA foreign_key_list 无 name 列），object 退化为 fk(<列>)；重建时以表级 FOREIGN KEY (…) REFERENCES … 还原，缺省动作不写子句",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "users",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_users_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      },
+      {
+        "name": "orders",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "user_id", "data_type": "INTEGER", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_orders_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "users",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_users_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      },
+      {
+        "name": "orders",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "user_id", "data_type": "INTEGER", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_orders_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] }
+        ],
+        "foreign_keys": [
+          {
+            "name": "",
+            "columns": [ "user_id" ],
+            "referenced_schema": "main",
+            "referenced_table": "users",
+            "referenced_columns": [ "id" ],
+            "on_delete": "cascade"
+          }
+        ]
+      }
+    ]
+  },
+  "selected": null,
+  "expected": {
+    "statements": [
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=OFF;",
+        "phase": 0,
+        "table": "",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "orders/fk(user_id)/add_foreign_key"
+        ],
+        "sql": "CREATE TABLE \"polydb_tmp_orders\"(\"id\" integer NOT NULL,\"user_id\" integer,PRIMARY KEY (\"id\"),FOREIGN KEY (\"user_id\") REFERENCES \"users\"(\"id\") ON DELETE CASCADE);",
+        "phase": 90,
+        "table": "orders",
+        "warnings": [
+          "重建表会丢失该表上的触发器（快照不含触发器）",
+          "生成列会退化为普通列（快照不标注生成列）",
+          "CHECK 约束会丢失（快照不含 CHECK 约束）",
+          "主键整数列的 AUTOINCREMENT 关键字无法从快照还原"
+        ],
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "orders/fk(user_id)/add_foreign_key"
+        ],
+        "sql": "INSERT INTO \"polydb_tmp_orders\"(\"id\",\"user_id\") SELECT \"id\",\"user_id\" FROM \"orders\";",
+        "phase": 90,
+        "table": "orders",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "orders/fk(user_id)/add_foreign_key"
+        ],
+        "sql": "DROP TABLE \"orders\";",
+        "phase": 90,
+        "table": "orders",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "orders/fk(user_id)/add_foreign_key"
+        ],
+        "sql": "ALTER TABLE \"polydb_tmp_orders\" RENAME TO \"orders\";",
+        "phase": 90,
+        "table": "orders",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=ON;",
+        "phase": 255,
+        "table": "",
+        "non_reversible": false
+      }
+    ],
+    "rollback": [
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=OFF;",
+        "phase": 0,
+        "table": "",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "orders/fk(user_id)/drop_foreign_key"
+        ],
+        "sql": "CREATE TABLE \"polydb_tmp_orders\"(\"id\" integer NOT NULL,\"user_id\" integer,PRIMARY KEY (\"id\"));",
+        "phase": 10,
+        "table": "orders",
+        "warnings": [
+          "重建表会丢失该表上的触发器（快照不含触发器）",
+          "生成列会退化为普通列（快照不标注生成列）",
+          "CHECK 约束会丢失（快照不含 CHECK 约束）",
+          "主键整数列的 AUTOINCREMENT 关键字无法从快照还原"
+        ],
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "orders/fk(user_id)/drop_foreign_key"
+        ],
+        "sql": "INSERT INTO \"polydb_tmp_orders\"(\"id\",\"user_id\") SELECT \"id\",\"user_id\" FROM \"orders\";",
+        "phase": 10,
+        "table": "orders",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "orders/fk(user_id)/drop_foreign_key"
+        ],
+        "sql": "DROP TABLE \"orders\";",
+        "phase": 10,
+        "table": "orders",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "orders/fk(user_id)/drop_foreign_key"
+        ],
+        "sql": "ALTER TABLE \"polydb_tmp_orders\" RENAME TO \"orders\";",
+        "phase": 10,
+        "table": "orders",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=ON;",
+        "phase": 255,
+        "table": "",
+        "non_reversible": false
+      }
+    ],
+    "pragmas_outside_tx": true,
+    "ddl_in_tx": true
+  },
+  "error_code": "",
+  "error_message": ""
+}

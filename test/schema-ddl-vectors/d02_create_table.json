@@ -1,0 +1,58 @@
+{
+  "name": "d02_create_table",
+  "note": "建表以目标快照为基准：列按 ordinal_position、表级约束依次是 PRIMARY KEY / 由 sqlite_autoindex_* 还原的 UNIQUE；单列 INTEGER 主键额外挂 AUTOINCREMENT 警告；回滚是删表且自身不可逆",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": { "kind": "sqlite", "schema": "main", "tables": [] },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "users",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "name", "data_type": "varchar(20)", "nullable": true, "ordinal_position": 2 },
+          { "name": "status", "data_type": "text", "nullable": false, "ordinal_position": 3, "default_value": "'new'" }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_users_1", "unique": true, "columns": [ { "name": "name", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": null,
+  "expected": {
+    "statements": [
+      {
+        "entry_ids": [
+          "users//create_table"
+        ],
+        "sql": "CREATE TABLE \"users\"(\"id\" integer NOT NULL,\"name\" varchar(20),\"status\" text NOT NULL DEFAULT 'new',PRIMARY KEY (\"id\"),UNIQUE (\"name\"));",
+        "phase": 50,
+        "table": "users",
+        "warnings": [
+          "新建表只按快照里的列定义生成，不含 CHECK 约束、生成列与触发器",
+          "主键整数列的 AUTOINCREMENT 关键字无法从快照还原"
+        ],
+        "non_reversible": false
+      }
+    ],
+    "rollback": [
+      {
+        "entry_ids": [
+          "users//drop_table"
+        ],
+        "sql": "DROP TABLE \"users\";",
+        "phase": 40,
+        "table": "users",
+        "non_reversible": true
+      }
+    ],
+    "pragmas_outside_tx": false,
+    "ddl_in_tx": true
+  },
+  "error_code": "",
+  "error_message": ""
+}

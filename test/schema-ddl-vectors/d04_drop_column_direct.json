@@ -1,0 +1,68 @@
+{
+  "name": "d04_drop_column_direct",
+  "note": "列既不是主键也没被任何索引引用时，drop_column 直改（取证 G1：两端 bundled SQLite ≥ 3.35）；恒挂 CHECK 连带消失警告且不可逆；回滚是 ADD COLUMN",
+  "options": { "ignore_defaults": false, "select_destructive": true },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "a", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 },
+          { "name": "gone", "data_type": "TEXT", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "a", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": ["t/gone/drop_column"],
+  "expected": {
+    "statements": [
+      {
+        "entry_ids": [
+          "t/gone/drop_column"
+        ],
+        "sql": "ALTER TABLE \"t\" DROP COLUMN \"gone\";",
+        "phase": 30,
+        "table": "t",
+        "warnings": [
+          "该列若被 CHECK 约束引用，删除后约束会一并消失（快照不可见）"
+        ],
+        "non_reversible": true
+      }
+    ],
+    "rollback": [
+      {
+        "entry_ids": [
+          "t/gone/add_column"
+        ],
+        "sql": "ALTER TABLE \"t\" ADD COLUMN \"gone\" text;",
+        "phase": 60,
+        "table": "t",
+        "non_reversible": false
+      }
+    ],
+    "pragmas_outside_tx": false,
+    "ddl_in_tx": true
+  },
+  "error_code": "",
+  "error_message": ""
+}

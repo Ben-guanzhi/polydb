@@ -1,0 +1,53 @@
+{
+  "name": "d03_drop_table",
+  "note": "删表是直改（SQLite 的 DROP TABLE 无限制），恒不可逆；回滚按互换后的同一套规则变成建表，因此回滚脚本自身也标不可逆",
+  "options": { "ignore_defaults": false, "select_destructive": true },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "legacy",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": { "kind": "sqlite", "schema": "main", "tables": [] },
+  "selected": ["legacy//drop_table"],
+  "expected": {
+    "statements": [
+      {
+        "entry_ids": [
+          "legacy//drop_table"
+        ],
+        "sql": "DROP TABLE \"legacy\";",
+        "phase": 40,
+        "table": "legacy",
+        "non_reversible": true
+      }
+    ],
+    "rollback": [
+      {
+        "entry_ids": [
+          "legacy//create_table"
+        ],
+        "sql": "CREATE TABLE \"legacy\"(\"id\" text);",
+        "phase": 50,
+        "table": "legacy",
+        "warnings": [
+          "新建表只按快照里的列定义生成，不含 CHECK 约束、生成列与触发器"
+        ],
+        "non_reversible": false
+      }
+    ],
+    "pragmas_outside_tx": false,
+    "ddl_in_tx": true
+  },
+  "error_code": "",
+  "error_message": ""
+}

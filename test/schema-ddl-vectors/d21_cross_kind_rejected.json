@@ -1,0 +1,23 @@
+{
+  "name": "d21_cross_kind_rejected",
+  "note": "跨种类（sqlite ↔ postgres）在 diff 阶段即拒绝，语句生成不会绕过它；两侧种类必须一致才谈得上生成方言",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "error_code": "POLYDB_ERR_NOT_SUPPORTED",
+  "error_message": "跨种类比对未支持：sqlite vs postgres（v1 只比同一种数据库）",
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      { "name": "t", "type": "table", "columns": [ { "name": "id", "data_type": "integer", "nullable": false, "ordinal_position": 1 } ], "indexes": [], "foreign_keys": [] }
+    ]
+  },
+  "target": {
+    "kind": "postgres",
+    "schema": "public",
+    "tables": [
+      { "name": "t", "type": "table", "columns": [ { "name": "id", "data_type": "integer", "nullable": false, "ordinal_position": 1 } ], "indexes": [], "foreign_keys": [] }
+    ]
+  },
+  "expected": null,
+  "selected": null
+}

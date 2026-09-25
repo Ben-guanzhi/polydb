@@ -1,0 +1,216 @@
+{
+  "name": "d14_rebuild_group_absorbs_same_table",
+  "note": "同一张表上四种动作混合：alter_column(类型) 触发重建，而 drop_index / add_column / add_index 单独都不必重建。整组语句输出在该表**第一个**条目的位置（相位 20，不是 alter 的 70），entry_ids 吸收该表全部四条；组内首条带重建告警，整数主键追加 AUTOINCREMENT 告警，新增非空无默认列追加 W_REBUILD_NEW_NOT_NULL；因 alter 带 type 维度，整组标 non_reversible",
+  "options": { "ignore_defaults": false, "select_destructive": true },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "qty", "data_type": "INTEGER", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_t_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] },
+          { "name": "idx_qty", "unique": false, "columns": [ { "name": "qty", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "qty", "data_type": "TEXT", "nullable": true, "ordinal_position": 2 },
+          { "name": "name", "data_type": "TEXT", "nullable": false, "ordinal_position": 3 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_t_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] },
+          { "name": "idx_name", "unique": false, "columns": [ { "name": "name", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": null,
+  "expected": {
+    "statements": [
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=OFF;",
+        "phase": 0,
+        "table": "",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "t/idx_qty/drop_index",
+          "t/name/add_column",
+          "t/qty/alter_column",
+          "t/idx_name/add_index"
+        ],
+        "sql": "CREATE TABLE \"polydb_tmp_t\"(\"id\" integer NOT NULL,\"qty\" text,\"name\" text NOT NULL,PRIMARY KEY (\"id\"));",
+        "phase": 20,
+        "table": "t",
+        "warnings": [
+          "重建表会丢失该表上的触发器（快照不含触发器）",
+          "生成列会退化为普通列（快照不标注生成列）",
+          "CHECK 约束会丢失（快照不含 CHECK 约束）",
+          "主键整数列的 AUTOINCREMENT 关键字无法从快照还原",
+          "重建只复制两侧同名列，新增的 NOT NULL 列若无默认值会让数据搬运 INSERT 报错"
+        ],
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/idx_qty/drop_index",
+          "t/name/add_column",
+          "t/qty/alter_column",
+          "t/idx_name/add_index"
+        ],
+        "sql": "INSERT INTO \"polydb_tmp_t\"(\"id\",\"qty\") SELECT \"id\",\"qty\" FROM \"t\";",
+        "phase": 20,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/idx_qty/drop_index",
+          "t/name/add_column",
+          "t/qty/alter_column",
+          "t/idx_name/add_index"
+        ],
+        "sql": "DROP TABLE \"t\";",
+        "phase": 20,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/idx_qty/drop_index",
+          "t/name/add_column",
+          "t/qty/alter_column",
+          "t/idx_name/add_index"
+        ],
+        "sql": "ALTER TABLE \"polydb_tmp_t\" RENAME TO \"t\";",
+        "phase": 20,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/idx_qty/drop_index",
+          "t/name/add_column",
+          "t/qty/alter_column",
+          "t/idx_name/add_index"
+        ],
+        "sql": "CREATE INDEX \"idx_name\" ON \"t\"(\"name\");",
+        "phase": 20,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=ON;",
+        "phase": 255,
+        "table": "",
+        "non_reversible": false
+      }
+    ],
+    "rollback": [
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=OFF;",
+        "phase": 0,
+        "table": "",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "t/idx_name/drop_index",
+          "t/name/drop_column",
+          "t/qty/alter_column",
+          "t/idx_qty/add_index"
+        ],
+        "sql": "CREATE TABLE \"polydb_tmp_t\"(\"id\" integer NOT NULL,\"qty\" integer,PRIMARY KEY (\"id\"));",
+        "phase": 20,
+        "table": "t",
+        "warnings": [
+          "重建表会丢失该表上的触发器（快照不含触发器）",
+          "生成列会退化为普通列（快照不标注生成列）",
+          "CHECK 约束会丢失（快照不含 CHECK 约束）",
+          "主键整数列的 AUTOINCREMENT 关键字无法从快照还原"
+        ],
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/idx_name/drop_index",
+          "t/name/drop_column",
+          "t/qty/alter_column",
+          "t/idx_qty/add_index"
+        ],
+        "sql": "INSERT INTO \"polydb_tmp_t\"(\"id\",\"qty\") SELECT \"id\",\"qty\" FROM \"t\";",
+        "phase": 20,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/idx_name/drop_index",
+          "t/name/drop_column",
+          "t/qty/alter_column",
+          "t/idx_qty/add_index"
+        ],
+        "sql": "DROP TABLE \"t\";",
+        "phase": 20,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/idx_name/drop_index",
+          "t/name/drop_column",
+          "t/qty/alter_column",
+          "t/idx_qty/add_index"
+        ],
+        "sql": "ALTER TABLE \"polydb_tmp_t\" RENAME TO \"t\";",
+        "phase": 20,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/idx_name/drop_index",
+          "t/name/drop_column",
+          "t/qty/alter_column",
+          "t/idx_qty/add_index"
+        ],
+        "sql": "CREATE INDEX \"idx_qty\" ON \"t\"(\"qty\");",
+        "phase": 20,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=ON;",
+        "phase": 255,
+        "table": "",
+        "non_reversible": false
+      }
+    ],
+    "pragmas_outside_tx": true,
+    "ddl_in_tx": true
+  },
+  "error_code": "",
+  "error_message": ""
+}

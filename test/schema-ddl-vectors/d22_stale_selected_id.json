@@ -1,0 +1,48 @@
+{
+  "name": "d14_rebuild_group_absorbs_same_table",
+  "note": "同一张表上四种动作混合：alter_column(类型) 触发重建，而 drop_index / add_column / add_index 单独都不必重建。整组语句输出在该表**第一个**条目的位置（相位 20，不是 alter 的 70），entry_ids 吸收该表全部四条；组内首条带重建告警，整数主键追加 AUTOINCREMENT 告警，新增非空无默认列追加 W_REBUILD_NEW_NOT_NULL；因 alter 带 type 维度，整组标 non_reversible",
+  "options": { "ignore_defaults": false, "select_destructive": true },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "qty", "data_type": "INTEGER", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_t_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] },
+          { "name": "idx_qty", "unique": false, "columns": [ { "name": "qty", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "qty", "data_type": "TEXT", "nullable": true, "ordinal_position": 2 },
+          { "name": "name", "data_type": "TEXT", "nullable": false, "ordinal_position": 3 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_t_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] },
+          { "name": "idx_name", "unique": false, "columns": [ { "name": "name", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": ["t/idx_qty/drop_index", "t/ghost/drop_index"],
+  "expected": null,
+  "error_code": "POLYDB_ERR_INVALID_PARAM",
+  "error_message": "勾选的条目不在当前比对计划里：t/ghost/drop_index（请重新比对后再执行）"
+}

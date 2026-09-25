@@ -1,0 +1,88 @@
+{
+  "name": "d09_index_add_drop_direct",
+  "note": "用户索引（非 sqlite_ 前缀、非主键）的新增与删除都是直改；无名索引按快照合成可执行名 polydb_idx_<表>_<列>，与 E1 的 object 同规则；只勾选 add_index 时 drop_index 不进脚本，但回滚仍按勾选镜像",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "a", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 },
+          { "name": "b", "data_type": "TEXT", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "idx_b", "unique": false, "columns": [ { "name": "b", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "a", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 },
+          { "name": "b", "data_type": "TEXT", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "", "unique": true, "columns": [ { "name": "a", "position": 1 }, { "name": "b", "position": 2 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": null,
+  "expected": {
+    "statements": [
+      {
+        "entry_ids": [
+          "t/idx_b/drop_index"
+        ],
+        "sql": "DROP INDEX \"idx_b\";",
+        "phase": 20,
+        "table": "t",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "t/idx(a,b)/add_index"
+        ],
+        "sql": "CREATE UNIQUE INDEX \"polydb_idx_t_a_b\" ON \"t\"(\"a\",\"b\");",
+        "phase": 80,
+        "table": "t",
+        "non_reversible": false
+      }
+    ],
+    "rollback": [
+      {
+        "entry_ids": [
+          "t/idx(a,b)/drop_index"
+        ],
+        "sql": "DROP INDEX \"polydb_idx_t_a_b\";",
+        "phase": 20,
+        "table": "t",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "t/idx_b/add_index"
+        ],
+        "sql": "CREATE INDEX \"idx_b\" ON \"t\"(\"b\");",
+        "phase": 80,
+        "table": "t",
+        "non_reversible": false
+      }
+    ],
+    "pragmas_outside_tx": false,
+    "ddl_in_tx": true
+  },
+  "error_code": "",
+  "error_message": ""
+}

@@ -1,0 +1,158 @@
+{
+  "name": "d07_alter_column_default_only",
+  "note": "只有默认值变化的 alter_column 仍走重建（SQLite 无法原地改默认值），但按规则 6 是可逆的；回滚同样是重建，方向相反",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "cfg",
+        "type": "table",
+        "columns": [
+          { "name": "k", "data_type": "TEXT", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "v", "data_type": "TEXT", "nullable": true, "ordinal_position": 2, "default_value": "'1'" }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "cfg",
+        "type": "table",
+        "columns": [
+          { "name": "k", "data_type": "TEXT", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "v", "data_type": "TEXT", "nullable": true, "ordinal_position": 2, "default_value": "'2'" }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": null,
+  "expected": {
+    "statements": [
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=OFF;",
+        "phase": 0,
+        "table": "",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "cfg/v/alter_column"
+        ],
+        "sql": "CREATE TABLE \"polydb_tmp_cfg\"(\"k\" text NOT NULL,\"v\" text DEFAULT '2',PRIMARY KEY (\"k\"));",
+        "phase": 70,
+        "table": "cfg",
+        "warnings": [
+          "重建表会丢失该表上的触发器（快照不含触发器）",
+          "生成列会退化为普通列（快照不标注生成列）",
+          "CHECK 约束会丢失（快照不含 CHECK 约束）"
+        ],
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "cfg/v/alter_column"
+        ],
+        "sql": "INSERT INTO \"polydb_tmp_cfg\"(\"k\",\"v\") SELECT \"k\",\"v\" FROM \"cfg\";",
+        "phase": 70,
+        "table": "cfg",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "cfg/v/alter_column"
+        ],
+        "sql": "DROP TABLE \"cfg\";",
+        "phase": 70,
+        "table": "cfg",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "cfg/v/alter_column"
+        ],
+        "sql": "ALTER TABLE \"polydb_tmp_cfg\" RENAME TO \"cfg\";",
+        "phase": 70,
+        "table": "cfg",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=ON;",
+        "phase": 255,
+        "table": "",
+        "non_reversible": false
+      }
+    ],
+    "rollback": [
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=OFF;",
+        "phase": 0,
+        "table": "",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "cfg/v/alter_column"
+        ],
+        "sql": "CREATE TABLE \"polydb_tmp_cfg\"(\"k\" text NOT NULL,\"v\" text DEFAULT '1',PRIMARY KEY (\"k\"));",
+        "phase": 70,
+        "table": "cfg",
+        "warnings": [
+          "重建表会丢失该表上的触发器（快照不含触发器）",
+          "生成列会退化为普通列（快照不标注生成列）",
+          "CHECK 约束会丢失（快照不含 CHECK 约束）"
+        ],
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "cfg/v/alter_column"
+        ],
+        "sql": "INSERT INTO \"polydb_tmp_cfg\"(\"k\",\"v\") SELECT \"k\",\"v\" FROM \"cfg\";",
+        "phase": 70,
+        "table": "cfg",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "cfg/v/alter_column"
+        ],
+        "sql": "DROP TABLE \"cfg\";",
+        "phase": 70,
+        "table": "cfg",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "cfg/v/alter_column"
+        ],
+        "sql": "ALTER TABLE \"polydb_tmp_cfg\" RENAME TO \"cfg\";",
+        "phase": 70,
+        "table": "cfg",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=ON;",
+        "phase": 255,
+        "table": "",
+        "non_reversible": false
+      }
+    ],
+    "pragmas_outside_tx": true,
+    "ddl_in_tx": true
+  },
+  "error_code": "",
+  "error_message": ""
+}

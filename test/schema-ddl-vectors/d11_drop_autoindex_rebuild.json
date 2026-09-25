@@ -1,0 +1,165 @@
+{
+  "name": "d11_drop_autoindex_rebuild",
+  "note": "源侧的 UNIQUE 约束在目标侧被去掉：drop_index 命中 sqlite_ 前缀的自动索引 ⇒ 转重建；重建时该约束不再出现在表级约束里，等价于删除。回滚是同一套规则反向生成，会把 UNIQUE 加回来",
+  "options": { "ignore_defaults": false, "select_destructive": true },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "code", "data_type": "TEXT", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_t_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] },
+          { "name": "sqlite_autoindex_t_2", "unique": true, "columns": [ { "name": "code", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "code", "data_type": "TEXT", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_t_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": ["t/sqlite_autoindex_t_2/drop_index"],
+  "expected": {
+    "statements": [
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=OFF;",
+        "phase": 0,
+        "table": "",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "t/sqlite_autoindex_t_2/drop_index"
+        ],
+        "sql": "CREATE TABLE \"polydb_tmp_t\"(\"id\" integer NOT NULL,\"code\" text,PRIMARY KEY (\"id\"));",
+        "phase": 20,
+        "table": "t",
+        "warnings": [
+          "重建表会丢失该表上的触发器（快照不含触发器）",
+          "生成列会退化为普通列（快照不标注生成列）",
+          "CHECK 约束会丢失（快照不含 CHECK 约束）",
+          "主键整数列的 AUTOINCREMENT 关键字无法从快照还原"
+        ],
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "t/sqlite_autoindex_t_2/drop_index"
+        ],
+        "sql": "INSERT INTO \"polydb_tmp_t\"(\"id\",\"code\") SELECT \"id\",\"code\" FROM \"t\";",
+        "phase": 20,
+        "table": "t",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "t/sqlite_autoindex_t_2/drop_index"
+        ],
+        "sql": "DROP TABLE \"t\";",
+        "phase": 20,
+        "table": "t",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "t/sqlite_autoindex_t_2/drop_index"
+        ],
+        "sql": "ALTER TABLE \"polydb_tmp_t\" RENAME TO \"t\";",
+        "phase": 20,
+        "table": "t",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=ON;",
+        "phase": 255,
+        "table": "",
+        "non_reversible": false
+      }
+    ],
+    "rollback": [
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=OFF;",
+        "phase": 0,
+        "table": "",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "t/sqlite_autoindex_t_2/add_index"
+        ],
+        "sql": "CREATE TABLE \"polydb_tmp_t\"(\"id\" integer NOT NULL,\"code\" text,PRIMARY KEY (\"id\"),UNIQUE (\"code\"));",
+        "phase": 80,
+        "table": "t",
+        "warnings": [
+          "重建表会丢失该表上的触发器（快照不含触发器）",
+          "生成列会退化为普通列（快照不标注生成列）",
+          "CHECK 约束会丢失（快照不含 CHECK 约束）",
+          "主键整数列的 AUTOINCREMENT 关键字无法从快照还原"
+        ],
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "t/sqlite_autoindex_t_2/add_index"
+        ],
+        "sql": "INSERT INTO \"polydb_tmp_t\"(\"id\",\"code\") SELECT \"id\",\"code\" FROM \"t\";",
+        "phase": 80,
+        "table": "t",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "t/sqlite_autoindex_t_2/add_index"
+        ],
+        "sql": "DROP TABLE \"t\";",
+        "phase": 80,
+        "table": "t",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "t/sqlite_autoindex_t_2/add_index"
+        ],
+        "sql": "ALTER TABLE \"polydb_tmp_t\" RENAME TO \"t\";",
+        "phase": 80,
+        "table": "t",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=ON;",
+        "phase": 255,
+        "table": "",
+        "non_reversible": false
+      }
+    ],
+    "pragmas_outside_tx": true,
+    "ddl_in_tx": true
+  },
+  "error_code": "",
+  "error_message": ""
+}

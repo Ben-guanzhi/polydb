@@ -1,0 +1,11 @@
+{
+  "name": "d20_redis_rejected",
+  "note": "Redis 无模式概念：错误在 diff 阶段就抛出，语句生成沿用最上层同一文案（与向量 16 一致，此处锁定「生成入口也拒绝」）",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "error_code": "POLYDB_ERR_NOT_SUPPORTED",
+  "error_message": "Redis 无模式概念，不参与结构比对",
+  "source": { "kind": "redis", "schema": "0", "tables": [] },
+  "target": { "kind": "redis", "schema": "1", "tables": [] },
+  "expected": null,
+  "selected": null
+}

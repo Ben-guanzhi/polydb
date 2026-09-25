@@ -1,0 +1,23 @@
+{
+  "name": "d17_mysql_dialect_not_supported",
+  "note": "MySQL 方言同 d16：显式拒绝（ALTER TABLE MODIFY/CHANGE 与 ALGORITHM=INSTANT 的取舍需要先取证，不能凭文档写）",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "error_code": "POLYDB_ERR_NOT_SUPPORTED",
+  "error_message": "mysql 方言的 DDL 生成在 v1 未实现（当前只生成 sqlite）",
+  "source": {
+    "kind": "mysql",
+    "schema": "app",
+    "tables": [
+      { "name": "t", "type": "table", "columns": [ { "name": "id", "data_type": "int", "nullable": false, "ordinal_position": 1 } ], "indexes": [], "foreign_keys": [] }
+    ]
+  },
+  "target": {
+    "kind": "mysql",
+    "schema": "app",
+    "tables": [
+      { "name": "t", "type": "table", "columns": [ { "name": "id", "data_type": "bigint", "nullable": false, "ordinal_position": 1 } ], "indexes": [], "foreign_keys": [] }
+    ]
+  },
+  "expected": null,
+  "selected": null
+}

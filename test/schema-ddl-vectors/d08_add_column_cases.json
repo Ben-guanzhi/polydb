@@ -1,0 +1,118 @@
+{
+  "name": "d08_add_column_cases",
+  "note": "三种 ADD COLUMN：常量默认值可直改且无警告；非空且无默认值、非常量默认值都只能照抄快照定义并挂警告（取证 G11，执行期由 SQLite 报错兜底）",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "a", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "a", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 },
+          { "name": "b", "data_type": "TEXT", "nullable": true, "ordinal_position": 2, "default_value": "'x'" },
+          { "name": "c", "data_type": "TEXT", "nullable": false, "ordinal_position": 3 },
+          { "name": "d", "data_type": "TEXT", "nullable": true, "ordinal_position": 4, "default_value": "current_timestamp" }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": null,
+  "expected": {
+    "statements": [
+      {
+        "entry_ids": [
+          "t/b/add_column"
+        ],
+        "sql": "ALTER TABLE \"t\" ADD COLUMN \"b\" text DEFAULT 'x';",
+        "phase": 60,
+        "table": "t",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "t/c/add_column"
+        ],
+        "sql": "ALTER TABLE \"t\" ADD COLUMN \"c\" text NOT NULL;",
+        "phase": 60,
+        "table": "t",
+        "warnings": [
+          "SQLite 的 ADD COLUMN 只接受常量默认值，非空表上加 NOT NULL 且无默认值的列也会报错"
+        ],
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "t/d/add_column"
+        ],
+        "sql": "ALTER TABLE \"t\" ADD COLUMN \"d\" text DEFAULT current_timestamp;",
+        "phase": 60,
+        "table": "t",
+        "warnings": [
+          "SQLite 的 ADD COLUMN 只接受常量默认值，非空表上加 NOT NULL 且无默认值的列也会报错"
+        ],
+        "non_reversible": false
+      }
+    ],
+    "rollback": [
+      {
+        "entry_ids": [
+          "t/b/drop_column"
+        ],
+        "sql": "ALTER TABLE \"t\" DROP COLUMN \"b\";",
+        "phase": 30,
+        "table": "t",
+        "warnings": [
+          "该列若被 CHECK 约束引用，删除后约束会一并消失（快照不可见）"
+        ],
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/c/drop_column"
+        ],
+        "sql": "ALTER TABLE \"t\" DROP COLUMN \"c\";",
+        "phase": 30,
+        "table": "t",
+        "warnings": [
+          "该列若被 CHECK 约束引用，删除后约束会一并消失（快照不可见）"
+        ],
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/d/drop_column"
+        ],
+        "sql": "ALTER TABLE \"t\" DROP COLUMN \"d\";",
+        "phase": 30,
+        "table": "t",
+        "warnings": [
+          "该列若被 CHECK 约束引用，删除后约束会一并消失（快照不可见）"
+        ],
+        "non_reversible": true
+      }
+    ],
+    "pragmas_outside_tx": false,
+    "ddl_in_tx": true
+  },
+  "error_code": "",
+  "error_message": ""
+}

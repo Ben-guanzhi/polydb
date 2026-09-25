@@ -1,0 +1,23 @@
+{
+  "name": "d16_pg_dialect_not_supported",
+  "note": "定案 §8-1：v1 只生成 SQLite 方言，PG 显式 NOT_SUPPORTED 而不是盲写语法（它的 on_update/on_delete 与 generic_type 归一还没落地）。错误来自语句生成阶段，diff 本身仍可产出计划",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "error_code": "POLYDB_ERR_NOT_SUPPORTED",
+  "error_message": "postgres 方言的 DDL 生成在 v1 未实现（当前只生成 sqlite）",
+  "source": {
+    "kind": "postgres",
+    "schema": "public",
+    "tables": [
+      { "name": "t", "type": "table", "columns": [ { "name": "id", "data_type": "integer", "nullable": false, "ordinal_position": 1 } ], "indexes": [], "foreign_keys": [] }
+    ]
+  },
+  "target": {
+    "kind": "postgres",
+    "schema": "public",
+    "tables": [
+      { "name": "t", "type": "table", "columns": [ { "name": "id", "data_type": "bigint", "nullable": false, "ordinal_position": 1 } ], "indexes": [], "foreign_keys": [] }
+    ]
+  },
+  "expected": null,
+  "selected": null
+}

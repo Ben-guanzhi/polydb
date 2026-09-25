@@ -1,0 +1,160 @@
+{
+  "name": "d06_alter_column_type_rebuild",
+  "note": "SQLite 没有 ALTER COLUMN，类型变更恒走重建；flags 含 type ⇒ 不可逆；重建固定挂触发器/生成列/CHECK 三条警告，单列 INTEGER 主键再加 AUTOINCREMENT",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "name", "data_type": "varchar(20)", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "name", "data_type": "varchar(30)", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": null,
+  "expected": {
+    "statements": [
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=OFF;",
+        "phase": 0,
+        "table": "",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "t/name/alter_column"
+        ],
+        "sql": "CREATE TABLE \"polydb_tmp_t\"(\"id\" integer NOT NULL,\"name\" varchar(30),PRIMARY KEY (\"id\"));",
+        "phase": 70,
+        "table": "t",
+        "warnings": [
+          "重建表会丢失该表上的触发器（快照不含触发器）",
+          "生成列会退化为普通列（快照不标注生成列）",
+          "CHECK 约束会丢失（快照不含 CHECK 约束）",
+          "主键整数列的 AUTOINCREMENT 关键字无法从快照还原"
+        ],
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/name/alter_column"
+        ],
+        "sql": "INSERT INTO \"polydb_tmp_t\"(\"id\",\"name\") SELECT \"id\",\"name\" FROM \"t\";",
+        "phase": 70,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/name/alter_column"
+        ],
+        "sql": "DROP TABLE \"t\";",
+        "phase": 70,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/name/alter_column"
+        ],
+        "sql": "ALTER TABLE \"polydb_tmp_t\" RENAME TO \"t\";",
+        "phase": 70,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=ON;",
+        "phase": 255,
+        "table": "",
+        "non_reversible": false
+      }
+    ],
+    "rollback": [
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=OFF;",
+        "phase": 0,
+        "table": "",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "t/name/alter_column"
+        ],
+        "sql": "CREATE TABLE \"polydb_tmp_t\"(\"id\" integer NOT NULL,\"name\" varchar(20),PRIMARY KEY (\"id\"));",
+        "phase": 70,
+        "table": "t",
+        "warnings": [
+          "重建表会丢失该表上的触发器（快照不含触发器）",
+          "生成列会退化为普通列（快照不标注生成列）",
+          "CHECK 约束会丢失（快照不含 CHECK 约束）",
+          "主键整数列的 AUTOINCREMENT 关键字无法从快照还原"
+        ],
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/name/alter_column"
+        ],
+        "sql": "INSERT INTO \"polydb_tmp_t\"(\"id\",\"name\") SELECT \"id\",\"name\" FROM \"t\";",
+        "phase": 70,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/name/alter_column"
+        ],
+        "sql": "DROP TABLE \"t\";",
+        "phase": 70,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/name/alter_column"
+        ],
+        "sql": "ALTER TABLE \"polydb_tmp_t\" RENAME TO \"t\";",
+        "phase": 70,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=ON;",
+        "phase": 255,
+        "table": "",
+        "non_reversible": false
+      }
+    ],
+    "pragmas_outside_tx": true,
+    "ddl_in_tx": true
+  },
+  "error_code": "",
+  "error_message": ""
+}

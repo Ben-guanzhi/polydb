@@ -1,0 +1,178 @@
+{
+  "name": "d15_tmp_name_collision",
+  "note": "库里已存在一张叫 polydb_tmp_t 的表（历史遗留），重建的临时表名必须避让：polydb_tmp_t → polydb_tmp_t_2。taken 集合取两侧快照表名的并集",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "a", "data_type": "TEXT", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      },
+      {
+        "name": "polydb_tmp_t",
+        "type": "table",
+        "columns": [
+          { "name": "x", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "a", "data_type": "VARCHAR(40)", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      },
+      {
+        "name": "polydb_tmp_t",
+        "type": "table",
+        "columns": [
+          { "name": "x", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": ["t/a/alter_column"],
+  "expected": {
+    "statements": [
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=OFF;",
+        "phase": 0,
+        "table": "",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "t/a/alter_column"
+        ],
+        "sql": "CREATE TABLE \"polydb_tmp_t_2\"(\"id\" integer NOT NULL,\"a\" varchar(40),PRIMARY KEY (\"id\"));",
+        "phase": 70,
+        "table": "t",
+        "warnings": [
+          "重建表会丢失该表上的触发器（快照不含触发器）",
+          "生成列会退化为普通列（快照不标注生成列）",
+          "CHECK 约束会丢失（快照不含 CHECK 约束）",
+          "主键整数列的 AUTOINCREMENT 关键字无法从快照还原"
+        ],
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/a/alter_column"
+        ],
+        "sql": "INSERT INTO \"polydb_tmp_t_2\"(\"id\",\"a\") SELECT \"id\",\"a\" FROM \"t\";",
+        "phase": 70,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/a/alter_column"
+        ],
+        "sql": "DROP TABLE \"t\";",
+        "phase": 70,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/a/alter_column"
+        ],
+        "sql": "ALTER TABLE \"polydb_tmp_t_2\" RENAME TO \"t\";",
+        "phase": 70,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=ON;",
+        "phase": 255,
+        "table": "",
+        "non_reversible": false
+      }
+    ],
+    "rollback": [
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=OFF;",
+        "phase": 0,
+        "table": "",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "t/a/alter_column"
+        ],
+        "sql": "CREATE TABLE \"polydb_tmp_t_2\"(\"id\" integer NOT NULL,\"a\" text,PRIMARY KEY (\"id\"));",
+        "phase": 70,
+        "table": "t",
+        "warnings": [
+          "重建表会丢失该表上的触发器（快照不含触发器）",
+          "生成列会退化为普通列（快照不标注生成列）",
+          "CHECK 约束会丢失（快照不含 CHECK 约束）",
+          "主键整数列的 AUTOINCREMENT 关键字无法从快照还原"
+        ],
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/a/alter_column"
+        ],
+        "sql": "INSERT INTO \"polydb_tmp_t_2\"(\"id\",\"a\") SELECT \"id\",\"a\" FROM \"t\";",
+        "phase": 70,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/a/alter_column"
+        ],
+        "sql": "DROP TABLE \"t\";",
+        "phase": 70,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/a/alter_column"
+        ],
+        "sql": "ALTER TABLE \"polydb_tmp_t_2\" RENAME TO \"t\";",
+        "phase": 70,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=ON;",
+        "phase": 255,
+        "table": "",
+        "non_reversible": false
+      }
+    ],
+    "pragmas_outside_tx": true,
+    "ddl_in_tx": true
+  },
+  "error_code": "",
+  "error_message": ""
+}
