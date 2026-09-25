@@ -39,14 +39,14 @@ MySQL 的 `app_dev` vs `app_prod`），列出表/列/索引/外键四类对象�
 | --- | --- | --- |
 | E1 diff 纯函数 + 归一层 | Rust ~450 行 + Go ~400 行 + 单测各 ~250 行 | 零 IO、零 UI，双实现对拍可提前建立 |
 | E2 spec DTO + 两端端点 + 契约 | spec ~120 行、两端各 ~120 行、契约 ~200 行 | 唯一需要 spec 变更的批次 |
-| E3 DDL 生成器补全 | 三端各 ~300 行（Web 扩 `alterSql.ts`、GUI/TUI 新写） | 含顺序依赖与回滚脚本 |
+| E3 DDL 生成器补全 | Rust/Go 各 ~350 行 + 单测（**D1 定案后落在服务端**，前端只渲染脚本） | 含 ALTER COLUMN 三态、CREATE/DROP TABLE、顺序依赖与回滚脚本 |
 | E4 Web 向导 | ~700 行（四步 + 预览 + 状态持久化） | 体量参照 M30 导入向导的 1/3 |
 | E5 GUI + TUI 收敛形态 + 文档 | GPUI ~400 行、TUI ~350 行 | 渲染无法无头验证（§7） |
 | 合计 | **约 4.3k 行**（含测试） | 体量参照：约等于当前整个 `rust/crates/ui-gui`（10,048 行）的 43% |
 
 ## 4. 关键设计决策（★ = 需要产品确认的分叉）
 
-**D1 ★ diff 计算放在哪一层**
+**D1 ★ diff 计算放在哪一层 —— 已定（2026-09-25）：服务端一处。**
 - **推荐：服务端（app-core 纯函数 + spec DTO + 端点），三端只做渲染。**
   理由量化：500 表 × 2 侧的列/索引/FK 读取，若在前端逐表 fan-out 是 **~3000 次往返**
   （Web 每表 `listColumns`+`listIndexes`+`listForeignKeys`），服务端一次调用即可；
@@ -100,8 +100,9 @@ alter_default / add_index / drop_index / add_fk / drop_fk / drop_table；带对�
 - **E2 协议与服务端**：spec 改动 → `gen-protocol` → 两端 DTO + 两个端点 → 契约测试
   （**SQLite 同库两 schema 真跑**；PG/MySQL/MSSQL/Oracle 按既有 `connected:false` soft-skip）。
   验收门禁：`check-protocol` + workspace clippy/test + `go vet` + 契约。
-- **E3 语句生成**：先补齐 Web `alterSql.ts` 的缺口（ALTER COLUMN 三态、CREATE/DROP TABLE），
-  再让服务端 DDL 端点复用同一套规则（若 D1 选推荐方案，此批与 E1/E2 合并考虑，避免第四套实现）。
+- **E3 语句生成**：在服务端补齐生成器（ALTER COLUMN 的类型/可空/默认三态、CREATE/DROP TABLE、
+  依赖排序、回滚脚本），Web 现成的 `alterSql.ts` 继续服务结构编辑器，**不作为 diff 的出口**
+  （避免同一个方言规则存在两套真相源）。
 - **E4 Web 向导**：四步（选源 → 选目标 → 差异预览 → 脚本/应用），复用导入向导的
   `Step` 联合类型 + `polydb.<feature>.v1` localStorage 命名 + busy 门禁 + 失败详情展示惯例。
 - **E5 GUI/TUI + 文档**：GUI 浮层/独立面板（同种类两 schema，D3），TUI 三段视图；
@@ -118,7 +119,8 @@ alter_default / add_index / drop_index / add_fk / drop_fk / drop_table；带对�
 
 ## 8. 未决问题（开工前需要拍板）
 
-1. D1 选推荐（服务端）还是备选（三端各自实现）？这决定后续所有批次的形状。
+1. ~~D1 选推荐（服务端）还是备选（三端各自实现）？~~ **已定：服务端一处**（2026-09-25），
+   E3 的语句生成因此同样落在服务端（两端各一套 + 契约对拍），前端不自带方言规则。
 2. 是否需要"生成回滚脚本"进 v1？（D4 依赖它，成本约 +400 行）
 3. `generic_type` 的归一命名表由谁定：以 PG 命名为准、还是自创中立名（`int64`/`text`/`timestamp`…）？
 4. 差异条目里"仅目标库存在"要不要包含**数据不可逆**提示（drop column 会丢数据）——建议 v1 强制红标 + 默认不勾选。
