@@ -108,6 +108,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/connections/{id}/schemas/{schema}/tables/{table}/ddl", s.getDDL)
 	mux.HandleFunc("POST /api/schema/diff", s.diffSchema)
+	mux.HandleFunc("POST /api/schema/ddl", s.generateSchemaDDL)
 	mux.HandleFunc("POST /api/connections/{id}/schemas/{schema}/tables/{table}/rows/query", s.browseRows)
 	mux.HandleFunc("POST /api/connections/{id}/schemas/{schema}/tables/{table}/rows/count", s.browseRowsCount)
 
@@ -350,6 +351,22 @@ func (s *Server) diffSchema(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeMsgpack(w, http.StatusOK, plan)
+}
+
+// generateSchemaDDL 由「连接 + 勾选条目 id」产出语句脚本（behavior.md §15）。
+// 服务端重算比对，因此勾选有效性（陈旧 id、重建组）在这里一并校验。
+func (s *Server) generateSchemaDDL(w http.ResponseWriter, r *http.Request) {
+	var req protocol.SchemaDdlRequest
+	if err := decodeMsgpack(r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	script, err := s.app.SchemaDDL(r.Context(), &req)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeMsgpack(w, http.StatusOK, script)
 }
 
 // ─── query ─────────────────────────────────────────────────

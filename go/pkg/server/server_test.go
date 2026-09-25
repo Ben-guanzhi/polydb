@@ -709,3 +709,142 @@ func TestDiffSchemaOptionsAreAccepted(t *testing.T) {
 		t.Fatalf("got %v", plan.Entries)
 	}
 }
+
+// ─── 结构同步语句生成（Compare & Sync E3，behavior.md §15）─────
+// 与 Rust crates/server/src/tests.rs 的 ddl_* 用例逐条镜像。
+// 断言同时走两条路：typed struct 锁值，msgpack 通用 map 锁「字段是否省略、空数组是不是 []」。
+
+func ddlDo(t *testing.T, srv *httptest.Server, req protocol.SchemaDdlRequest) (int, map[string]any, protocol.DdlScript) {
+	t.Helper()
+	body, err := msgpack.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	status, raw := rawDo(t, srv, "POST", "/api/schema/ddl", body, "application/msgpack")
+	var script protocol.DdlScript
+	generic := map[string]any{}
+	if status == http.StatusOK {
+		if err := msgpack.Unmarshal(raw, &script); err != nil {
+			t.Fatalf("decode script: %v (bytes=%q)", err, raw)
+		}
+		if err := msgpack.Unmarshal(raw, &generic); err != nil {
+			t.Fatalf("decode map: %v (bytes=%q)", err, raw)
+		}
+		return status, generic, script
+	}
+	// 错误响应是 JSON（与 Rust 一致）。
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		t.Fatalf("decode error body: %v (bytes=%q)", err, raw)
+	}
+	return status, generic, script
+}
+
+// stmtAt 取脚本里的第 n 条语句（statements 或 rollback）。
+func stmtAt(t *testing.T, body map[string]any, field string, n int) map[string]any {
+	t.Helper()
+	raw, ok := body[field].([]any)
+	if !ok {
+		t.Fatalf("%s 不是数组：%#v", field, body[field])
+	}
+	if len(raw) <= n {
+		t.Fatalf("%s 只有 %d 条：%#v", field, len(raw), raw)
+	}
+	s, ok := raw[n].(map[string]any)
+	if !ok {
+		t.Fatalf("%s[%d] 不是 map：%#v", field, n, raw[n])
+	}
+	return s
+}
+
+func TestSchemaDDLEmptySelectionProducesEmptyArrays(t *testing.T) {
+	srv := newTestServer(t)
+	id := createSQLiteConn(t, srv)
+	status, body, script := ddlDo(t, srv, protocol.SchemaDdlRequest{
+		Source:   protocol.SchemaDiffTarget{ConnectionID: id},
+		Target:   protocol.SchemaDiffTarget{ConnectionID: id},
+		Selected: []string{},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("status=%d body=%v", status, body)
+	}
+	// 空勾选必须编成 []，不得成 null（§15.1）。
+	for _, field := range []string{"statements", "rollback"} {
+		arr, ok := body[field].([]any)
+		if !ok {
+			t.Fatalf("%s 缺失或非数组：%#v", field, body[field])
+		}
+		if len(arr) != 0 {
+			t.Fatalf("%s 应为空：%#v", field, arr)
+		}
+	}
+	if len(script.Statements) != 0 || len(script.Rollback) != 0 {
+		t.Fatalf("脚本应为空：%#v", script)
+	}
+	if script.PragmasOutsideTx {
+		t.Fatalf("无重建时 pragmas_outside_tx 必须 false：%#v", script)
+	}
+	if !script.DdlInTx {
+		t.Fatalf("SQLite 的 DDL 可进事务（取证 G7）：%#v", script)
+	}
+}
+
+func TestSchemaDDLGeneratesDirectStatementsForSelectedEntries(t *testing.T) {
+	srv := newTestServer(t)
+	source := createSQLiteConn(t, srv)
+	target := createSQLiteConn(t, srv)
+	execSQL(t, srv, source, "CREATE TABLE t(id INTEGER)")
+	execSQL(t, srv, target, "CREATE TABLE t(id INTEGER, note TEXT)")
+	status, body, script := ddlDo(t, srv, protocol.SchemaDdlRequest{
+		Source:   protocol.SchemaDiffTarget{ConnectionID: source},
+		Target:   protocol.SchemaDiffTarget{ConnectionID: target},
+		Selected: []string{"t/note/add_column"},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("status=%d body=%v", status, body)
+	}
+	// 与 Rust 侧期望逐字一致的直改语句。
+	wantStmt := []protocol.DdlStatement{{
+		EntryIDs: []string{"t/note/add_column"},
+		SQL:      `ALTER TABLE "t" ADD COLUMN "note" text;`,
+		Phase:    60,
+		Table:    "t",
+	}}
+	if !reflect.DeepEqual(script.Statements, wantStmt) {
+		t.Fatalf("statements mismatch\n got %#v\nwant %#v", script.Statements, wantStmt)
+	}
+	if _, ok := stmtAt(t, body, "statements", 0)["warnings"]; ok {
+		t.Fatalf("无告警时 warnings 字段必须省略：%#v", body["statements"])
+	}
+	// 回滚方向按镜像 id 重算：add_column ↔ drop_column，且删列自身不可逆。
+	wantRollback := []protocol.DdlStatement{{
+		EntryIDs:      []string{"t/note/drop_column"},
+		SQL:           `ALTER TABLE "t" DROP COLUMN "note";`,
+		Phase:         30,
+		Table:         "t",
+		Warnings:      []string{"该列若被 CHECK 约束引用，删除后约束会一并消失（快照不可见）"},
+		NonReversible: true,
+	}}
+	if !reflect.DeepEqual(script.Rollback, wantRollback) {
+		t.Fatalf("rollback mismatch\n got %#v\nwant %#v", script.Rollback, wantRollback)
+	}
+}
+
+func TestSchemaDDLStaleSelectedIDReportsInvalidParam(t *testing.T) {
+	srv := newTestServer(t)
+	id := createSQLiteConn(t, srv)
+	status, body, _ := ddlDo(t, srv, protocol.SchemaDdlRequest{
+		Source:   protocol.SchemaDiffTarget{ConnectionID: id},
+		Target:   protocol.SchemaDiffTarget{ConnectionID: id},
+		Selected: []string{"t/ghost/drop_index"},
+	})
+	if status != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400 (body=%v)", status, body)
+	}
+	if body["code"] != "POLYDB_ERR_INVALID_PARAM" {
+		t.Fatalf("code=%v", body["code"])
+	}
+	want := "勾选的条目不在当前比对计划里：t/ghost/drop_index（请重新比对后再执行）"
+	if body["message"] != want {
+		t.Fatalf("message=%v, want %q", body["message"], want)
+	}
+}

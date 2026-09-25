@@ -476,6 +476,34 @@ paths:
         default:
           $ref: "#/components/responses/Error"
 
+  /api/schema/ddl:
+    post:
+      operationId: generateSchemaDdl
+      summary: 按勾选的结构变更条目生成可执行 DDL 脚本（含回滚）
+      description: |
+        入参给**连接 + 勾选条目 id**（定案见 docs/plan-compare-sync.md §6 E3 ③）：服务端重新采集两侧快照、重算 diff，
+        再按 selected 过滤并生成语句——绝不信任客户端传来的计划，避免用过期条目解释新结构。
+        过滤由 behavior.md §15 的两条勾选规则约束：id 必须存在于本次计划；
+        进入整表重建的表必须整组勾选，两者违反都是 POLYDB_ERR_INVALID_PARAM。
+        v1 **只支持 SQLite 方言**，其余种类 POLYDB_ERR_NOT_SUPPORTED（Redis 与跨种类同样拒绝）。
+        响应同时给出正向脚本与回滚脚本，执行属客户端显式发起的下一步（走既有事务/execute 通道）。
+      tags: [schema_ddl]
+      requestBody:
+        required: true
+        content:
+          application/msgpack:
+            schema:
+              $ref: "schemas/metadata.json#/definitions/SchemaDdlRequest"
+      responses:
+        "200":
+          description: DDL 脚本（空勾选时 statements/rollback 均为空数组）
+          content:
+            application/msgpack:
+              schema:
+                $ref: "schemas/metadata.json#/definitions/DdlScript"
+        default:
+          $ref: "#/components/responses/Error"
+
   # ─── 表数据浏览（M11，behavior.md §13）───────────────────
   /api/connections/{id}/schemas/{schema}/tables/{table}/rows/query:
     post:

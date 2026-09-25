@@ -29,9 +29,9 @@ MySQL 的 `app_dev` vs `app_prod`），列出表/列/索引/外键四类对象�
 | --- | --- | --- |
 | 元数据读面 | `SqlDriver` 六方法（schemas/tables/columns/indexes/foreign_keys/create_table_sql），5 个 SQL 驱动 × Rust/Go 两端**全部实现**（`rust/crates/db-core/src/driver.rs:29-35`、`go/pkg/dbcore/dbcore.go:25-30`）；DTO 在 `spec/schemas/metadata.json:6-111` | **方法齐 ≠ 字段填对**：E2.0 真快照复核抓到 SQLite 侧 3 个缺陷（外键合成名不确定、`IndexInfo.primary` 恒 false、`on_update/on_delete` 从未填），已两端修掉并固化测试；其余四方言同类字段**未复核**（见附录 A.9） |
 | 跨库类型归一 | `ColumnInfo.generic_type` 在 spec 里**已声明**，注释写着"cross-database comparison"，但**没有任何驱动填值**（`db-postgres/src/lib.rs:425`、`db-oracle:517`、`db-mssql:550` 一律 `None`/省略） | ★ 必须落地或在 diff 层自建映射表 |
-| DDL 生成 | **只有 Web 一处**：`web/src/lib/alterSql.ts`（quoteIdent/addColumn/dropColumn/renameColumn/addIndex/dropIndex/addFK/dropFK + `UnsupportedAlterError`）。GUI、TUI **零 DDL 生成**（`ALTER TABLE` 只出现在两端自用 storage 里） | ★ 缺 ALTER COLUMN（类型/可空/默认）、缺 CREATE/DROP TABLE |
+| DDL 生成 | **只有 Web 一处**：`web/src/lib/alterSql.ts`（quoteIdent/addColumn/dropColumn/renameColumn/addIndex/dropIndex/addFK/dropFK + `UnsupportedAlterError`）。GUI、TUI **零 DDL 生成**（`ALTER TABLE` 只出现在两端自用 storage 里） | ★ 缺 ALTER COLUMN（类型/可空/默认）、缺 CREATE/DROP TABLE → **E3 已补**：服务端生成器（Rust `schema-diff/src/ddl.rs` + Go `pkg/schemadiff/ddl.go`）**只覆盖 SQLite**，其余方言显式 `NOT_SUPPORTED`（附录 A.12） |
 | 原子应用 | 事务四方法两端齐备（`app-core/src/lib.rs:502-579`、`pkg/appcore/appcore.go:338-435`），finalize 只成功一次；`POST /query/batch` 是**逐条循环、不在事务内**（`crates/server/src/lib.rs:663-681`、`go/pkg/server/server.go:441-473`） | "原子应用一批 DDL"只能客户端 begin → N×execute → commit（已有成熟范式：`ui-gui/src/app.rs:2133-2179`、`TableStructureEditor.tsx:115-135`） |
-| DDL 事务能力位 | **全仓库没有任何一处**处理"某方言 DDL 不能在事务里"（MySQL/Oracle 的 DDL 隐式提交） | ★ 需新增能力位 + 显式报错，禁止静默降级（矩阵见 `spec/behavior.md:334-345`） |
+| DDL 事务能力位 | **全仓库没有任何一处**处理"某方言 DDL 不能在事务里"（MySQL/Oracle 的 DDL 隐式提交） | ★ 需新增能力位 + 显式报错，禁止静默降级（矩阵见 `spec/behavior.md:334-345`）→ **E3 只对 SQLite 立了两位**（`ddl_in_tx=true` 实测、`pragmas_outside_tx` 由脚本自带），其余方言的取值仍空白 |
 | 快照结构可复用件 | `web/src/lib/erDiagram.ts:74 buildERModel()` 已是"表→列→FK"的纯结构；GUI `app.rs:2505-2529` 有整 schema FK 扫描（**上限 200 表**）、TUI `commands.go:211 allTablesCmd` 跨 schema 枚举 | 表数上限与逐表 fan-out 往返要处理 |
 | Rust 侧远程传输 | **不存在 HttpTransport**（只有 `LocalTransport`，`transport/src/lib.rs:103`）。Go 侧 Local + Remote 都有 | ★ 决定 GUI 形态（见 §4 决策 D3） |
 
@@ -44,11 +44,13 @@ MySQL 的 `app_dev` vs `app_prod`），列出表/列/索引/外键四类对象�
 | E1 diff 纯函数 + 归一层 | ✅ 实际 3641 行：Rust 1675（lib 1010 + normalize 434 + 向量测试 102 + 生成工具 129）、Go 1344、共享向量 16 份 622 行 | 零 IO、零 UI、不生成 DDL；双实现对拍已建立（详见附录 A） |
 | E2.0 真快照复核 | ✅ 实际 687 行测试（Rust 368 + Go 319）+ 驱动净改 103 行（Rust +44/−24、Go +59/−16） | 零 spec 变更；抓出 3 个驱动缺陷（附录 A.9 F1–F3） |
 | E2 spec DTO + 两端端点 + 契约 | ✅ 实际 spec +187（metadata 71 / openapi 28 / behavior §14 88）、Rust +336/−5、Go +329、契约 +353 | 唯一需要 spec 变更的批次；`/api/schema/ddl` 与 `ddl_in_tx` 推迟到 E3（见 §5） |
-| E3 DDL 生成器补全 | Rust/Go 各 ~350 行 + 单测（**D1 定案后落在服务端**，前端只渲染脚本） | 含 ALTER COLUMN 三态、CREATE/DROP TABLE、顺序依赖与回滚脚本 |
 | E3.0 SQLite DDL 取证 | ✅ 实际 0 行产品代码（纯探测）+ 附录 A.11 G1–G9 | 测出"重建会级联删子表数据""PRAGMA 在事务内是 no-op"两条数据丢失级事实 |
+| E3.1/E3.2 DDL 生成器（纯函数，只 SQLite） | ✅ 实际 3293 行插入：Rust `ddl.rs` 1706 + Go `ddl.go` 863 + Go 单测 697 + lib 接线 | 直改/重建两路 + 依赖排序 + 回滚 + 勾选守卫，全部在语句层，不碰连接 |
+| E3.3 共享 DDL 语料 | ✅ 实际 2796 行插入：23 份语料 + 双端加载器（Rust 182 / Go 375） | 跑完整管线 diff→SelectEntries→Generate，逐字段对拍；覆盖度是断言 |
+| E3.4–E3.7 协议 + 两端端点 + 契约 | ✅ 实际 1206 行插入：spec 212（metadata 52 / openapi 28 / behavior §15 132）+ 生成 TS 37、Rust 266、Go 283、契约 408 | `/api/schema/ddl` 已进 spec；契约真跑覆盖「应用后收敛 + 回滚复原 + 子表行数不丢」 |
 | E4 Web 向导 | ~700 行（四步 + 预览 + 状态持久化） | 体量参照 M30 导入向导的 1/3 |
 | E5 GUI + TUI 收敛形态 + 文档 | GPUI ~400 行、TUI ~350 行 | 渲染无法无头验证（§7） |
-| 合计 | **约 4.3k 行**（含测试） | 体量参照：约等于当前整个 `rust/crates/ui-gui`（10,048 行）的 43% |
+| 合计 | 预估 **约 4.3k 行**（含测试）；**E1–E3 实际已 12.9k**（上表 ✅ 行之和） | 超估的原因是共享语料：向量本身即测试资产，一份语料双端跑。E4/E5 预估不变 |
 
 ## 4. 关键设计决策（★ = 需要产品确认的分叉）
 
@@ -107,16 +109,21 @@ E2 实际落地（2026-09-25）：
    - `ColumnInfo.generic_type` 的语义说明**推迟到 E3 / 有实例环境**——四方言目前从未填该字段
      （附录 A.9 F3 同型问题），先写语义会立刻让契约测试变红。
 
-### 5.6 尚未落地的契约项（留给 E3）
+### 5.6 E3 的契约项（✅ 已落地 2026-09-25，non-breaking）
 
 1. `spec/openapi.yaml` 新增 `POST /api/schema/ddl`（计划 + 勾选态 → 有序语句 + 回滚脚本），
-   **non-breaking**。
-2. `spec/behavior.md` 能力矩阵补 `ddl_in_tx` 一行。
-3. `ColumnInfo.generic_type` 补语义说明（字段本身已存在 ⇒ non-breaking，但**双实现必须同时填**，
-   否则契约测试会立刻抓到差异）。
+   **non-breaking**（新端点，无既有字段变更）。
+2. `spec/schemas/metadata.json` 补 `SchemaDdlRequest` / `DdlStatement` / `DdlScript` 三个 DTO。
+   线路纪律：`statements` / `rollback` / `entry_ids` **恒为数组**（空时为 `[]` 不得为 `null`），
+   `warnings` 空时整体省略，`table` 恒在（PRAGMA 两条为空串）——由语料 d01 与两端服务端测试锁死。
+3. `spec/behavior.md` **§15**（132 行）：输入形态、方言范围、直改/重建两路、PRAGMA 包裹与
+   `ddl_in_tx` / `pragmas_outside_tx` 两行能力位、勾选两条守卫、回滚镜像规则、不可逆判定、
+   8 条告警逐字文案。
+4. `ColumnInfo.generic_type` 语义说明**未动**——本轮只生成 SQLite，语句直接渲染驱动原
+   `data_type` 文本，与 §8-3 / §8-7 绑定，等有可实测的方言实例再定。
 
-基线：`tools/genprotocol` 的 `check` 已由 **54 spec types 涨到 61**，E2 收口时 `check` 与
-`ts --check` 均零漂移。
+基线：`tools/genprotocol` 的 `check` 已由 **54 → 61（E2）→ 64 spec types（E3）**，
+E3 收口时 `check` 与 TS 重生成均零漂移（`web/src/api/index.ts` +37 行）。
 
 ## 6. 分批交付（每批独立门禁 + 独立提交）
 
@@ -138,7 +145,7 @@ E2 实际落地（2026-09-25）：
 - **E3.0 SQLite DDL 取证** ✅（2026-09-25）：不写产品代码，先用两端 bundled 真引擎把
   `DROP COLUMN` 限制、表重建的触发器/级联删除行为、`PRAGMA foreign_keys` 的事务内 no-op、
   `ddl_in_tx` 真值全部测出来（附录 A.11 G1–G9）。
-- **E3 语句生成（只 SQLite）**：在服务端把计划变成有序脚本（ALTER COLUMN 的类型/可空/默认三态、
+- **E3 语句生成（只 SQLite）** ✅（2026-09-25）：在服务端把计划变成有序脚本（ALTER COLUMN 的类型/可空/默认三态、
   CREATE/DROP TABLE、依赖排序、回滚脚本）。**已定（2026-09-25）三条**：
   ① 只覆盖 SQLite，PG/MySQL/MSSQL/Oracle 显式 `NOT_SUPPORTED`（它们的 `on_update`/`on_delete`
   与 `generic_type` 都还没填，diff 本就比不出差异，先写 5 套语法等于再造"看起来已实现"）；
@@ -148,6 +155,8 @@ E2 实际落地（2026-09-25）：
   （`add_column` 要完整列定义、`create_table` 要全部列），把定义塞进线路 DTO 会让 diff 响应背上这堆字段。
   Web 现成的 `alterSql.ts` 继续服务结构编辑器，**不作为 diff 的出口**
   （避免同一个方言规则存在两套真相源）。
+  验收：23 份共享语料跑完整管线逐字段对拍 + 契约真跑「应用后计划收敛为空、回滚后计划精确复原、
+  重建期间子表行数 1 行不丢」，落地实况见附录 A.12。
 - **E4 Web 向导**：四步（选源 → 选目标 → 差异预览 → 脚本/应用），复用导入向导的
   `Step` 联合类型 + `polydb.<feature>.v1` localStorage 命名 + busy 门禁 + 失败详情展示惯例。
 - **E5 GUI/TUI + 文档**：GUI 浮层/独立面板（同种类两 schema，D3），TUI 三段视图；
@@ -156,8 +165,17 @@ E2 实际落地（2026-09-25）：
 ## 7. 本机不可验证清单（先把话说在前面）
 
 - 本机**无 Docker、无监听中的** 5432/3306/6379/1433/1521 ⇒ PG/MySQL/MSSQL/Oracle/Redis 相关
-  分支只能 soft-skip（当前基线：契约 51 绿里含 10 处驱动跳过）。**跨库 diff 的正确性、
-  各方言 DDL 语法、`ddl_in_tx` 真值都无法在本机实测**。
+  分支只能 soft-skip（E3 收口时契约 **23 个顶层测试 / 66 个子测试全绿**，其中方言/Redis 分支只是
+  "未打崩"而非"真跑"；上一基线记的「51 绿」是同一含子测试口径，E3 新增 3 个顶层测试后为 66）。
+  **跨库 diff 的正确性、各方言 DDL 语法、`ddl_in_tx` 真值都无法在本机实测**。
+- E3 因此**只交付 SQLite**：4 种方言 + Redis 的 `NOT_SUPPORTED` 拒绝路径由语料 d16–d19/d20/d21
+  （纯函数层，恒可跑）与两端错误码映射（`NOT_SUPPORTED → 501`）双重锁定，
+  但**契约层的 501 响应本机从未真正打出过**（`/api/schema/ddl` 的方言分支同样 soft-skip）。
+- 契约里的"应用脚本"是**逐条 `/query` 顺序执行**，没有走 `/api/transactions`——因为含重建的脚本
+  要求首尾两条 PRAGMA 留在事务外（G6）。**「把 `pragmas_outside_tx=false` 的脚本整份包进一个事务」
+  这条真实调用路径只有 E4 的 Web 向导会第一次跑到**，届时需补断言。
+- 视图（`CREATE VIEW`）对重建表的依赖行为**仍未测**（E3.0 遗留）：SQLite 视图按名字解析，
+  预期不破，但没证据就不写进规则。
 - 只有 SQLite 能端到端真跑（**两个文件 / 两个连接**；E2.0 实测确认驱动不支持 schema 寻址，
   "同库两 schema"需先拍板 §8-6）——所以 v1 的验收以 SQLite 为主，
   其余方言的正确性依赖单测 + 后续在有实例的环境补测。
@@ -440,6 +458,9 @@ E3 的语句生成器只覆盖 SQLite（§8 已定），所以先把 SQLite 的 
 | G7 | SQLite 的 **DDL 可以在事务里** | `BEGIN; CREATE TABLE yy(…); INSERT …; COMMIT; SELECT` 正常返回 | 本方言 `ddl_in_tx = true` 是**实测值**，不是文档推测 |
 | G8 | 两端连接默认 **FK=ON** 且**单连接实例** | `go/pkg/dbsqlite/dbsqlite.go:29,35`（`SetMaxOpenConns(1)` + `PRAGMA foreign_keys=ON`）、`rust/crates/db-sqlite/src/driver.rs:79`（`execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON")`） | 脚本首尾的 PRAGMA 在同一次应用里确实作用在同一连接上（否则 G5 无法成立） |
 | G9 | 探测方法学的坑 | **polydb-cli 每次调用都是新连接**：第一条调用里的 `PRAGMA foreign_keys=OFF` 对第二条调用毫无影响 ⇒ 我第一轮 A/B 得到了假阳性 | 凡是 per-connection 的断言，必须在**单次多语句调用**内跑完 |
+| G10 | **单连接假设成立**：脚本逐条走 `/query` 时，首尾两条 PRAGMA 确实落在同一连接上 | E3.7 契约真跑（go + rust 两后端同结论）：重建期间子表 `child` 恒 1 行——若 PRAGMA 失效，G5 的级联删必然把子表掏空 | 生成器可以假定"PRAGMA 语句 + 重建语句 = 同连接"，无需在脚本里自带连接句柄 |
+| G11 | **回滚方向强制重建实测有效**（A.11 规则 7/8 的端到端证据） | 契约：应用 `rollback` 后 diff 精确复原为 `t/note/add_column`(60) + `t/qty/alter_column`(70)，子表仍 1 行 | 「正向重建过 ⇒ 回滚也必须重建」不是保守猜测，是还原整表定义的必要条件 |
+| G12 | rusqlite 侧的 `DROP COLUMN` / 重建 / FK 行为与 Go 侧同结论（E3.0 遗留的引擎差异疑虑关闭） | 契约两端跑同一条重建用例，逐字段断言同一份期望 | 双实现共用同一套生成规则即可，无需 per-driver 分支 |
 
 **由取证导出的 E3 规则**（E3.1/E3.2 实现、E3.3 语料、§15 文案都以此为准）：
 
@@ -454,6 +475,74 @@ E3 的语句生成器只覆盖 SQLite（§8 已定），所以先把 SQLite 的 
 5. 不可逆判定：`drop_table`、`drop_column` 恒不可逆；`alter_column` 当 `flags` 含 `type` 或
    `nullability` 时不可逆，仅 `default` 可逆；其余可逆。
 6. 每条重建附固定警告（触发器丢失 / 生成列退化为普通列 / CHECK 不保留），逐字文案进 behavior.md §15。
+7. **回滚方向强制重建**：正向里凡是走过重建的表，回滚方向**不得**退化成直改语句——正向一旦重建，
+   原定义已不在库里，`ADD COLUMN` + `CREATE INDEX` 的散句补不回被丢弃的对象与约束顺序。
+8. **勾选守卫两条**：① `selected` 里的 id 必须存在于本次重算的计划（过期即 400，防止拿旧计划解释新快照）；
+   ② 凡进入重建路径的表，同表条目必须**整组**勾选——重建输出的是整张目标定义，
+   漏勾的同表变更会被静默应用（数据语义层面等于凭空改掉）。
 
-**E3.0 未验证**：G2/G5 只在 Go 侧引擎上复现过，rusqlite 侧由 E3.7 的契约真跑兜底；
-视图对重建表的依赖行为未测（SQLite 视图按名字解析，预期不破，但没证据就不写进规则）。
+**E3.0 当时未验证、现由 E3.7 契约关闭**：G2/G5 原本只在 Go 侧引擎上复现过，rusqlite 侧
+已在契约里同结论跑通（G10–G12）。**视图对重建表的依赖行为仍未测**（§7 最后一条）。
+
+### A.12 E3 落地实况（2026-09-25，协议 + 双端端点 + 契约真跑）
+
+**落点**（生成器与线路层分两次提交：E3.1–E3.3 已在 `d660594` / `7570059`，本批是 E3.4–E3.7）：
+
+| 层 | Rust | Go |
+|---|---|---|
+| 线路 DTO | `crates/protocol/src/schema_ddl.rs`（56 行，手写 + 漂移门禁）+ `core` re-export | `pkg/protocol/schema_ddl.go`（46 行） |
+| use case | `crates/app-core/src/lib.rs`（`schema_ddl` + `to_wire_statement` / `to_wire_script`，`diff_options` 从 `schema_diff` 里提出来共用，+49/−14） | `pkg/appcore/schema_ddl.go`（70 行）+ `diffOptions` 共用（+11/−6） |
+| 端点 | `crates/server/src/lib.rs` `POST /api/schema/ddl`（+17/−1） | `pkg/server/server.go` 同路径（+17） |
+| 单测 | `crates/server/src/tests.rs` +141（4 份） | `pkg/server/server_test.go` +139（3 份镜像） |
+| 契约 | —— | `test/contract/e3_schema_ddl_test.go`（338 行，3 个顶层测试）+ `e2_schema_diff_test.go` 方言表 hoist 成 `netDialects`/`params()`/`dialectConn()` 供 E3 复用（+70/−51） |
+
+**线路纪律（本批新立的，两端各自断言）**：
+
+1. `statements` / `rollback` / `entry_ids` **空时必须是 `[]`**。Go 侧 `toWireScript` 从
+   `[]protocol.DdlStatement{}` 起步——nil 切片会被 msgpack 编成 `null`，web 端 `.map` 直接打崩；
+   Rust 侧 `Vec` 天然为 `[]`。三处镜像断言：Rust/Go 服务端各 1 份「空勾选」用例 + 语料 d01。
+2. `warnings` 空 ⇒ 整体省略（`skip_serializing_if` ⇄ `omitempty`），但 PRAGMA 两条**永不**为空。
+3. `table` 恒在：PRAGMA 两条为空串（不是 `null`、不是省略）。
+4. 状态码映射两端同表：`NOT_SUPPORTED → 501`、`INVALID_PARAM → 400`、`CONNECTION_NOT_FOUND → 404`。
+   **E2 的 Redis 契约用例原先写的是 500**（一直只被 soft-skip 掩盖），本批读两端
+   `error_response` / `errToStatus` 后改判为 501。
+5. 请求体协商差异沿用 E2：Rust `decode_body` 收 msgpack 与 JSON，Go 只收 msgpack——
+   契约客户端恒发 msgpack，故对拍不敏感（既有事实，非本批引入）。
+
+**契约真跑覆盖了什么**（`go` / `rust` 两后端各一遍，同一条字面期望）：
+
+- 直改脚本：空勾选 ⇒ 两个 `[]`；两条勾选 ⇒ 语句按相位排序（`create_table` 50 在 `add_column` 60 之前），
+  回滚两条**全部** `non_reversible = true`（正向建列 ⇒ 回滚删列）。
+- 重建脚本：`t` 改类型 + 加列、子表 `child` 挂 1 行。断言 400 文案（过期 id、半组勾选各一条，
+  缺失 id 逐字列出）、`pragmas_outside_tx = true`、首条 `PRAGMA foreign_keys=OFF;` 且 `entry_ids` 为空、
+  末条 `PRAGMA foreign_keys=ON;`、两条勾选 id 都被重建组 `entry_ids` 承载。
+- **数据不丢**：应用脚本后 `SELECT COUNT(*)` 主表/子表均 1 行；应用回滚脚本后 diff 精确复原为原两条，
+  子表仍 1 行。这是 G5/G6 那条「数据丢失级」结论第一次在两端 HTTP 路径上被真跑验证。
+- 4 方言：`501` + `{kind} 方言的 DDL 生成在 v1 未实现（当前只生成 sqlite）`，本机无实例 ⇒ soft-skip。
+
+**门禁数字（2026-09-25 本机实测）**：`tools/genprotocol check` **64 spec types vs rust + go 零漂移**
+（E2 的 61 → +3 个 DDL DTO），TS 重生成 +37 行、`web` `tsc --noEmit` clean；
+Rust `cargo test --workspace` **150 passed / 0 failed**（38 suites；`polydb-schema-diff` 40、`polydb-server` 20 含本批 4）、
+`cargo clippy --workspace --all-targets -- -D warnings` 退出 0、`cargo fmt --all --check` clean。
+Go `go build ./...` / `go vet ./...` / `go test -count=1 ./...` 全绿（`pkg/schemadiff` 35 PASS、`pkg/server` 22 PASS 含本批 3）、
+剥 CR 后 7 个改动 `.go` **0 未格式化**；`golangci-lint` 本机仍未安装（恒跳过，如实披露）。
+契约 `go test -count=1 ./...` **全绿（434.9s，23 个顶层测试 / 66 个子测试）**，其中 E3 新增 3 个顶层测试。
+
+**本批踩到的坑（写下来防止下次重踩）**：
+
+1. `vmihailenco/msgpack/v5` 把小整数解成 `int8`（positive fixint）。Go 侧
+   `got["phase"] != 60` 这种 `any` 比较会**静默为 false**（`any(int8(60)) != any(int(60))`）
+   ⇒ 断言必须 decode 进 typed struct（`protocol.DdlScript`）再 `reflect.DeepEqual`；
+   通用 `map[string]any` 只用来验「`warnings` 是否省略」「`[]` 是否真是数组」这类**形状**。
+2. `INSERT` 的 `statement_type` 是 `"insert"`，不是 `"dml"`（契约里猜错一次，两端一致地打脸）。
+3. DDL 生成用例**不能**拿同一个连接自比：自比 ⇒ 空计划 ⇒ 任何 `selected` id 都判为过期 ⇒ 400。
+   必须两个文件 / 两个连接。
+4. 写模式的格式化器一律被门禁拦：`gofmt -w`（`core.autocrlf=true` 会全量改写行尾）与
+   `cargo fmt --all`（写模式）同理 ⇒ 只用 `cargo fmt --all --check` / `tr -d '\r' | gofmt -l`，
+   格式差异**手工**改。
+
+**E3 仍未验证（继续诚实披露）**：① 4 种方言 + Redis 的 501 响应**本机没有真正打出过**
+（契约层 soft-skip，只有纯函数语料 d16–d21 恒跑）；② 「`pragmas_outside_tx=false` 的脚本整份包进
+`/api/transactions` 执行」这条真实调用路径无人跑过（契约是逐条 `/query`），E4 第一次跑到；
+③ 视图对重建表的依赖未测；④ Go 侧 `golangci-lint` 本机缺失；⑤ Web/GUI/TUI 三端渲染完全不涉及
+（本批只有服务端 + 生成的 TS 类型）。

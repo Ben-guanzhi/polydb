@@ -432,3 +432,135 @@
 `reason` 文案、条目排序、归一结果由 `test/schema-diff-vectors/*.json` 一份语料同时喂两端锁定。
 **改规则必须同步改语料**：语料的 `expected` 由 Rust 实现生成后**逐条人工复核**再提交，
 Go 侧只读不断言写回；两份错误向量的 `error_code`/`error_message` 保持手写。
+
+## 15. DDL 语句生成（Compare & Sync，E3）
+
+`POST /api/schema/ddl` 把 §14 计划里**被勾选的条目**翻译成一份可执行语句脚本，
+并附同一份回滚脚本。本层**只生成语句，不执行**；执行由调用方显式走既有
+`/api/transactions/*` + `/api/query` 通道发起。双实现逐字一致，
+由共享语料 `test/schema-ddl-vectors/*.json` 锁定（见 §15.10）。
+
+### 15.1 输入形态：回传连接 + 勾选 id，服务端重算
+
+请求体只带 `source` / `target`（两个已连接的连接 + schema）、`options`、`selected`（条目 id 数组）。
+服务端**重新采集快照、重新比对**，再用 `selected` 过滤——绝不接收客户端传来的计划：
+两侧结构可能在勾选后又变了，拿旧 id 解释新计划会生成语义上错误的语句。
+`options` 必须与比对时同一份，回滚方向用它镜像重算，才能保证正/反向严格对称。
+
+`selected` 为**空数组**时产出空脚本：`statements` 与 `rollback` 都是 `[]`，**不得为 `null`**
+（线路层的 nil/空由 DTO 的序列化选项保证，语料 d01 锁定）。
+
+### 15.2 方言范围：v1 只 SQLite
+
+只生成 **SQLite** 方言。其余种类一律 `POLYDB_ERR_NOT_SUPPORTED`，不做「近似翻译」：
+
+| 场景 | 错误码 | 消息（双端逐字一致） |
+|---|---|---|
+| 非 SQLite 种类 | `POLYDB_ERR_NOT_SUPPORTED` | `{kind} 方言的 DDL 生成在 v1 未实现（当前只生成 sqlite）` |
+| 任一侧 Redis | `POLYDB_ERR_NOT_SUPPORTED` | `Redis 无模式概念，不参与结构比对` |
+| 两侧种类不同 | `POLYDB_ERR_NOT_SUPPORTED` | `跨种类比对未支持：{a} vs {b}（v1 只比同一种数据库）` |
+
+### 15.3 直改语句与整表重建
+
+SQLite 的 `ALTER TABLE` 能力极窄（取证 G1–G4），故按动作分两路：
+
+**直改**（一条语句搞定）：`create_table`、`drop_table`、`add_column`、`drop_column`、
+`add_index`、`drop_index`。其中 `drop_column` 仅在该列**未被索引引用、也不是主键列**时可直改
+（否则 SQLite 报 `error in index … after drop column`，取证 G2）。
+
+**整表重建**（凡改表定义本体的一律走重建）：
+`alter_column`（SQLite 无 `ALTER COLUMN`）、`add_foreign_key` / `drop_foreign_key`
+（无 `ADD/DROP CONSTRAINT`）、以及**主键索引与 `sqlite_` 前缀的 autoindex** 的 `add_index` /
+`drop_index`（这类索引由表级 `PRIMARY KEY` / `UNIQUE` 隐式生成，不能单独建删）。重建固定四步
+（外加目标侧用户索引）：
+
+1. `CREATE TABLE "polydb_tmp_{表名}"(…)`——按**目标快照**的完整定义生成，含表级 `PRIMARY KEY` /
+   `UNIQUE` / `FOREIGN KEY`；
+2. `INSERT INTO "polydb_tmp_{表名}"(同名列) SELECT 同名列 FROM "原表"`——只搬两侧**都存在**的列，
+   因此新增列取默认值/NULL、被删列自然丢弃；
+3. `DROP TABLE "原表"`；
+4. `ALTER TABLE "polydb_tmp_{表名}" RENAME TO "原表"`；
+5. 目标侧的每个**用户索引**补一条 `CREATE [UNIQUE] INDEX …`（autoindex 已并进第 1 步）。
+
+临时表名与任一侧快照里的表重名时追加序号（`polydb_tmp_t_2`），避让规则确定，双端一致。
+
+**重建组的输出位置**：整组语句出现在该表**第一个**条目的相位上（不是 `alter_column` 的 70），
+`entry_ids` 吸收该表在本次勾选里的**全部**条目 id，只有组内**首条**语句挂重建告警。
+未命名索引/外键在快照里被 E1 合成为内容签名（`idx(a,b)` / `fk(user_id)`），落到语句上时
+索引取**可执行名**（`polydb_idx_{表}_{列}`），不能把签名当名字用。
+
+### 15.4 PRAGMA 包裹与事务
+
+任一脚本含重建 ⇒ 整份脚本首尾各包一条 `PRAGMA foreign_keys=OFF;` / `PRAGMA foreign_keys=ON;`
+（相位 0 与 255，`entry_ids` 为空），并把 `pragmas_outside_tx` 置 `true`：
+`PRAGMA foreign_keys` 在事务内是 **no-op**（取证 G6），这两条必须在事务外执行。
+`ddl_in_tx` 对 SQLite 恒为 `true`（取证 G7：DDL 可进事务，失败可整体回滚）。
+不含重建的脚本 `pragmas_outside_tx = false`，整份可直接放进一个事务里。
+
+### 15.5 勾选规则（两条，违反即 `POLYDB_ERR_INVALID_PARAM`）
+
+1. **过期守卫**：`selected` 里每个 id 必须真实出现在本次重算出的计划里，否则
+   `勾选的条目不在当前比对计划里：{id、id…}（请重新比对后再执行）`（去重、按给定顺序连接）。
+2. **重建整组**：进入重建路径的表，其**全部**条目必须一起勾选——重建输出的是整张目标定义，
+   漏勾的同表变更会被**静默应用**。报错文案
+   `表 {T} 需要整表重建，同表变更必须整组勾选：缺少 {id、id…}`（缺失 id 按计划出现顺序）。
+
+### 15.6 回滚脚本 = 互换后按同一套规则再生成
+
+`rollback` 由 `Diff(target, source, opts)` 里与正向条目**镜像同名**（id 只替换末段 op）的条目
+生成，规则与 §15.3 完全相同，因此不可逆标记也打在回滚语句上（正向 `create_table` 的回滚是
+`drop_table`，它自身就是不可逆动作）。
+
+**回滚承接正向的重建**：正向重建过的表，回滚方向**强制**也走重建。原因是正向一旦重建，
+原表定义已不在库里，直改语句（如 `ADD COLUMN` + `CREATE INDEX` 分开）补不回被重建丢弃的
+对象与约束顺序——只重建才能把整张表还原回源侧定义。
+
+回滚脚本是**建议脚本**：其中标了 `non_reversible` 的语句一旦执行就无法再回退，
+故调用方必须自存正向执行记录，不得把 `rollback` 当成可反复使用的 undo。
+
+### 15.7 不可逆判定
+
+一条语句承载的条目里只要有**任一条**不可逆，整条语句标 `non_reversible = true`：
+
+| 动作 | 不可逆 | 理由 |
+|---|---|---|
+| `drop_table` | 是 | 表数据没了 |
+| `drop_column` | 是 | 列数据没了 |
+| `alter_column` 带 `type` / `nullability` 维度 | 是 | 值被转换或收窄，原值不保证还在 |
+| `alter_column` 只带 `default` | 否 | 定义变了，数据没动 |
+| 其余（建表/加列/索引/外键的增删） | 否 | 结构可反向增删 |
+
+### 15.8 告警文案（快照照不到的一律挂警告，不静默）
+
+| 常量 | 文案 | 挂在哪 |
+|---|---|---|
+| `W_TRIGGERS` | 重建表会丢失该表上的触发器（快照不含触发器） | 重建组首条 |
+| `W_GENERATED_COLUMNS` | 生成列会退化为普通列（快照不标注生成列） | 重建组首条 |
+| `W_CHECK_CONSTRAINTS` | CHECK 约束会丢失（快照不含 CHECK 约束） | 重建组首条 |
+| `W_AUTOINCREMENT` | 主键整数列的 AUTOINCREMENT 关键字无法从快照还原 | 重建/建表且整数主键 |
+| `W_CREATE_TABLE` | 新建表只按快照里的列定义生成，不含 CHECK 约束、生成列与触发器 | `create_table` |
+| `W_DROP_COLUMN_CHECK` | 该列若被 CHECK 约束引用，删除后约束会一并消失（快照不可见） | `drop_column` |
+| `W_ADD_COLUMN_LIMITS` | SQLite 的 ADD COLUMN 只接受常量默认值，非空表上加 NOT NULL 且无默认值的列也会报错 | 非常量默认值或 NOT NULL 无默认的新列 |
+| `W_REBUILD_NEW_NOT_NULL` | 重建只复制两侧同名列，新增的 NOT NULL 列若无默认值会让数据搬运 INSERT 报错 | 重建组首条 |
+
+告警只作提示，**不做执行前拦截**：真正的失败由数据库在执行期报错兜底。
+
+### 15.9 其余错误
+
+计划引用了快照里不存在的表/列/索引（快照被手工裁剪或采集不全）时，
+返回 `POLYDB_ERR_INVALID_PARAM`，消息 `快照中缺少表/列/索引 …，无法生成 DDL`；
+重建路径专属动作（`alter_column` 等）单独成语句属实现缺陷，报
+`{op} 动作必须走重建路径，不该单独成语句`。
+
+### 15.10 一致性锁定
+
+`test/schema-ddl-vectors/*.json` 一份语料同时喂两端，跑完整管线 **diff → SelectEntries → Generate**，
+逐字段比对（含中文 `warnings`、`non_reversible`、两个 pragmas 位）。
+23 份语料 = 15 份脚本（覆盖 §15.3 全部直改与重建路径、autoindex、无名索引/外键、临时表避让、
+重建组吸收同表条目）+ 8 份错误（4 种方言、Redis、跨种类、过期 id、未整组勾选）。
+覆盖度是**断言**：9 个动作、8 种告警、可逆/不可逆两值、`pragmas_outside_tx` 两值必须全被打到。
+
+`expected` 由 Go 侧生成器回写（`POLYDB_DDL_VECTORS_WRITE=1 go test ./pkg/schemadiff -run WriteDDLVectorExpected`，
+只替换文件里 `"expected"` 这一个 JSON 值，其余逐字节不动），SQL **必须人工复核**后才提交；
+Rust 侧加载器只做只读验证，构成第二实现。语料里 `selected: null` 表示「全部条目」，
+`[]` 表示「一条都不勾」，两者语义不同，写死在加载器里。

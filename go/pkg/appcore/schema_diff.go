@@ -79,6 +79,16 @@ func (a *AppCore) collectSnapshot(ctx context.Context, t protocol.SchemaDiffTarg
 	return snap, nil
 }
 
+// diffOptions 把线路选项映射为纯函数层选项：整体省略与逐字段省略都按 false 处理。
+func diffOptions(o *protocol.SchemaDiffOptions) *schemadiff.Options {
+	opts := &schemadiff.Options{}
+	if o != nil {
+		opts.IgnoreDefaults = o.IgnoreDefaults
+		opts.SelectDestructive = o.SelectDestructive
+	}
+	return opts
+}
+
 // SchemaDiff 比对两个连接的结构差异，产出有序计划（不含 SQL，语句生成属 E3）。
 func (a *AppCore) SchemaDiff(ctx context.Context, req *protocol.SchemaDiffRequest) (*protocol.SchemaDiffPlan, error) {
 	source, err := a.collectSnapshot(ctx, req.Source)
@@ -89,12 +99,7 @@ func (a *AppCore) SchemaDiff(ctx context.Context, req *protocol.SchemaDiffReques
 	if err != nil {
 		return nil, err
 	}
-	opts := schemadiff.Options{}
-	if req.Options != nil {
-		opts.IgnoreDefaults = req.Options.IgnoreDefaults
-		opts.SelectDestructive = req.Options.SelectDestructive
-	}
-	entries, err := schemadiff.Diff(source, target, &opts)
+	entries, err := schemadiff.Diff(source, target, diffOptions(req.Options))
 	if err != nil {
 		return nil, err
 	}

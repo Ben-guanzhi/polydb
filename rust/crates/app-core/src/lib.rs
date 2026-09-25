@@ -6,11 +6,11 @@ use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock};
 use polydb_core::{
     BeginTransactionRequest, ColumnInfo, ConnectionId, ConnectionInfo, ConnectionStatus, CoreError,
-    CoreResult, CreateConnectionRequest, DatabaseKind, DiffColumnFlag, ForeignKeyInfo, IndexInfo,
-    IsolationLevel, QueryResult, RedisKeyType, RedisReply, RedisScanPage, RedisValue,
-    SchemaDiffEntry, SchemaDiffOp, SchemaDiffPlan, SchemaDiffRequest, SchemaDiffTarget, SchemaInfo,
-    TableInfo, TableRowsRequest, TableRowsResult, TableType, TransactionInfo, TransactionStatus,
-    UpdateConnectionRequest, Value,
+    CoreResult, CreateConnectionRequest, DatabaseKind, DdlScript, DdlStatement, DiffColumnFlag,
+    ForeignKeyInfo, IndexInfo, IsolationLevel, QueryResult, RedisKeyType, RedisReply,
+    RedisScanPage, RedisValue, SchemaDdlRequest, SchemaDiffEntry, SchemaDiffOp, SchemaDiffOptions,
+    SchemaDiffPlan, SchemaDiffRequest, SchemaDiffTarget, SchemaInfo, TableInfo, TableRowsRequest,
+    TableRowsResult, TableType, TransactionInfo, TransactionStatus, UpdateConnectionRequest, Value,
 };
 use polydb_db_core::{Connection, DatabaseDriver, SqlDriver, TxMode};
 use polydb_protocol::common::SshTunnelConfig;
@@ -26,6 +26,15 @@ fn default_schema(kind: DatabaseKind) -> &'static str {
         DatabaseKind::Sqlite => "main",
         DatabaseKind::Postgres => "public",
         _ => "",
+    }
+}
+
+/// 线路选项 → 纯函数层选项：整体省略与逐字段省略都按 false 处理。
+fn diff_options(opts: Option<SchemaDiffOptions>) -> schema_diff::Options {
+    let o = opts.unwrap_or_default();
+    schema_diff::Options {
+        ignore_defaults: o.ignore_defaults.unwrap_or(false),
+        select_destructive: o.select_destructive.unwrap_or(false),
     }
 }
 
@@ -62,6 +71,26 @@ fn to_wire_entry(e: schema_diff::Entry) -> SchemaDiffEntry {
         destructive: e.destructive,
         selected: e.selected,
         reason: e.reason,
+    }
+}
+
+fn to_wire_statement(s: schema_diff::Statement) -> DdlStatement {
+    DdlStatement {
+        entry_ids: s.entry_ids,
+        sql: s.sql,
+        phase: s.phase,
+        table: s.table,
+        warnings: s.warnings,
+        non_reversible: s.non_reversible,
+    }
+}
+
+fn to_wire_script(sc: schema_diff::Script) -> DdlScript {
+    DdlScript {
+        statements: sc.statements.into_iter().map(to_wire_statement).collect(),
+        rollback: sc.rollback.into_iter().map(to_wire_statement).collect(),
+        pragmas_outside_tx: sc.pragmas_outside_tx,
+        ddl_in_tx: sc.ddl_in_tx,
     }
 }
 
@@ -496,18 +525,24 @@ impl AppCore {
     pub async fn schema_diff(&self, req: &SchemaDiffRequest) -> CoreResult<SchemaDiffPlan> {
         let source = self.collect_snapshot(&req.source).await?;
         let target = self.collect_snapshot(&req.target).await?;
-        let opts = req.options.unwrap_or_default();
-        let entries = schema_diff::diff(
-            &source,
-            &target,
-            &schema_diff::Options {
-                ignore_defaults: opts.ignore_defaults.unwrap_or(false),
-                select_destructive: opts.select_destructive.unwrap_or(false),
-            },
-        )?;
+        let entries = schema_diff::diff(&source, &target, &diff_options(req.options))?;
         Ok(SchemaDiffPlan {
             entries: entries.into_iter().map(to_wire_entry).collect(),
         })
+    }
+
+    // ─── 结构同步语句生成（Compare & Sync E3，behavior.md §15）───
+
+    /// 由「连接 + 勾选条目 id」产出可执行语句脚本。服务端**重算**比对（§15.1）：
+    /// 计划可能已过期，重算顺带做了勾选有效性校验（陈旧 id / 重建组未整组勾选都会报错）。
+    pub async fn schema_ddl(&self, req: &SchemaDdlRequest) -> CoreResult<DdlScript> {
+        let source = self.collect_snapshot(&req.source).await?;
+        let target = self.collect_snapshot(&req.target).await?;
+        let opts = diff_options(req.options);
+        let plan = schema_diff::diff(&source, &target, &opts)?;
+        let picked = schema_diff::select_entries(&source, &target, &plan, &req.selected)?;
+        let script = schema_diff::generate(&source, &target, &picked, &opts)?;
+        Ok(to_wire_script(script))
     }
 
     // ─── 表数据浏览（M11，behavior.md §13）──────────────────

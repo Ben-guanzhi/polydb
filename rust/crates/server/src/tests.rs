@@ -557,6 +557,147 @@ async fn diff_schema_accepts_msgpack_body() {
 }
 
 #[tokio::test]
+async fn ddl_empty_selection_produces_empty_arrays() {
+    let router = new_test_router();
+    let id = create_sqlite_conn(&router, "ddl_empty").await;
+    let (status, value, _) = do_req(
+        router,
+        Method::POST,
+        "/api/schema/ddl",
+        Some(json!({
+            "source": {"connection_id": id},
+            "target": {"connection_id": id},
+            "selected": []
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    // 空勾选必须序列化成 `[]` 而非 null（behavior.md §15.1）。
+    assert_eq!(value["statements"], json!([]));
+    assert_eq!(value["rollback"], json!([]));
+    assert_eq!(value["pragmas_outside_tx"], json!(false));
+    assert_eq!(value["ddl_in_tx"], json!(true));
+}
+
+#[tokio::test]
+async fn ddl_generates_direct_statements_for_selected_entries() {
+    let router = new_test_router();
+    let source = create_sqlite_conn(&router, "ddl_src").await;
+    let target = create_sqlite_conn(&router, "ddl_dst").await;
+    query(
+        &router,
+        &source,
+        json!({"sql": "CREATE TABLE t(id INTEGER)"}),
+    )
+    .await;
+    query(
+        &router,
+        &target,
+        json!({"sql": "CREATE TABLE t(id INTEGER, note TEXT)"}),
+    )
+    .await;
+    let (status, value, _) = do_req(
+        router,
+        Method::POST,
+        "/api/schema/ddl",
+        Some(json!({
+            "source": {"connection_id": source},
+            "target": {"connection_id": target},
+            "selected": ["t/note/add_column"]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(
+        value["statements"],
+        json!([
+            {
+                "entry_ids": ["t/note/add_column"],
+                "sql": "ALTER TABLE \"t\" ADD COLUMN \"note\" text;",
+                "phase": 60,
+                "table": "t",
+                "non_reversible": false
+            }
+        ])
+    );
+    // 回滚方向按镜像 id 重算：add_column ↔ drop_column，且删列自身不可逆。
+    assert_eq!(
+        value["rollback"],
+        json!([
+            {
+                "entry_ids": ["t/note/drop_column"],
+                "sql": "ALTER TABLE \"t\" DROP COLUMN \"note\";",
+                "phase": 30,
+                "table": "t",
+                "warnings": ["该列若被 CHECK 约束引用，删除后约束会一并消失（快照不可见）"],
+                "non_reversible": true
+            }
+        ])
+    );
+}
+
+#[tokio::test]
+async fn ddl_stale_selected_id_reports_invalid_param() {
+    let router = new_test_router();
+    let id = create_sqlite_conn(&router, "ddl_stale").await;
+    let (status, value, _) = do_req(
+        router,
+        Method::POST,
+        "/api/schema/ddl",
+        Some(json!({
+            "source": {"connection_id": id},
+            "target": {"connection_id": id},
+            "selected": ["t/ghost/drop_index"]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{value}");
+    assert_eq!(value["code"], "POLYDB_ERR_INVALID_PARAM");
+    assert_eq!(
+        value["message"],
+        "勾选的条目不在当前比对计划里：t/ghost/drop_index（请重新比对后再执行）"
+    );
+}
+
+#[tokio::test]
+async fn ddl_accepts_msgpack_body() {
+    let router = new_test_router();
+    let source = create_sqlite_conn(&router, "ddl_mp_src").await;
+    let target = create_sqlite_conn(&router, "ddl_mp_dst").await;
+    query(
+        &router,
+        &source,
+        json!({"sql": "CREATE TABLE t(id INTEGER)"}),
+    )
+    .await;
+    let body = rmp_serde::to_vec(&json!({
+        "source": {"connection_id": source},
+        "target": {"connection_id": target},
+        "selected": ["t//drop_table"]
+    }))
+    .unwrap();
+    let resp = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/schema/ddl")
+                .header("content-type", "application/msgpack")
+                .body(axum::body::Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let raw = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let mut de = rmp_serde::Deserializer::new(raw.as_ref()).with_human_readable();
+    let value = Value::deserialize(&mut de).unwrap();
+    assert_eq!(value["statements"][0]["sql"], json!("DROP TABLE \"t\";"));
+    assert_eq!(value["statements"][0]["non_reversible"], json!(true));
+}
+
+#[tokio::test]
 async fn garbage_msgpack_body_returns_unknown() {
     let router = new_test_router();
     let id = create_sqlite_conn(&router, "gb").await;

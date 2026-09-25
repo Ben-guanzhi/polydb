@@ -226,7 +226,8 @@ func TestContractSchemaDiffRejectsRedis(t *testing.T) {
 			if id == "" {
 				return // 无 Redis 实例：soft-skip
 			}
-			r.diffStep("redis 参与比对", diffReq(id, id, nil), 500, map[string]any{
+			// NOT_SUPPORTED 两端都映射 501（Rust error_response / Go errToStatus 同表）。
+			r.diffStep("redis 参与比对", diffReq(id, id, nil), 501, map[string]any{
 				"code":    "POLYDB_ERR_NOT_SUPPORTED",
 				"message": "Redis 无模式概念，不参与结构比对",
 			})
@@ -271,52 +272,51 @@ func createRedisConnForDiff(r *recorder) string {
 //
 // 四方言的 on_update/on_delete 与 generic_type 字段未复核（plan §8-7：随 E3 / 有实例
 // 环境补齐），这里只锁住"采集不炸、自比恒空"这一条下限。
-func TestContractSchemaDiffDialectSelfEmpty(t *testing.T) {
-	dialects := []struct {
-		kind       string
-		env        string
-		defaultDSN string
-		host       string
-		port       int64
-		database   string
-		username   string
-	}{
-		{"postgres", "POLYDB_TEST_PG", "postgres://postgres@localhost:5432/postgres?sslmode=disable", "localhost", 5432, "postgres", "postgres"},
-		{"mysql", "POLYDB_TEST_MYSQL", "mysql://root@localhost:3306/mysql", "localhost", 3306, "mysql", "root"},
-		{"mssql", "POLYDB_TEST_MSSQL", "mssql://sa@localhost:1433/master", "localhost", 1433, "master", "sa"},
-		{"oracle", "POLYDB_TEST_ORACLE", "oracle://system@localhost:1521/ORCL", "localhost", 1521, "ORCL", "system"},
-	}
-	for _, d := range dialects {
-		d := d
-		t.Run(d.kind, func(t *testing.T) {
-			dsn := os.Getenv(d.env)
-			if dsn == "" {
-				dsn = d.defaultDSN
-			}
-			host, port, database, username, password, ok := parseNetDSN(dsn, d.host, d.port, d.database, d.username, "")
-			if d.kind == "postgres" {
-				// parseNetDSN 只认 mysql/mssql/oracle scheme；PG 沿用既有专用解析器。
-				host, port, database, username, ok = parsePGDSN(dsn)
-			}
-			if !ok {
-				t.Skipf("invalid %s DSN: %s", d.env, dsn)
-			}
-			bs := backends(t)
-			for _, b := range bs {
-				b := b
-				t.Run(b.name, func(t *testing.T) {
-					r := &recorder{t: t, s: &st{b: b, c: NewClient(b.base)}}
-					selfEmptyDiffForDialect(r, d.kind, host, port, database, username, password)
-				})
-			}
-		})
-	}
+
+// netDialect 是一条网络方言的连接模板；env 指向的 DSN 缺失时用默认值尝试，连不上即跳过。
+type netDialect struct {
+	kind       string
+	env        string
+	defaultDSN string
+	host       string
+	port       int64
+	database   string
+	username   string
 }
 
-func selfEmptyDiffForDialect(r *recorder, kind, host string, port int64, database, username, password string) {
+// netDialects 由 E2（比对）与 E3（语句生成）共用：两条路径都要覆盖四方言。
+var netDialects = []netDialect{
+	{"postgres", "POLYDB_TEST_PG", "postgres://postgres@localhost:5432/postgres?sslmode=disable", "localhost", 5432, "postgres", "postgres"},
+	{"mysql", "POLYDB_TEST_MYSQL", "mysql://root@localhost:3306/mysql", "localhost", 3306, "mysql", "root"},
+	{"mssql", "POLYDB_TEST_MSSQL", "mssql://sa@localhost:1433/master", "localhost", 1433, "master", "sa"},
+	{"oracle", "POLYDB_TEST_ORACLE", "oracle://system@localhost:1521/ORCL", "localhost", 1521, "ORCL", "system"},
+}
+
+// params 解析出该方言的连接参数；DSN 非法时 ok=false。
+func (d netDialect) params() (host string, port int64, database, username, password string, ok bool) {
+	dsn := os.Getenv(d.env)
+	if dsn == "" {
+		dsn = d.defaultDSN
+	}
+	host, port, database, username, password, ok = parseNetDSN(dsn, d.host, d.port, d.database, d.username, "")
+	if d.kind == "postgres" {
+		// parseNetDSN 只认 mysql/mssql/oracle scheme；PG 沿用既有专用解析器。
+		host, port, database, username, ok = parsePGDSN(dsn)
+		password = ""
+	}
+	return
+}
+
+// dialectConn 建连并确认连通；本机没有对应数据库服务时返回空串表示跳过。
+func dialectConn(r *recorder, tag string, d netDialect) string {
 	r.t.Helper()
+	host, port, database, username, password, ok := d.params()
+	if !ok {
+		r.t.Skipf("invalid %s DSN", d.env)
+		return ""
+	}
 	body := map[string]any{
-		"name": "e2-" + kind, "kind": kind,
+		"name": tag + "-" + d.kind, "kind": d.kind,
 		"host": host, "port": port, "database": database, "username": username,
 	}
 	if password != "" {
@@ -324,30 +324,49 @@ func selfEmptyDiffForDialect(r *recorder, kind, host string, port int64, databas
 	}
 	status, got, err := r.s.c.Do("POST", "/api/connections", body)
 	if err != nil {
-		r.t.Fatalf("%s: create %s request failed: %v", r.s.b.name, kind, err)
+		r.t.Fatalf("%s: create %s request failed: %v", r.s.b.name, d.kind, err)
 	}
 	if status == 500 {
-		r.t.Logf("%s: %s unavailable at create (%v) — 需本机 %s 服务，跳过", r.s.b.name, kind, got, kind)
-		return
+		r.t.Logf("%s: %s unavailable at create (%v) — 需本机 %s 服务，跳过", r.s.b.name, d.kind, got, d.kind)
+		return ""
 	}
 	if status != 201 {
-		r.t.Fatalf("%s: create %s failed: status=%d body=%v", r.s.b.name, kind, status, got)
+		r.t.Fatalf("%s: create %s failed: status=%d body=%v", r.s.b.name, d.kind, status, got)
 	}
 	id, _ := firstConnID(got)
 
 	status, got, err = r.s.c.Do("POST", "/api/connections/"+id+"/test", nil)
 	if err != nil || status != 200 {
-		r.t.Errorf("%s: test %s failed: status=%d err=%v", r.s.b.name, kind, status, err)
-		return
+		r.t.Errorf("%s: test %s failed: status=%d err=%v", r.s.b.name, d.kind, status, err)
+		return ""
 	}
 	m := normalize(got).(map[string]any)
 	if connected, _ := m["connected"].(bool); !connected {
 		msg, _ := m["error"].(string)
-		r.t.Logf("%s: %s unavailable (%s) — 跳过", r.s.b.name, kind, msg)
+		r.t.Logf("%s: %s unavailable (%s) — 跳过", r.s.b.name, d.kind, msg)
 		r.step("delete connection", "DELETE", "/api/connections/"+id, nil, 204, nil)
-		return
+		return ""
 	}
+	return id
+}
 
-	r.diffStep(kind+" 自比", diffReq(id, id, nil), 200, map[string]any{"entries": []any{}})
-	r.step("delete connection", "DELETE", "/api/connections/"+id, nil, 204, nil)
+func TestContractSchemaDiffDialectSelfEmpty(t *testing.T) {
+	for _, d := range netDialects {
+		d := d
+		t.Run(d.kind, func(t *testing.T) {
+			bs := backends(t)
+			for _, b := range bs {
+				b := b
+				t.Run(b.name, func(t *testing.T) {
+					r := &recorder{t: t, s: &st{b: b, c: NewClient(b.base)}}
+					id := dialectConn(r, "e2", d)
+					if id == "" {
+						return
+					}
+					r.diffStep(d.kind+" 自比", diffReq(id, id, nil), 200, map[string]any{"entries": []any{}})
+					r.step("delete connection", "DELETE", "/api/connections/"+id, nil, 204, nil)
+				})
+			}
+		})
+	}
 }

@@ -251,6 +251,43 @@ export interface SchemaDiffRequest {
   options?: SchemaDiffOptions;
 }
 
+export interface SchemaDdlRequest {
+  /** 基准侧（当前库） */
+  source: SchemaDiffTarget;
+  /** 期望侧 */
+  target: SchemaDiffTarget;
+  /** 与比对时同一份选项；回滚方向按同一选项镜像重算，故必须与正向一致 */
+  options?: SchemaDiffOptions;
+  /** 勾选的变更条目 id（须来自同一次 /api/schema/diff 的 SchemaDiffPlan）。空数组产出空脚本；进入整表重建的表必须整组勾选，否则 POLYDB_ERR_INVALID_PARAM */
+  selected: string[];
+}
+
+export interface DdlStatement {
+  /** 该语句实现的变更条目 id：直改动作恰好 1 个；整表重建的一组语句承载该表被吸收的全部条目；PRAGMA 包裹条为空数组 */
+  entry_ids: string[];
+  /** 可执行语句，已带结尾分号 */
+  sql: string;
+  /** 沿用条目的执行相位；PRAGMA 首条为 0、末条为 255 */
+  phase: number;
+  /** 语句作用的表名（原样大小写）；PRAGMA 包裹条为空串，字段本身仍在 */
+  table: string;
+  /** 人读告警（快照不可见对象、ADD COLUMN 限制等）；双实现逐字一致。无告警时线路省略该字段 */
+  warnings?: string[];
+  /** 该语句承载的条目里只要有一条不可逆（丢数据类动作），整条语句标为不可逆 */
+  non_reversible: boolean;
+}
+
+export interface DdlScript {
+  /** 正向脚本，按执行顺序排列；空勾选为空数组（不得为 null） */
+  statements: DdlStatement[];
+  /** 回滚脚本 = 源/目标互换后按同一套规则再生成；正向重建过的表在回滚方向强制重建。本字段是**建议脚本**，其中不可逆语句执行后无法再回退，故调用方须自存正向执行记录 */
+  rollback: DdlStatement[];
+  /** true 时首尾两条 PRAGMA foreign_keys 必须留在事务外执行（事务内是 no-op，取证 G6） */
+  pragmas_outside_tx: boolean;
+  /** 该数据库种类的 DDL 是否可在事务内执行（SQLite 实测 true，取证 G7） */
+  ddl_in_tx: boolean;
+}
+
 export interface QueryRequest {
   /** SQL statement to execute */
   sql: string;
