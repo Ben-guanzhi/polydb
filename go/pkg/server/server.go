@@ -107,6 +107,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/queries/{query_id}/cancel", s.cancelQuery)
 
 	mux.HandleFunc("GET /api/connections/{id}/schemas/{schema}/tables/{table}/ddl", s.getDDL)
+	mux.HandleFunc("POST /api/schema/diff", s.diffSchema)
 	mux.HandleFunc("POST /api/connections/{id}/schemas/{schema}/tables/{table}/rows/query", s.browseRows)
 	mux.HandleFunc("POST /api/connections/{id}/schemas/{schema}/tables/{table}/rows/count", s.browseRowsCount)
 
@@ -334,6 +335,21 @@ func (s *Server) getDDL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"sql": sql})
+}
+
+// diffSchema 比对两个连接的结构差异（behavior.md §14）。两侧连接 id 来自请求体，不走路径参数。
+func (s *Server) diffSchema(w http.ResponseWriter, r *http.Request) {
+	var req protocol.SchemaDiffRequest
+	if err := decodeMsgpack(r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	plan, err := s.app.SchemaDiff(r.Context(), &req)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeMsgpack(w, http.StatusOK, plan)
 }
 
 // ─── query ─────────────────────────────────────────────────

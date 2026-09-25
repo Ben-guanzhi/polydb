@@ -344,3 +344,91 @@
 | oracle | ✓ | ✓ | ✓ |
 | mssql | ✓ | ✗ `NOT_SUPPORTED` | ✓（区分靠 `COLLATE`，仅文本列） |
 | redis | 不适用（KV 无浏览过滤） | 不适用 | 不适用 |
+
+---
+
+## 14. 结构比对（Compare & Sync，E1/E2）
+
+`POST /api/schema/diff` 把「两个已建立连接的库」比对成一份**有序、可勾选的变更计划**。
+计划**只描述变更，不含 SQL**；语句生成属后续端点。双实现必须逐字一致，
+锁定手段是共享向量语料 `test/schema-diff-vectors/*.json`（见 §14.7）。
+
+### 14.1 快照采集
+
+服务端为 `source` / `target` 各采一份快照：`list_tables` → 逐表 `list_columns` /
+`list_indexes` / `list_foreign_keys`。视图与物化视图**整体跳过**（不参与比对，也不报错）。
+两侧连接必须是**同一种数据库**，且**不得为 Redis**。
+
+### 14.2 归一规则（把「同一语义、不同写法」折叠成可比较的字面量）
+
+只用 **ASCII 规则**：小写折叠只动 ASCII 字母，空白只认 ` \t\n\r\v\f`。这是两套实现能逐字
+一致的前提；代价是**非 ASCII 标识符不做大小写折叠**（已知限制，不得悄悄扩大范围）。
+
+类型归一（按数据库种类）：
+
+1. 通用：`trim` → ASCII 小写 → 连续空白压成单空格 → 剥离标点旁空白
+   （故 `varchar ( 20 )` ≡ `varchar(20)`、`numeric (10, 2)` ≡ `numeric(10,2)`、`text [ ]` ≡ `text[]`）。
+2. MySQL：删整数显示宽度（`int(11)` → `int`，**只删宽度、保留类型名**）、删 `zerofill`。
+3. Oracle：`bpchar` → `char`；`number(p,0)` → `number(p)`（仅 scale 为 0 时才算噪声）。
+
+默认值归一：
+
+1. `trim` → **引号外**小写（字符串字面量内容保持原样）→ 空白折叠；空串视为「无」。
+2. 循环「剥最外层配对括号」+「剥尾部 `::type` 投射」直到不动点；投射取深度 0 的最后一个
+   `::`，且尾部须逐词确认为类型名（支持 `character varying`、`numeric(10,2)`、`varchar[]`、`::a::b`）。
+3. 结果为空串或 `null` → 视为无默认值，故 `NULL` / `((NULL))` 与缺省同义。
+
+`options.ignore_defaults = true` 时，默认值维度整体不参与比较。
+
+### 14.3 匹配规则（谁算「同一个对象」）
+
+| 对象 | 匹配键 | 不匹配时的产出 |
+|---|---|---|
+| 表 | 小写表名 | `create_table` / `drop_table` |
+| 列 | 小写列名 | `add_column` / `drop_column`；两侧都有但定义不同 ⇒ **一条** `alter_column`（`flags` 顺序固定：类型→可空性→默认值→自增） |
+| 主键 | `IndexInfo.primary` 标志（**不比索引名**） | 列签名变化 ⇒ `drop_index` + `add_index` 重建对 |
+| 非主键索引 | 小写索引名，名字为空时回落 `idx({列签名})` | 列签名或唯一性变化 ⇒ 重建对 |
+| 外键 | 有名字用 `n:{小写名}`，名字为空用内容键 `c:{列}→{引用表}({引用列})` | 列 / 引用表 / 引用列 / `on_delete` / `on_update` 任一变化 ⇒ `drop_foreign_key` + `add_foreign_key` |
+
+- 索引列签名 = 按 `position` 升序的列名小写逗号连接；**忽略 ASC/DESC 与前缀长度**。
+- 引用表键小写；`referenced_schema` 非空且非默认时写作 `{schema}/{table}`，避免跨 schema 引用被误判为相同。
+- 同名重复项以**第一条**为准；遍历顺序必须走有序容器/排序键，保证发射序确定。
+- **明确不比**（v1 有意收窄，不得悄悄扩）：字符集/排序规则、列顺序、注释、非主键索引的纯改名、
+  `generic_type`（跨种类比较因此直接报错，而非猜测）。
+- 源侧是视图、目标侧是同名表 ⇒ 仍产出 `create_table`（不猜语义，执行期由数据库报错兜底）。
+
+### 14.4 相位与排序
+
+条目按 `(phase, lower(table), lower(object), id)` 升序输出，`phase` 固定为：
+
+| 动作 | phase | | 动作 | phase |
+|---|---|---|---|---|
+| `drop_foreign_key` | 10 | | `create_table` | 50 |
+| `drop_index` | 20 | | `add_column` | 60 |
+| `drop_column` | 30 | | `alter_column` | 70 |
+| `drop_table` | 40 | | `add_index` | 80 |
+| | | | `add_foreign_key` | 90 |
+
+即「先解除依赖再删、先建表再建列、列改完再建索引/外键」。`create_table` 段内还要按外键依赖做
+拓扑排序（父表先建），存在环时退回名字序并保持确定输出。
+
+### 14.5 `schema` 缺省与 SQLite 限制
+
+- 请求里 `schema` 可省略；省略时由服务端按种类取默认（PostgreSQL `public`、其余按驱动默认）。
+- **SQLite 驱动不做 schema 寻址**（`list_tables` 忽略入参、`PRAGMA table_info` 不支持 schema 前缀），
+  故 SQLite 侧 `schema` 恒为 `main`，比对形态只能是**两个连接 / 两个文件**；
+  「同库多 schema（ATTACH）」为后续待办，实现前不得在协议上暗示支持。
+
+### 14.6 错误语义
+
+| 场景 | 错误码 | 消息（双端逐字一致） |
+|---|---|---|
+| 两侧种类不同 | `POLYDB_ERR_NOT_SUPPORTED` | `跨种类比对未支持：{a} vs {b}（v1 只比同一种数据库）` |
+| 任一侧为 Redis | `POLYDB_ERR_NOT_SUPPORTED` | `Redis 无模式概念，不参与结构比对` |
+| 连接不存在/未连接 | 沿用 §4 既有连接类错误 | — |
+
+### 14.7 一致性锁定
+
+`reason` 文案、条目排序、归一结果由 `test/schema-diff-vectors/*.json` 一份语料同时喂两端锁定。
+**改规则必须同步改语料**：语料的 `expected` 由 Rust 实现生成后**逐条人工复核**再提交，
+Go 侧只读不断言写回；两份错误向量的 `error_code`/`error_message` 保持手写。

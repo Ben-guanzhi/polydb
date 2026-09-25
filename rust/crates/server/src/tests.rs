@@ -426,6 +426,137 @@ async fn kv_not_supported_on_sqlite() {
 }
 
 #[tokio::test]
+async fn diff_schema_identical_source_and_target_is_empty_plan() {
+    let router = new_test_router();
+    let id = create_sqlite_conn(&router, "same").await;
+    let (status, _, _) = query(
+        &router,
+        &id,
+        json!({"sql": "CREATE TABLE t(id INTEGER PRIMARY KEY, name VARCHAR(20))"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, value, _) = do_req(
+        router,
+        Method::POST,
+        "/api/schema/diff",
+        Some(json!({"source": {"connection_id": id}, "target": {"connection_id": id}})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(value["entries"], json!([]), "同库自比必须空计划");
+}
+
+#[tokio::test]
+async fn diff_schema_reports_missing_table_and_type_change() {
+    let router = new_test_router();
+    let source = create_sqlite_conn(&router, "src").await;
+    let target = create_sqlite_conn(&router, "dst").await;
+    query(
+        &router,
+        &source,
+        json!({"sql": "CREATE TABLE t(id INTEGER, name VARCHAR(20))"}),
+    )
+    .await;
+    query(
+        &router,
+        &target,
+        json!({"sql": "CREATE TABLE t(id INTEGER, name VARCHAR(30))"}),
+    )
+    .await;
+    query(
+        &router,
+        &target,
+        json!({"sql": "CREATE TABLE u(id INTEGER)"}),
+    )
+    .await;
+    let (status, value, _) = do_req(
+        router,
+        Method::POST,
+        "/api/schema/diff",
+        Some(json!({
+            "source": {"connection_id": source},
+            "target": {"connection_id": target}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    // 相位序：create_table(50) 必在 alter_column(70) 之前。
+    assert_eq!(
+        value["entries"],
+        json!([
+            {
+                "id": "u//create_table",
+                "op": "create_table",
+                "phase": 50,
+                "table": "u",
+                "destructive": false,
+                "selected": true,
+                "reason": "表中缺失，需新建"
+            },
+            {
+                "id": "t/name/alter_column",
+                "op": "alter_column",
+                "phase": 70,
+                "table": "t",
+                "object": "name",
+                "from": "varchar(20)",
+                "to": "varchar(30)",
+                "flags": ["type"],
+                "destructive": false,
+                "selected": true,
+                "reason": "类型 varchar(20) → varchar(30)"
+            }
+        ])
+    );
+}
+
+#[tokio::test]
+async fn diff_schema_unknown_connection_reports_not_found() {
+    let router = new_test_router();
+    let id = create_sqlite_conn(&router, "known").await;
+    let (status, value, _) = do_req(
+        router,
+        Method::POST,
+        "/api/schema/diff",
+        Some(json!({
+            "source": {"connection_id": id},
+            "target": {"connection_id": "00000000-0000-0000-0000-000000000000"}
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(value["code"], "POLYDB_ERR_CONNECTION_NOT_FOUND");
+}
+
+#[tokio::test]
+async fn diff_schema_accepts_msgpack_body() {
+    // 数据面必须走 msgpack（AGENTS.md 红线）：连接 id 在此路径下是 human-readable 字符串。
+    let router = new_test_router();
+    let id = create_sqlite_conn(&router, "mp").await;
+    let body = rmp_serde::to_vec(&json!({
+        "source": {"connection_id": id},
+        "target": {"connection_id": id},
+        "options": {"ignore_defaults": true, "select_destructive": true}
+    }))
+    .unwrap();
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/schema/diff")
+        .header("content-type", "application/msgpack")
+        .body(axum::body::Body::from(body))
+        .unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let raw = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let mut de = rmp_serde::Deserializer::new(raw.as_ref()).with_human_readable();
+    let value = Value::deserialize(&mut de).unwrap();
+    assert_eq!(value["entries"], json!([]));
+}
+
+#[tokio::test]
 async fn garbage_msgpack_body_returns_unknown() {
     let router = new_test_router();
     let id = create_sqlite_conn(&router, "gb").await;

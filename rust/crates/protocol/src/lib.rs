@@ -9,6 +9,7 @@ pub mod error;
 pub mod metadata;
 pub mod query;
 pub mod redis;
+pub mod schema_diff;
 pub mod transaction;
 pub mod ws;
 
@@ -17,5 +18,6 @@ pub use connection::*;
 pub use error::*;
 pub use metadata::*;
 pub use query::*;
+pub use schema_diff::*;
 pub use transaction::*;
 pub use ws::*;

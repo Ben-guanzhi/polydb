@@ -7,6 +7,7 @@ description = "PolyDB use case orchestration"
 [dependencies]
 polydb-core = { workspace = true }
 polydb-protocol = { workspace = true }
+polydb-schema-diff = { workspace = true }
 polydb-db-core = { workspace = true }
 polydb-db-sqlite = { path = "../db-sqlite" }
 polydb-db-mysql = { path = "../db-mysql" }

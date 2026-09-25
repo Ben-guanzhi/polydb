@@ -6,14 +6,64 @@ use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock};
 use polydb_core::{
     BeginTransactionRequest, ColumnInfo, ConnectionId, ConnectionInfo, ConnectionStatus, CoreError,
-    CoreResult, CreateConnectionRequest, DatabaseKind, ForeignKeyInfo, IndexInfo, IsolationLevel,
-    QueryResult, RedisKeyType, RedisReply, RedisScanPage, RedisValue, SchemaInfo, TableInfo,
-    TableRowsRequest, TableRowsResult, TransactionInfo, TransactionStatus, UpdateConnectionRequest,
-    Value,
+    CoreResult, CreateConnectionRequest, DatabaseKind, DiffColumnFlag, ForeignKeyInfo, IndexInfo,
+    IsolationLevel, QueryResult, RedisKeyType, RedisReply, RedisScanPage, RedisValue,
+    SchemaDiffEntry, SchemaDiffOp, SchemaDiffPlan, SchemaDiffRequest, SchemaDiffTarget, SchemaInfo,
+    TableInfo, TableRowsRequest, TableRowsResult, TableType, TransactionInfo, TransactionStatus,
+    UpdateConnectionRequest, Value,
 };
 use polydb_db_core::{Connection, DatabaseDriver, SqlDriver, TxMode};
 use polydb_protocol::common::SshTunnelConfig;
+use polydb_schema_diff as schema_diff;
 use polydb_storage::{keyring_ref, FileKeyring, Keyring, Storage};
+
+type Snapshot = schema_diff::Snapshot;
+type TableSnapshot = schema_diff::TableSnapshot;
+/// `schema` 省略时按种类取默认（behavior.md §14.5）。SQLite 驱动不做 schema 寻址，恒 `main`；
+/// 其余方言把空串直传给驱动，由驱动用自己的当前库/模式。
+fn default_schema(kind: DatabaseKind) -> &'static str {
+    match kind {
+        DatabaseKind::Sqlite => "main",
+        DatabaseKind::Postgres => "public",
+        _ => "",
+    }
+}
+
+/// 纯函数计算结果 → 线路 DTO（两侧类型分属两个 crate，孤儿规则下只能写自由函数）。
+fn to_wire_entry(e: schema_diff::Entry) -> SchemaDiffEntry {
+    SchemaDiffEntry {
+        id: e.id,
+        op: match e.op {
+            schema_diff::Op::CreateTable => SchemaDiffOp::CreateTable,
+            schema_diff::Op::DropTable => SchemaDiffOp::DropTable,
+            schema_diff::Op::AddColumn => SchemaDiffOp::AddColumn,
+            schema_diff::Op::DropColumn => SchemaDiffOp::DropColumn,
+            schema_diff::Op::AlterColumn => SchemaDiffOp::AlterColumn,
+            schema_diff::Op::AddIndex => SchemaDiffOp::AddIndex,
+            schema_diff::Op::DropIndex => SchemaDiffOp::DropIndex,
+            schema_diff::Op::AddForeignKey => SchemaDiffOp::AddForeignKey,
+            schema_diff::Op::DropForeignKey => SchemaDiffOp::DropForeignKey,
+        },
+        phase: e.phase,
+        table: e.table,
+        object: e.object,
+        from: e.from,
+        to: e.to,
+        flags: e
+            .flags
+            .into_iter()
+            .map(|f| match f {
+                schema_diff::ColumnFlag::Type => DiffColumnFlag::Type,
+                schema_diff::ColumnFlag::Nullability => DiffColumnFlag::Nullability,
+                schema_diff::ColumnFlag::Default => DiffColumnFlag::Default,
+                schema_diff::ColumnFlag::AutoIncrement => DiffColumnFlag::AutoIncrement,
+            })
+            .collect(),
+        destructive: e.destructive,
+        selected: e.selected,
+        reason: e.reason,
+    }
+}
 
 mod sshtunnel;
 
@@ -404,6 +454,60 @@ impl AppCore {
         self.ensure_connected(&id)?;
         let conn = self.get_conn(id)?;
         conn.as_sql()?.create_table_sql(schema, table).await
+    }
+
+    // ─── 结构比对（Compare & Sync E2，behavior.md §14）───────
+
+    /// 采集一个（连接, schema）的结构快照。视图/物化视图整体跳过（§14.1）。
+    async fn collect_snapshot(&self, target: &SchemaDiffTarget) -> CoreResult<Snapshot> {
+        self.ensure_connected(&target.connection_id)?;
+        let conn = self.get_conn(target.connection_id)?;
+        let kind = conn.kind();
+        if kind == DatabaseKind::Redis {
+            return Err(CoreError::NotSupported(
+                "Redis 无模式概念，不参与结构比对".into(),
+            ));
+        }
+        // 空串与缺省同义：Go 侧 `omitempty` 会把显式空串抹成缺席，两端必须同一解释。
+        let schema = target
+            .schema
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| default_schema(kind).to_string());
+        let sql = conn.as_sql()?;
+        let mut tables = Vec::new();
+        for t in sql.list_tables(&schema).await? {
+            if t.table_type != TableType::Table {
+                continue;
+            }
+            tables.push(TableSnapshot {
+                name: t.name.clone(),
+                table_type: Some(t.table_type),
+                columns: sql.list_columns(&schema, &t.name).await?,
+                indexes: sql.list_indexes(&schema, &t.name).await?,
+                foreign_keys: sql.list_foreign_keys(&schema, &t.name).await?,
+            });
+        }
+        Ok(Snapshot::new(kind, schema, tables))
+    }
+
+    /// 比对两个连接的结构差异，产出有序计划（不含 SQL，语句生成属 E3）。
+    pub async fn schema_diff(&self, req: &SchemaDiffRequest) -> CoreResult<SchemaDiffPlan> {
+        let source = self.collect_snapshot(&req.source).await?;
+        let target = self.collect_snapshot(&req.target).await?;
+        let opts = req.options.unwrap_or_default();
+        let entries = schema_diff::diff(
+            &source,
+            &target,
+            &schema_diff::Options {
+                ignore_defaults: opts.ignore_defaults.unwrap_or(false),
+                select_destructive: opts.select_destructive.unwrap_or(false),
+            },
+        )?;
+        Ok(SchemaDiffPlan {
+            entries: entries.into_iter().map(to_wire_entry).collect(),
+        })
     }
 
     // ─── 表数据浏览（M11，behavior.md §13）──────────────────

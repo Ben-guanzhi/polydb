@@ -1,7 +1,8 @@
 # polydb Compare & Sync（模式比对与同步）— 里程碑拆解
 
 > 状态：**E1 已落地（2026-09-25，纯函数层双实现 + 共享向量对拍）**；**E2.0 真快照复核已落地（2026-09-25，
-> SQLite 真引擎采快照喂 diff，抓到 3 个驱动缺陷并双端修复，见附录 A.9）**；E2 主体（spec DTO + 端点 + 契约）与 E3–E5 未开工。
+> SQLite 真引擎采快照喂 diff，抓到 3 个驱动缺陷并双端修复，见附录 A.9）**；**E2 主体已落地（2026-09-25，
+> spec 7 个 DTO + `POST /api/schema/diff` 双端端点 + 契约 SQLite 两文件真跑，见附录 A.10）**；E3–E5 未开工。
 > 从 `docs/plan-ui-tablepro-phase3.md` §阶段 D「仍不排期」四件中提出单列。
 > 许可红线不变：TablePro / TableProGo 均为 AGPLv3，**只借鉴交互语义，不移植任何代码**。
 > 架构红线不变：前端不 import driver；core/protocol 无 IO；driver 无 UI 假设；数据面 msgpack；
@@ -41,7 +42,7 @@ MySQL 的 `app_dev` vs `app_prod`），列出表/列/索引/外键四类对象�
 | --- | --- | --- |
 | E1 diff 纯函数 + 归一层 | ✅ 实际 3641 行：Rust 1675（lib 1010 + normalize 434 + 向量测试 102 + 生成工具 129）、Go 1344、共享向量 16 份 622 行 | 零 IO、零 UI、不生成 DDL；双实现对拍已建立（详见附录 A） |
 | E2.0 真快照复核 | ✅ 实际 687 行测试（Rust 368 + Go 319）+ 驱动净改 103 行（Rust +44/−24、Go +59/−16） | 零 spec 变更；抓出 3 个驱动缺陷（附录 A.9 F1–F3） |
-| E2 spec DTO + 两端端点 + 契约 | spec ~120 行、两端各 ~120 行、契约 ~200 行 | 唯一需要 spec 变更的批次 |
+| E2 spec DTO + 两端端点 + 契约 | ✅ 实际 spec +187（metadata 71 / openapi 28 / behavior §14 88）、Rust +336/−5、Go +329、契约 +353 | 唯一需要 spec 变更的批次；`/api/schema/ddl` 与 `ddl_in_tx` 推迟到 E3（见 §5） |
 | E3 DDL 生成器补全 | Rust/Go 各 ~350 行 + 单测（**D1 定案后落在服务端**，前端只渲染脚本） | 含 ALTER COLUMN 三态、CREATE/DROP TABLE、顺序依赖与回滚脚本 |
 | E4 Web 向导 | ~700 行（四步 + 预览 + 状态持久化） | 体量参照 M30 导入向导的 1/3 |
 | E5 GUI + TUI 收敛形态 + 文档 | GPUI ~400 行、TUI ~350 行 | 渲染无法无头验证（§7） |
@@ -88,15 +89,32 @@ Rust 无 HttpTransport ⇒ GUI 只能比较**本机 app-core 已打开的两个�
 
 ## 5. 契约影响（spec/ 真相源，逐条标注）
 
-1. `spec/schemas/metadata.json` 新增 `SchemaDiffEntry` / `SchemaDiffPlan`（**non-breaking**，纯新增）。
-2. `spec/openapi.yaml` 新增 `POST /api/schema/diff`（入参：源/目标 connection_id + schema + 选项；
-   出参：`SchemaDiffPlan`）与 `POST /api/schema/ddl`（计划 + 勾选态 → 有序语句 + 回滚脚本）。
+E2 实际落地（2026-09-25）：
+
+1. `spec/schemas/metadata.json` 新增 **7 个** definitions：`SchemaDiffOp` / `DiffColumnFlag` /
+   `SchemaDiffEntry` / `SchemaDiffPlan` / `SchemaDiffTarget` / `SchemaDiffOptions` /
+   `SchemaDiffRequest`（+71 行，**non-breaking**，纯新增）。
+2. `spec/openapi.yaml` 新增 `POST /api/schema/diff`（`operationId: diffSchema`，tag `schema_diff`，
+   +28 行，**non-breaking**）。
+3. `spec/behavior.md` 新增 §14（+88 行，7 小节）：快照采集口径（视图跳过、Redis 拒绝）、
+   ASCII-only 归一规则、匹配键表、相位表与拓扑、schema 缺省与 SQLite 限制、错误语义两条逐字文案、
+   向量语料锁定流程。
+4. **刻意未做**（E2.0 的教训直接反哺）：
+   - `POST /api/schema/ddl` 与能力矩阵 `ddl_in_tx` 行**推迟到 E3**——E3 的生成器还不存在，
+     现在加就是再造一个「字段存在没人填」的死维度。
+   - `ColumnInfo.generic_type` 的语义说明**推迟到 E3 / 有实例环境**——四方言目前从未填该字段
+     （附录 A.9 F3 同型问题），先写语义会立刻让契约测试变红。
+
+### 5.6 尚未落地的契约项（留给 E3）
+
+1. `spec/openapi.yaml` 新增 `POST /api/schema/ddl`（计划 + 勾选态 → 有序语句 + 回滚脚本），
    **non-breaking**。
-3. `spec/behavior.md` 新增 §14：diff 归一规则、条目排序依赖（先父表 FK 后子表、先建列后建索引）、
-   大小写与引号标识处理、**能力矩阵补 `ddl_in_tx` 一行**。
-4. `ColumnInfo.generic_type` 补语义说明（字段本身已存在 ⇒ non-breaking，但**双实现必须同时填**，
+2. `spec/behavior.md` 能力矩阵补 `ddl_in_tx` 一行。
+3. `ColumnInfo.generic_type` 补语义说明（字段本身已存在 ⇒ non-breaking，但**双实现必须同时填**，
    否则契约测试会立刻抓到差异）。
-5. 提交前跑 `tools/genprotocol`：`ts --check` + `check`（当前基线：54 spec types vs rust + go 零漂移）。
+
+基线：`tools/genprotocol` 的 `check` 已由 **54 spec types 涨到 61**，E2 收口时 `check` 与
+`ts --check` 均零漂移。
 
 ## 6. 分批交付（每批独立门禁 + 独立提交）
 
@@ -110,10 +128,11 @@ Rust 无 HttpTransport ⇒ GUI 只能比较**本机 app-core 已打开的两个�
   把「驱动是否真按本层假定的语义填字段」变成断言。两端各 10 份镜像测试，抓到并修掉 3 个真缺陷
   （外键合成名、`IndexInfo.primary`、`on_update/on_delete`）+ 2 处 parity（`referenced_schema`、
   PRAGMA `id` 语义）。详见附录 A.9。
-- **E2 协议与服务端**：spec 改动 → `gen-protocol` → 两端 DTO + 两个端点 → 契约测试
+- **E2 协议与服务端** ✅（2026-09-25）：spec 改动 → `gen-protocol` → 两端 DTO + 端点 → 契约测试
   （**SQLite 按两个连接/两个文件真跑**——驱动不支持 schema 寻址，"同库两 schema"已定为 v1.1 待办，见 §8-6；
-  PG/MySQL/MSSQL/Oracle 按既有 `connected:false` soft-skip）。
-  验收门禁：`check-protocol` + workspace clippy/test + `go vet` + 契约。
+  PG/MySQL/MSSQL/Oracle 与 Redis 按既有 `connected:false` soft-skip）。
+  验收门禁全绿，落地实况见附录 A.10。本批只交付 **1 个端点**（`/api/schema/diff`）；
+  `/api/schema/ddl` 与 `ddl_in_tx` 能力行推迟到 E3（§5.6）。
 - **E3 语句生成**：在服务端补齐生成器（ALTER COLUMN 的类型/可空/默认三态、CREATE/DROP TABLE、
   依赖排序、回滚脚本），Web 现成的 `alterSql.ts` 继续服务结构编辑器，**不作为 diff 的出口**
   （避免同一个方言规则存在两套真相源）。
@@ -340,3 +359,50 @@ rusqlite / modernc.org/sqlite），所以 E2 的第一步不是补 spec DTO，�
 4. 跨种类比对与 `generic_type` 归一均未落地（本层直接报错），这是 v1 的有意收窄。
 5. 非 ASCII 标识符的大小写折叠不生效（ASCII-only 规则的代价）。
 6. E2.0 仍无端点、无 UI ⇒ 契约测试只回归了既有元数据端点，diff 的三端渲染完全不涉及。
+
+### A.10 E2 落地实况（2026-09-25，协议 + 服务端 + 契约）
+
+**落点**（纯函数层与线路层刻意分开）：
+
+| 层 | Rust | Go |
+|---|---|---|
+| 线路 DTO | `crates/protocol/src/schema_diff.rs`（78 行，手写 + 漂移门禁） | `pkg/protocol/schema_diff.go`（77 行） |
+| 快照采集 + use case | `crates/app-core/src/lib.rs`（`collect_snapshot` / `schema_diff` / `to_wire_entry`，+108/−4） | `pkg/appcore/schema_diff.go`（126 行） |
+| 端点 | `crates/server/src/lib.rs` `POST /api/schema/diff` | `pkg/server/server.go` 同路径 |
+| 单测 | `crates/server/src/tests.rs` +131（4 份） | `pkg/server/server_test.go` +110（4 份镜像） |
+| 契约 | —— | `test/contract/e2_schema_diff_test.go`（353 行，3 个顶层测试） |
+
+**关键设计点（E3 及三端 UI 必须沿用）**：
+
+1. `polydb-schema-diff` / `pkg/schemadiff` 的 `Entry` **不是**线路类型。线路走
+   `SchemaDiffEntry`，转换在 app-core 完成（Rust 侧另有一条硬约束：孤儿规则不允许
+   `impl From<schema_diff::Entry> for SchemaDiffEntry`，故用自由函数 `to_wire_entry`）。
+2. msgpack 可选字段两端对称：Rust `Option<T>` + `skip_serializing_if` ⇄ Go `omitempty` / `*T`。
+   `flags` 无改变时 Rust 是空 `Vec`（省略）、Go 必须保持 `nil`（不能是空切片）。
+3. **空计划必须是 `[]` 而不是 `null`**：Go 侧 `SchemaDiffPlan.Entries` 显式初始化空切片，
+   否则 nil 切片编成 msgpack nil，web 端直接打崩（沿用既有约定）。
+4. `schema` 缺省与"显式空串"**同义**：Go `omitempty` 会把空串抹成缺席，两端必须同一解释，
+   故 `trim` 后为空即回落 `default_schema`（SQLite `main` / PG `public` / 其余空串）。
+5. Redis 在采集阶段就显式 `NOT_SUPPORTED`，逐字文案 `Redis 无模式概念，不参与结构比对`
+   已进 behavior.md §14.6 —— 契约测试按整串比对。
+6. 契约里 `entries[].id` 是**有意内容**，但 `normalize` 会把任意层级的 `id` 换成 `<dynamic>`，
+   所以本批用 `hoistDiffEntryIDs` 先复制成 `diff_id` 再比较，锁死 id 字面值。
+
+**契约覆盖**（`TestContractSchemaDiffSQLite` 在 go / rust 两后端各跑一遍，7 次请求逐字段全等）：
+自比空计划 ×2、`src→tgt` 完整三条（相位 40/50/70，含 `object`/`from`/`to`/`flags`/`reason`/`selected`）、
+`select_destructive=true` 只翻转勾选、`tgt→src` 镜像计划、空串 schema 与缺省等价、未知连接 404。
+
+**E2 门禁数字（本机实测）**：`tools/genprotocol check` **61 spec types vs rust + go 零漂移**、
+`ts --check` up to date（web 类型 +54 行）；Rust `cargo test --workspace` **124 passed / 0 failed**、
+`clippy --workspace --all-targets -- -D warnings` 退出 0、`cargo fmt --all --check` clean；
+Go `go build` / `go vet` / `go test ./...` 全绿、剥 CR 后新改文件 0 未格式化；
+Web `tsc --noEmit` clean + vitest **141 passed**；契约全量 **20 顶层 / 50 子测试全绿、0 FAIL**（190.2s）。
+本机未跑 `golangci-lint`（PATH 里没装）。
+
+**E2 仍未验证（继续诚实披露）**：
+1. PG/MySQL/MSSQL/Oracle/Redis 相关断言**全部 soft-skip**（本机无实例）。契约里这 5 条只跑到了
+   "建连失败即跳过"，`自比空计划` 与 `Redis NOT_SUPPORTED 文案` 两条**从未真正执行过**。
+2. 端点只做 diff，**不生成语句**（E3）；三端 UI 一个都还没接（E4/E5）。
+3. 四方言的 `on_update`/`on_delete`、`generic_type` 仍未填（§8-7 已定随 E3 补）。
+4. 跨种类比对（如 SQLite vs PG）在纯函数层直接报错，服务端未单独测该分支的线路错误码。
+5. 视图（`TableType::View`）在采集时跳过，"两端都跳过同一张视图"这一条只有单测覆盖，无真实例验证。

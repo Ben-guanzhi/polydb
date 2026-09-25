@@ -20,7 +20,7 @@ use polydb_core::protocol::{
 };
 use polydb_core::{
     CoreError, CoreResult, RedisExecCommandRequest, RedisScanRequest, RedisSelectDbRequest,
-    RedisSetRequest,
+    RedisSetRequest, SchemaDiffRequest,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -109,6 +109,7 @@ pub fn router_with_token(app: Arc<AppCore>, token: Option<String>) -> Router {
             "/api/connections/{id}/schemas/{schema}/tables/{table}/ddl",
             get(get_ddl),
         )
+        .route("/api/schema/diff", post(diff_schema))
         .route(
             "/api/connections/{id}/schemas/{schema}/tables/{table}/rows/query",
             post(browse_rows),
@@ -460,6 +461,19 @@ async fn get_ddl(
     };
     match app.create_table_sql(id, &schema, &table).await {
         Ok(sql) => json_response(StatusCode::OK, serde_json::json!({"sql": sql})),
+        Err(e) => error_response(e),
+    }
+}
+
+// ─── 结构比对（Compare & Sync E2，behavior.md §14）──────────
+
+async fn diff_schema(State(app): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    let req: SchemaDiffRequest = match decode_body(&headers, &body) {
+        Ok(r) => r,
+        Err(res) => return *res,
+    };
+    match app.schema_diff(&req).await {
+        Ok(plan) => msgpack_response(StatusCode::OK, plan),
         Err(e) => error_response(e),
     }
 }

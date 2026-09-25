@@ -448,6 +448,34 @@ paths:
         default:
           $ref: "#/components/responses/Error"
 
+  # ─── 结构比对（Compare & Sync E2，behavior.md §14）───────
+  /api/schema/diff:
+    post:
+      operationId: diffSchema
+      summary: 比对两个连接的结构差异，产出可执行计划
+      description: |
+        服务端分别为 source / target 两个**已连接**的连接采集元数据快照
+        （list_tables → 逐表 list_columns / list_indexes / list_foreign_keys），
+        再按 behavior.md §14 的归一与匹配规则产出有序计划。
+        两侧数据库种类必须相同（跨种类比对 v1 直接拒绝），Redis 一律拒绝。
+        计划**只含变更条目，不含 SQL**——语句生成属 E3 的 /api/schema/ddl。
+      tags: [schema_diff]
+      requestBody:
+        required: true
+        content:
+          application/msgpack:
+            schema:
+              $ref: "schemas/metadata.json#/definitions/SchemaDiffRequest"
+      responses:
+        "200":
+          description: 结构差异计划（同构时 entries 为空数组）
+          content:
+            application/msgpack:
+              schema:
+                $ref: "schemas/metadata.json#/definitions/SchemaDiffPlan"
+        default:
+          $ref: "#/components/responses/Error"
+
   # ─── 表数据浏览（M11，behavior.md §13）───────────────────
   /api/connections/{id}/schemas/{schema}/tables/{table}/rows/query:
     post:

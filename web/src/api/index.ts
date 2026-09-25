@@ -197,6 +197,60 @@ export interface ForeignKeyInfo {
 
 export type ForeignKeyAction = 'cascade' | 'no_action' | 'restrict' | 'set_default' | 'set_null';
 
+export type SchemaDiffOp = 'add_column' | 'add_foreign_key' | 'add_index' | 'alter_column' | 'create_table' | 'drop_column' | 'drop_foreign_key' | 'drop_index' | 'drop_table';
+
+export type DiffColumnFlag = 'auto_increment' | 'default' | 'nullability' | 'type';
+
+export interface SchemaDiffEntry {
+  /** 稳定标识 '{table小写}/{object小写}/{op}'，供 UI 记忆勾选状态 */
+  id: string;
+  op: SchemaDiffOp;
+  /** 执行相位，小的先执行：drop_fk=10 drop_index=20 drop_column=30 drop_table=40 create_table=50 add_column=60 alter_column=70 add_index=80 add_fk=90 */
+  phase: number;
+  /** 表名（新增/变更取目标侧原样大小写，删除取源侧） */
+  table: string;
+  /** 列名/索引名/外键名；表级动作为空。无名外键/索引回落为内容签名 */
+  object?: string;
+  /** 变更前取值，语义随 op 而定 */
+  from?: string | null;
+  /** 变更后取值 */
+  to?: string | null;
+  /** 仅 alter_column 使用；其余动作为空 */
+  flags?: DiffColumnFlag[];
+  /** 是否丢数据（四类删除动作） */
+  destructive: boolean;
+  /** 默认是否勾选：破坏性动作默认 false，除非 select_destructive */
+  selected: boolean;
+  /** 人读原因；双实现必须逐字一致（由 test/schema-diff-vectors 锁定） */
+  reason: string;
+}
+
+export interface SchemaDiffPlan {
+  /** 已按 (phase, table, object, id) 排序的可执行计划；同构时为空数组 */
+  entries: SchemaDiffEntry[];
+}
+
+export interface SchemaDiffTarget {
+  connection_id: ConnectionId;
+  /** 缺省由服务端按数据库种类取默认 schema（SQLite 恒 'main'，见 behavior.md §14.5） */
+  schema?: string;
+}
+
+export interface SchemaDiffOptions {
+  /** 忽略默认值差异（跨环境的序列/时间戳默认常属噪声） */
+  ignore_defaults?: boolean;
+  /** 破坏性动作是否默认勾选（须用户显式确认） */
+  select_destructive?: boolean;
+}
+
+export interface SchemaDiffRequest {
+  /** 基准侧（要变成 target 的样子） */
+  source: SchemaDiffTarget;
+  /** 期望侧 */
+  target: SchemaDiffTarget;
+  options?: SchemaDiffOptions;
+}
+
 export interface QueryRequest {
   /** SQL statement to execute */
   sql: string;

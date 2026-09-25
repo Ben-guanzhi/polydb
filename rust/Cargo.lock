@@ -4837,6 +4837,7 @@ dependencies = [
  "polydb-db-redis",
  "polydb-db-sqlite",
  "polydb-protocol",
+ "polydb-schema-diff",
  "polydb-storage",
  "russh",
  "smol",

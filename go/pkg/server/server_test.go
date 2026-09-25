@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/polydb/polydb/pkg/appcore"
 	"github.com/polydb/polydb/pkg/keyring"
+	"github.com/polydb/polydb/pkg/protocol"
 	"github.com/polydb/polydb/pkg/storage"
 )
 
@@ -597,5 +599,113 @@ func TestWSQueryBeforeHello(t *testing.T) {
 	}
 	if err := msg["error"].(map[string]any); err["code"] != "POLYDB_ERR_INVALID_PARAM" {
 		t.Fatalf("expected INVALID_PARAM, got %v", err)
+	}
+}
+
+// ─── 结构比对（Compare & Sync E2，behavior.md §14）───────────
+// 与 Rust crates/server/src/tests.rs 的 diff_schema_* 用例逐条镜像。
+
+func sref(s string) *string { return &s }
+
+func diffPlanDo(t *testing.T, srv *httptest.Server, req protocol.SchemaDiffRequest) (int, protocol.SchemaDiffPlan) {
+	t.Helper()
+	body, err := msgpack.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	status, raw := rawDo(t, srv, "POST", "/api/schema/diff", body, "application/msgpack")
+	if status != http.StatusOK {
+		return status, protocol.SchemaDiffPlan{}
+	}
+	var plan protocol.SchemaDiffPlan
+	if err := msgpack.Unmarshal(raw, &plan); err != nil {
+		t.Fatalf("decode plan: %v (bytes=%q)", err, raw)
+	}
+	return status, plan
+}
+
+func execSQL(t *testing.T, srv *httptest.Server, id, sql string) {
+	t.Helper()
+	status, got, _ := mpDo(t, srv, "POST", "/api/connections/"+id+"/query", map[string]any{"sql": sql})
+	if status != http.StatusOK {
+		t.Fatalf("exec %q: status=%d body=%v", sql, status, got)
+	}
+}
+
+func TestDiffSchemaIdenticalSourceAndTargetIsEmptyPlan(t *testing.T) {
+	srv := newTestServer(t)
+	id := createSQLiteConn(t, srv)
+	execSQL(t, srv, id, "CREATE TABLE t(id INTEGER PRIMARY KEY, name VARCHAR(20))")
+	status, plan := diffPlanDo(t, srv, protocol.SchemaDiffRequest{
+		Source: protocol.SchemaDiffTarget{ConnectionID: id},
+		Target: protocol.SchemaDiffTarget{ConnectionID: id},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("status=%d", status)
+	}
+	if len(plan.Entries) != 0 {
+		t.Fatalf("同库自比必须空计划，got %v", plan.Entries)
+	}
+}
+
+func TestDiffSchemaReportsMissingTableAndTypeChange(t *testing.T) {
+	srv := newTestServer(t)
+	source := createSQLiteConn(t, srv)
+	target := createSQLiteConn(t, srv)
+	execSQL(t, srv, source, "CREATE TABLE t(id INTEGER, name VARCHAR(20))")
+	execSQL(t, srv, target, "CREATE TABLE t(id INTEGER, name VARCHAR(30))")
+	execSQL(t, srv, target, "CREATE TABLE u(id INTEGER)")
+	status, plan := diffPlanDo(t, srv, protocol.SchemaDiffRequest{
+		Source: protocol.SchemaDiffTarget{ConnectionID: source},
+		Target: protocol.SchemaDiffTarget{ConnectionID: target},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("status=%d", status)
+	}
+	// 相位序：create_table(50) 必在 alter_column(70) 之前。
+	want := []protocol.SchemaDiffEntry{
+		{
+			ID: "u//create_table", Op: protocol.OpCreateTable, Phase: 50, Table: "u",
+			Selected: true, Reason: "表中缺失，需新建",
+		},
+		{
+			ID: "t/name/alter_column", Op: protocol.OpAlterColumn, Phase: 70, Table: "t",
+			Object: "name", From: sref("varchar(20)"), To: sref("varchar(30)"),
+			Flags: []protocol.DiffColumnFlag{protocol.FlagType},
+			// 与 Rust 侧期望逐字一致：类型 varchar(20) → varchar(30)
+			Selected: true, Reason: "类型 varchar(20) → varchar(30)",
+		},
+	}
+	if !reflect.DeepEqual(plan.Entries, want) {
+		t.Fatalf("entries mismatch\n got %#v\nwant %#v", plan.Entries, want)
+	}
+}
+
+func TestDiffSchemaUnknownConnectionReportsNotFound(t *testing.T) {
+	srv := newTestServer(t)
+	id := createSQLiteConn(t, srv)
+	status, _ := diffPlanDo(t, srv, protocol.SchemaDiffRequest{
+		Source: protocol.SchemaDiffTarget{ConnectionID: id},
+		Target: protocol.SchemaDiffTarget{ConnectionID: "00000000-0000-0000-0000-000000000000"},
+	})
+	if status != http.StatusNotFound {
+		t.Fatalf("status=%d, want 404", status)
+	}
+}
+
+func TestDiffSchemaOptionsAreAccepted(t *testing.T) {
+	srv := newTestServer(t)
+	id := createSQLiteConn(t, srv)
+	execSQL(t, srv, id, "CREATE TABLE t(id INTEGER)")
+	status, plan := diffPlanDo(t, srv, protocol.SchemaDiffRequest{
+		Source:  protocol.SchemaDiffTarget{ConnectionID: id},
+		Target:  protocol.SchemaDiffTarget{ConnectionID: id},
+		Options: &protocol.SchemaDiffOptions{IgnoreDefaults: true, SelectDestructive: true},
+	})
+	if status != http.StatusOK {
+		t.Fatalf("status=%d", status)
+	}
+	if len(plan.Entries) != 0 {
+		t.Fatalf("got %v", plan.Entries)
 	}
 }

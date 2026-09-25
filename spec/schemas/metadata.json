@@ -108,6 +108,77 @@
     "ForeignKeyAction": {
       "type": "string",
       "enum": ["cascade", "set_null", "set_default", "restrict", "no_action"]
+    },
+    "SchemaDiffOp": {
+      "type": "string",
+      "enum": [
+        "create_table", "drop_table",
+        "add_column", "drop_column", "alter_column",
+        "add_index", "drop_index",
+        "add_foreign_key", "drop_foreign_key"
+      ],
+      "description": "一条原子结构变更动作。执行顺序由 SchemaDiffEntry.phase 决定，与本枚举声明顺序无关"
+    },
+    "DiffColumnFlag": {
+      "type": "string",
+      "enum": ["type", "nullability", "default", "auto_increment"],
+      "description": "alter_column 的改变维度，供 UI 分行展示"
+    },
+    "SchemaDiffEntry": {
+      "type": "object",
+      "required": ["id", "op", "phase", "table", "destructive", "selected", "reason"],
+      "properties": {
+        "id": { "type": "string", "description": "稳定标识 '{table小写}/{object小写}/{op}'，供 UI 记忆勾选状态" },
+        "op": { "$ref": "#/definitions/SchemaDiffOp" },
+        "phase": { "type": "integer", "description": "执行相位，小的先执行：drop_fk=10 drop_index=20 drop_column=30 drop_table=40 create_table=50 add_column=60 alter_column=70 add_index=80 add_fk=90" },
+        "table": { "type": "string", "description": "表名（新增/变更取目标侧原样大小写，删除取源侧）" },
+        "object": { "type": "string", "description": "列名/索引名/外键名；表级动作为空。无名外键/索引回落为内容签名" },
+        "from": { "type": ["string", "null"], "description": "变更前取值，语义随 op 而定" },
+        "to": { "type": ["string", "null"], "description": "变更后取值" },
+        "flags": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/DiffColumnFlag" },
+          "description": "仅 alter_column 使用；其余动作为空"
+        },
+        "destructive": { "type": "boolean", "description": "是否丢数据（四类删除动作）" },
+        "selected": { "type": "boolean", "description": "默认是否勾选：破坏性动作默认 false，除非 select_destructive" },
+        "reason": { "type": "string", "description": "人读原因；双实现必须逐字一致（由 test/schema-diff-vectors 锁定）" }
+      }
+    },
+    "SchemaDiffPlan": {
+      "type": "object",
+      "required": ["entries"],
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/SchemaDiffEntry" },
+          "description": "已按 (phase, table, object, id) 排序的可执行计划；同构时为空数组"
+        }
+      }
+    },
+    "SchemaDiffTarget": {
+      "type": "object",
+      "required": ["connection_id"],
+      "properties": {
+        "connection_id": { "$ref": "common.json#/definitions/ConnectionId" },
+        "schema": { "type": "string", "description": "缺省由服务端按数据库种类取默认 schema（SQLite 恒 'main'，见 behavior.md §14.5）" }
+      }
+    },
+    "SchemaDiffOptions": {
+      "type": "object",
+      "properties": {
+        "ignore_defaults": { "type": "boolean", "description": "忽略默认值差异（跨环境的序列/时间戳默认常属噪声）", "default": false },
+        "select_destructive": { "type": "boolean", "description": "破坏性动作是否默认勾选（须用户显式确认）", "default": false }
+      }
+    },
+    "SchemaDiffRequest": {
+      "type": "object",
+      "required": ["source", "target"],
+      "properties": {
+        "source": { "$ref": "#/definitions/SchemaDiffTarget", "description": "基准侧（要变成 target 的样子）" },
+        "target": { "$ref": "#/definitions/SchemaDiffTarget", "description": "期望侧" },
+        "options": { "$ref": "#/definitions/SchemaDiffOptions" }
+      }
     }
   }
 }
