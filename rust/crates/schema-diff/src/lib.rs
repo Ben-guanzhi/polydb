@@ -14,6 +14,13 @@
 
 mod normalize;
 
+pub mod ddl;
+
+pub use ddl::{
+    generate, select_entries, Script, Statement, W_ADD_COLUMN_LIMITS, W_AUTOINCREMENT,
+    W_CHECK_CONSTRAINTS, W_CREATE_TABLE, W_DROP_COLUMN_CHECK, W_GENERATED_COLUMNS,
+    W_REBUILD_NEW_NOT_NULL, W_TRIGGERS,
+};
 pub use normalize::{lower_ascii, normalize_default, normalize_type};
 
 use polydb_core::{
@@ -75,6 +82,22 @@ impl Op {
             self,
             Self::DropTable | Self::DropColumn | Self::DropIndex | Self::DropForeignKey
         )
+    }
+
+    /// 线路名 → op（`as_str` 的逆）；未知串返回 `None`，供回滚镜像等场景使用。
+    pub(crate) fn from_wire(s: &str) -> Option<Self> {
+        Some(match s {
+            "create_table" => Self::CreateTable,
+            "drop_table" => Self::DropTable,
+            "add_column" => Self::AddColumn,
+            "drop_column" => Self::DropColumn,
+            "alter_column" => Self::AlterColumn,
+            "add_index" => Self::AddIndex,
+            "drop_index" => Self::DropIndex,
+            "add_foreign_key" => Self::AddForeignKey,
+            "drop_foreign_key" => Self::DropForeignKey,
+            _ => return None,
+        })
     }
 }
 
@@ -201,7 +224,7 @@ fn join_lower(names: &[String]) -> String {
 }
 
 /// 索引列签名：按 `position` 升序取列名小写，逗号连接（忽略 ASC/DESC 与前缀长度）。
-fn index_sig(idx: &IndexInfo) -> String {
+pub(crate) fn index_sig(idx: &IndexInfo) -> String {
     let mut cols: Vec<&IndexColumn> = idx.columns.iter().collect();
     cols.sort_by_key(|c| (c.position, lower_ascii(&c.name)));
     cols.iter()
@@ -239,7 +262,7 @@ fn fk_object(fk: &ForeignKeyInfo) -> String {
     }
 }
 
-fn index_object(idx: &IndexInfo) -> String {
+pub(crate) fn index_object(idx: &IndexInfo) -> String {
     if idx.name.trim().is_empty() {
         format!("idx({})", index_sig(idx))
     } else {
@@ -254,7 +277,7 @@ fn is_view(t: &TableSnapshot) -> bool {
     )
 }
 
-fn table_map(snap: &Snapshot) -> BTreeMap<String, &TableSnapshot> {
+pub(crate) fn table_map(snap: &Snapshot) -> BTreeMap<String, &TableSnapshot> {
     let mut m = BTreeMap::new();
     for t in &snap.tables {
         if is_view(t) {
@@ -265,7 +288,7 @@ fn table_map(snap: &Snapshot) -> BTreeMap<String, &TableSnapshot> {
     m
 }
 
-fn column_map(t: &TableSnapshot) -> BTreeMap<String, &ColumnInfo> {
+pub(crate) fn column_map(t: &TableSnapshot) -> BTreeMap<String, &ColumnInfo> {
     let mut m = BTreeMap::new();
     for c in &t.columns {
         m.entry(lower_ascii(&c.name)).or_insert(c);
