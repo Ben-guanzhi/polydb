@@ -6,8 +6,8 @@ use parking_lot::Mutex;
 use rusqlite::Connection as RusqliteConnection;
 
 use polydb_core::{
-    ColumnInfo, CoreError, CoreResult, DatabaseKind, ForeignKeyInfo, IndexInfo, QueryResult,
-    ResultColumn, SchemaInfo, StatementType, TableInfo, TableType, Value,
+    ColumnInfo, CoreError, CoreResult, DatabaseKind, ForeignKeyAction, ForeignKeyInfo, IndexInfo,
+    QueryResult, ResultColumn, SchemaInfo, StatementType, TableInfo, TableType, Value,
 };
 use polydb_db_core::{DatabaseDriver, SqlDriver, TxMode};
 
@@ -50,6 +50,19 @@ fn arg_text(v: rusqlite::types::ValueRef) -> Option<String> {
         R::Integer(i) => i.to_string(),
         R::Real(f) => f.to_string(),
         R::Null => return None,
+    })
+}
+
+/// `PRAGMA foreign_key_list` 的 on_update/on_delete 是 SQL 文本（如 `NO ACTION`、
+/// `SET NULL`），未识别的值一律视为「无信息」而不是猜一个默认动作。
+fn fk_action(raw: &str) -> Option<ForeignKeyAction> {
+    Some(match raw.trim().to_ascii_uppercase().as_str() {
+        "CASCADE" => ForeignKeyAction::Cascade,
+        "SET NULL" => ForeignKeyAction::SetNull,
+        "SET DEFAULT" => ForeignKeyAction::SetDefault,
+        "RESTRICT" => ForeignKeyAction::Restrict,
+        "NO ACTION" => ForeignKeyAction::NoAction,
+        _ => return None,
     })
 }
 
@@ -446,13 +459,15 @@ impl SqlDriver for SqliteConn {
             .query_map([], |row| {
                 let name: String = row.get(1)?;
                 let unique: bool = row.get(2)?;
-                Ok((name, unique))
+                // origin：'pk' 主键隐式索引 / 'u' UNIQUE 约束 / 'c' CREATE INDEX。
+                let origin: Option<String> = row.get(3).ok();
+                Ok((name, unique, origin))
             })
             .map_err(|e| CoreError::Driver(format!("list_indexes query: {e}")))?;
 
         let mut result = Vec::new();
         for idx in indexes {
-            let (name, unique) = idx.map_err(|e| CoreError::Driver(format!("row: {e}")))?;
+            let (name, unique, origin) = idx.map_err(|e| CoreError::Driver(format!("row: {e}")))?;
             let mut info_stmt = conn
                 .prepare(&format!("PRAGMA index_info(\"{name}\")"))
                 .map_err(|e| CoreError::Driver(format!("index_info prepare: {e}")))?;
@@ -477,7 +492,7 @@ impl SqlDriver for SqliteConn {
             result.push(IndexInfo {
                 name,
                 unique,
-                primary: false,
+                primary: origin.as_deref() == Some("pk"),
                 index_type: None,
                 columns: idx_cols,
                 comment: None,
@@ -509,33 +524,38 @@ impl SqlDriver for SqliteConn {
             })
             .map_err(|e| CoreError::Driver(format!("fk query: {e}")))?;
 
-        use std::collections::HashMap;
-        let mut fk_map: HashMap<i32, (String, Vec<String>, Vec<String>, String, String)> =
-            HashMap::new();
+        use std::collections::BTreeMap;
+        // PRAGMA 的 id 是外键约束在表定义中的序号、seq 是多列内的次序，两者都必须按数值排。
+        // 原先用 HashMap 收集，同一次 DDL 的两次采集可能拿到不同的 fk_i 命名，
+        // 于是比对凭空产出一对 drop/add 外键（E2.0 真快照复核抓到）。
+        let mut agg: BTreeMap<i32, (String, Vec<(i32, String, String)>, String, String)> =
+            BTreeMap::new();
         for fk in fks {
-            let (id, _seq, ref_table, from, to, on_update, on_delete) =
+            let (id, seq, ref_table, from, to, on_update, on_delete) =
                 fk.map_err(|e| CoreError::Driver(format!("row: {e}")))?;
-            let entry = fk_map
+            let entry = agg
                 .entry(id)
-                .or_insert_with(|| (ref_table, Vec::new(), Vec::new(), on_update, on_delete));
-            entry.1.push(from);
-            entry.2.push(to);
+                .or_insert_with(|| (ref_table, Vec::new(), on_update, on_delete));
+            entry.1.push((seq, from, to));
         }
 
-        let result = fk_map
+        let result = agg
             .into_iter()
-            .enumerate()
-            .map(
-                |(i, (_id, (ref_table, cols, ref_cols, _on_update, _on_delete)))| ForeignKeyInfo {
-                    name: format!("fk_{i}"),
-                    columns: cols,
+            .map(|(_id, (ref_table, mut pairs, on_update, on_delete))| {
+                pairs.sort_by_key(|(seq, _, _)| *seq);
+                ForeignKeyInfo {
+                    // SQLite 的外键约束本来就没有名字（PRAGMA foreign_key_list 也不返回名字）。
+                    // 填任何合成名都会让「新增一条外键」把其余外键的编号整体错位，
+                    // 于是凭空产出一堆 drop/add 对。留空，由 diff 按内容配对。
+                    name: String::new(),
+                    columns: pairs.iter().map(|(_, from, _)| from.clone()).collect(),
                     referenced_schema: "main".to_string(),
                     referenced_table: ref_table,
-                    referenced_columns: ref_cols,
-                    on_update: None,
-                    on_delete: None,
-                },
-            )
+                    referenced_columns: pairs.iter().map(|(_, _, to)| to.clone()).collect(),
+                    on_update: fk_action(&on_update),
+                    on_delete: fk_action(&on_delete),
+                }
+            })
             .collect();
 
         Ok(result)

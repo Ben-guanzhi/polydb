@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -203,21 +204,21 @@ func (c *Conn) ListIndexes(ctx context.Context, schema, table string) ([]protoco
 	type idxMeta struct {
 		name   string
 		unique bool
+		origin string
 	}
 	var metas []idxMeta
 	for rows.Next() {
 		var seq int
 		var name string
 		var unique int
-		var origin string
-		var partial int // PRAGMA index_list 自 SQLite 3.8.9/3.8.11 起为 5 列（origin/partial）
+		// origin：'pk' 主键隐式索引 / 'u' UNIQUE 约束 / 'c' CREATE INDEX。老库可能为 NULL。
+		var origin sql.NullString
+		var partial sql.NullInt64 // PRAGMA index_list 自 SQLite 3.8.9/3.8.11 起为 5 列（origin/partial）
 		if err := rows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		_ = origin
-		_ = partial
-		metas = append(metas, idxMeta{name: name, unique: unique != 0})
+		metas = append(metas, idxMeta{name: name, unique: unique != 0, origin: origin.String})
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -231,7 +232,12 @@ func (c *Conn) ListIndexes(ctx context.Context, schema, table string) ([]protoco
 		if err != nil {
 			return nil, err
 		}
-		indexes = append(indexes, protocol.IndexInfo{Name: m.name, Unique: m.unique, Columns: cols})
+		indexes = append(indexes, protocol.IndexInfo{
+			Name:    m.name,
+			Unique:  m.unique,
+			Primary: m.origin == "pk",
+			Columns: cols,
+		})
 	}
 	return indexes, nil
 }
@@ -254,6 +260,24 @@ func (c *Conn) indexColumns(ctx context.Context, index string) ([]protocol.Index
 	return out, rows.Err()
 }
 
+// fkAction 把 PRAGMA foreign_key_list 的 SQL 文本动作映射为 DTO 枚举；
+// 未识别的值返回空串（=「无信息」），不猜默认动作。与 Rust 侧 fk_action 逐字对齐。
+func fkAction(raw string) protocol.ForeignKeyAction {
+	switch strings.ToUpper(strings.TrimSpace(raw)) {
+	case "CASCADE":
+		return protocol.FKActionCascade
+	case "SET NULL":
+		return protocol.FKActionSetNull
+	case "SET DEFAULT":
+		return protocol.FKActionSetDefault
+	case "RESTRICT":
+		return protocol.FKActionRestrict
+	case "NO ACTION":
+		return protocol.FKActionNoAction
+	}
+	return ""
+}
+
 func (c *Conn) ListForeignKeys(ctx context.Context, schema, table string) ([]protocol.ForeignKeyInfo, error) {
 	rows, err := c.db.QueryContext(ctx, fmt.Sprintf("PRAGMA foreign_key_list(%q)", table))
 	if err != nil {
@@ -261,9 +285,15 @@ func (c *Conn) ListForeignKeys(ctx context.Context, schema, table string) ([]pro
 	}
 	defer rows.Close()
 
+	type fkCol struct {
+		seq  int
+		from string
+		to   string
+	}
 	type fkAgg struct {
-		refTable string
-		from, to []string
+		refTable           string
+		cols               []fkCol
+		onUpdate, onDelete string
 	}
 	agg := map[int]*fkAgg{}
 	var order []int
@@ -277,24 +307,37 @@ func (c *Conn) ListForeignKeys(ctx context.Context, schema, table string) ([]pro
 		}
 		_ = match
 		if _, ok := agg[id]; !ok {
-			agg[id] = &fkAgg{refTable: refTable}
+			agg[id] = &fkAgg{refTable: refTable, onUpdate: onUpdate, onDelete: onDelete}
 			order = append(order, id)
 		}
-		agg[id].from = append(agg[id].from, from)
-		agg[id].to = append(agg[id].to, to)
+		agg[id].cols = append(agg[id].cols, fkCol{seq: seq, from: from, to: to})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	// 与 Rust 侧的 BTreeMap 对齐：外键按 PRAGMA id 升序，多列按 seq 升序。
+	sort.Ints(order)
 	var out = []protocol.ForeignKeyInfo{}
-	for i, id := range order {
+	for _, id := range order {
 		a := agg[id]
+		sort.SliceStable(a.cols, func(i, j int) bool { return a.cols[i].seq < a.cols[j].seq })
+		from := make([]string, 0, len(a.cols))
+		to := make([]string, 0, len(a.cols))
+		for _, col := range a.cols {
+			from = append(from, col.from)
+			to = append(to, col.to)
+		}
 		out = append(out, protocol.ForeignKeyInfo{
-			Name:              fmt.Sprintf("fk_%d", i),
-			Columns:           a.from,
-			ReferencedSchema:  schema,
+			// SQLite 的外键约束本来就没有名字（PRAGMA foreign_key_list 也不返回名字）。
+			// 填任何合成名都会让「新增一条外键」把其余外键的编号整体错位，
+			// 于是凭空产出一堆 drop/add 对。留空，由 diff 按内容配对。
+			Name:              "",
+			Columns:           from,
+			ReferencedSchema:  "main",
 			ReferencedTable:   a.refTable,
-			ReferencedColumns: a.to,
+			ReferencedColumns: to,
+			OnUpdate:          fkAction(a.onUpdate),
+			OnDelete:          fkAction(a.onDelete),
 		})
 	}
 	return out, nil

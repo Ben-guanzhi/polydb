@@ -17,3 +17,4 @@ regex = { workspace = true }
 
 [dev-dependencies]
 smol = { workspace = true }
+polydb-schema-diff = { workspace = true }
