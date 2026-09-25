@@ -4,6 +4,7 @@ members = [
     "crates/protocol",
     "crates/core",
     "crates/db-core",
+    "crates/schema-diff",
     "crates/storage",
     "crates/app-core",
     "crates/transport",
@@ -29,6 +30,7 @@ repository = "https://github.com/polydb/polydb"
 polydb-protocol = { path = "crates/protocol" }
 polydb-core = { path = "crates/core" }
 polydb-db-core = { path = "crates/db-core" }
+polydb-schema-diff = { path = "crates/schema-diff" }
 polydb-storage = { path = "crates/storage" }
 polydb-app-core = { path = "crates/app-core" }
 polydb-transport = { path = "crates/transport" }

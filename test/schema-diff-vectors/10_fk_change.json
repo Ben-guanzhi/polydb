@@ -1,0 +1,58 @@
+{
+  "name": "10_fk_change",
+  "note": "外键按名字匹配；引用表/引用列/ON DELETE 变化合并成一条原因，产出 drop_foreign_key(10) + add_foreign_key(90)",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "mysql",
+    "schema": "app",
+    "tables": [
+      {
+        "name": "orders",
+        "type": "table",
+        "columns": [
+          { "name": "user_id", "data_type": "int", "nullable": true, "ordinal_position": 1 }
+        ],
+        "indexes": [],
+        "foreign_keys": [
+          {
+            "name": "fk_user",
+            "columns": [ "user_id" ],
+            "referenced_schema": "",
+            "referenced_table": "users",
+            "referenced_columns": [ "id" ],
+            "on_delete": "no_action"
+          }
+        ]
+      }
+    ]
+  },
+  "target": {
+    "kind": "mysql",
+    "schema": "app",
+    "tables": [
+      {
+        "name": "orders",
+        "type": "table",
+        "columns": [
+          { "name": "user_id", "data_type": "int", "nullable": true, "ordinal_position": 1 }
+        ],
+        "indexes": [],
+        "foreign_keys": [
+          {
+            "name": "fk_user",
+            "columns": [ "user_id" ],
+            "referenced_schema": "app",
+            "referenced_table": "users",
+            "referenced_columns": [ "uid" ],
+            "on_delete": "cascade",
+            "on_update": "restrict"
+          }
+        ]
+      }
+    ]
+  },
+  "expected": [
+    {"id":"orders/fk_user/drop_foreign_key","op":"drop_foreign_key","phase":10,"table":"orders","object":"fk_user","destructive":true,"selected":false,"reason":"引用表 users → app/users；引用列 id → uid；ON DELETE no_action → cascade；ON UPDATE 无 → restrict"},
+    {"id":"orders/fk_user/add_foreign_key","op":"add_foreign_key","phase":90,"table":"orders","object":"fk_user","destructive":false,"selected":true,"reason":"引用表 users → app/users；引用列 id → uid；ON DELETE no_action → cascade；ON UPDATE 无 → restrict"}
+  ]
+}

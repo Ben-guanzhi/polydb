@@ -1,0 +1,51 @@
+{
+  "name": "08_index_rebuild",
+  "note": "非主键索引的列顺序与唯一性变化：成对产出 drop_index(20) + add_index(80)，原因用「；」拼接",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "postgres",
+    "schema": "public",
+    "tables": [
+      {
+        "name": "orders",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "integer", "nullable": false, "ordinal_position": 1 },
+          { "name": "user_id", "data_type": "integer", "nullable": false, "ordinal_position": 2 },
+          { "name": "created_at", "data_type": "timestamp", "nullable": true, "ordinal_position": 3 }
+        ],
+        "indexes": [
+          { "name": "idx_order_user", "unique": true, "columns": [ { "name": "user_id", "position": 1 }, { "name": "created_at", "position": 2 } ] },
+          { "name": "idx_gone", "unique": false, "columns": [ { "name": "id", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "postgres",
+    "schema": "public",
+    "tables": [
+      {
+        "name": "orders",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "integer", "nullable": false, "ordinal_position": 1 },
+          { "name": "user_id", "data_type": "integer", "nullable": false, "ordinal_position": 2 },
+          { "name": "created_at", "data_type": "timestamp", "nullable": true, "ordinal_position": 3 }
+        ],
+        "indexes": [
+          { "name": "idx_order_user", "unique": false, "columns": [ { "name": "created_at", "position": 1 }, { "name": "user_id", "position": 2 } ] },
+          { "name": "idx_new", "unique": false, "columns": [ { "name": "user_id", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "expected": [
+    {"id":"orders/idx_gone/drop_index","op":"drop_index","phase":20,"table":"orders","object":"idx_gone","destructive":true,"selected":false,"reason":"索引多余，需删除"},
+    {"id":"orders/idx_order_user/drop_index","op":"drop_index","phase":20,"table":"orders","object":"idx_order_user","destructive":true,"selected":false,"reason":"索引定义变化：user_id,created_at → created_at,user_id；唯一性 是 → 否"},
+    {"id":"orders/idx_new/add_index","op":"add_index","phase":80,"table":"orders","object":"idx_new","destructive":false,"selected":true,"reason":"索引缺失，需新增"},
+    {"id":"orders/idx_order_user/add_index","op":"add_index","phase":80,"table":"orders","object":"idx_order_user","destructive":false,"selected":true,"reason":"索引定义变化：user_id,created_at → created_at,user_id；唯一性 是 → 否"}
+  ]
+}

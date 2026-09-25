@@ -1,0 +1,42 @@
+{
+  "name": "04_mysql_type_width",
+  "note": "MySQL 显示宽度与 zerofill 属噪声：归一后必须完全一致（空计划）",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "mysql",
+    "schema": "app",
+    "tables": [
+      {
+        "name": "accounts",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INT(11) UNSIGNED ZEROFILL", "nullable": false, "ordinal_position": 1, "is_auto_increment": true },
+          { "name": "big", "data_type": "bigint(20)", "nullable": true, "ordinal_position": 2 },
+          { "name": "amount", "data_type": "decimal(10, 2)", "nullable": true, "ordinal_position": 3 },
+          { "name": "code", "data_type": "varchar(11)", "nullable": true, "ordinal_position": 4 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "mysql",
+    "schema": "app",
+    "tables": [
+      {
+        "name": "accounts",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "int unsigned", "nullable": false, "ordinal_position": 1, "is_auto_increment": true },
+          { "name": "big", "data_type": "BIGINT", "nullable": true, "ordinal_position": 2 },
+          { "name": "amount", "data_type": "DECIMAL(10,2)", "nullable": true, "ordinal_position": 3 },
+          { "name": "code", "data_type": "varchar(11)", "nullable": true, "ordinal_position": 4 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "expected": []
+}

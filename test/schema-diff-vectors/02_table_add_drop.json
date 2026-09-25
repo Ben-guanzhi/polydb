@@ -1,0 +1,25 @@
+{
+  "name": "02_table_add_drop",
+  "note": "表级增删：先 drop_table(40) 再 create_table(50)；破坏性动作默认不勾选",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "postgres",
+    "schema": "public",
+    "tables": [
+      { "name": "users", "type": "table", "columns": [ { "name": "id", "data_type": "integer", "nullable": false, "ordinal_position": 1 } ], "indexes": [], "foreign_keys": [] },
+      { "name": "legacy_audit", "type": "table", "columns": [ { "name": "id", "data_type": "integer", "nullable": false, "ordinal_position": 1 } ], "indexes": [], "foreign_keys": [] }
+    ]
+  },
+  "target": {
+    "kind": "postgres",
+    "schema": "public",
+    "tables": [
+      { "name": "users", "type": "table", "columns": [ { "name": "id", "data_type": "integer", "nullable": false, "ordinal_position": 1 } ], "indexes": [], "foreign_keys": [] },
+      { "name": "orders", "type": "table", "columns": [ { "name": "id", "data_type": "integer", "nullable": false, "ordinal_position": 1 } ], "indexes": [], "foreign_keys": [] }
+    ]
+  },
+  "expected": [
+    {"id":"legacy_audit//drop_table","op":"drop_table","phase":40,"table":"legacy_audit","destructive":true,"selected":false,"reason":"表中多余，需删除"},
+    {"id":"orders//create_table","op":"create_table","phase":50,"table":"orders","destructive":false,"selected":true,"reason":"表中缺失，需新建"}
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "name": "15_cross_kind_error",
+  "note": "跨种类比对：v1 直接报错而非猜测等价类型（generic_type 归一是 v2 前置）",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "error_code": "POLYDB_ERR_NOT_SUPPORTED",
+  "error_message": "跨种类比对未支持：sqlite vs mysql（v1 只比同一种数据库）",
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      { "name": "t", "type": "table", "columns": [ { "name": "id", "data_type": "integer", "nullable": false, "ordinal_position": 1 } ], "indexes": [], "foreign_keys": [] }
+    ]
+  },
+  "target": {
+    "kind": "mysql",
+    "schema": "app",
+    "tables": [
+      { "name": "t", "type": "table", "columns": [ { "name": "id", "data_type": "int", "nullable": false, "ordinal_position": 1 } ], "indexes": [], "foreign_keys": [] }
+    ]
+  },
+  "expected": []
+}

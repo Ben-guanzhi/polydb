@@ -1,0 +1,40 @@
+{
+  "name": "11_case_insensitive_match",
+  "note": "标识符按小写匹配：MySQL lower_case_table_names / PG 折叠 / Oracle 大写不得造成删+建误判",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "mysql",
+    "schema": "app",
+    "tables": [
+      {
+        "name": "UserAccounts",
+        "type": "table",
+        "columns": [
+          { "name": "ID", "data_type": "INT", "nullable": false, "ordinal_position": 1 }
+        ],
+        "indexes": [
+          { "name": "IDX_ACCT_ID", "unique": true, "primary": false, "columns": [ { "name": "ID", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "mysql",
+    "schema": "app",
+    "tables": [
+      {
+        "name": "useraccounts",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "int", "nullable": false, "ordinal_position": 1 }
+        ],
+        "indexes": [
+          { "name": "idx_acct_id", "unique": true, "primary": false, "columns": [ { "name": "id", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "expected": []
+}

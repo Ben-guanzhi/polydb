@@ -1,0 +1,45 @@
+{
+  "name": "09_pk_change",
+  "note": "主键列变化：按 primary 标志匹配（不比索引名），产出重建对；对象名各取本侧索引名",
+  "options": { "ignore_defaults": false, "select_destructive": true },
+  "source": {
+    "kind": "mysql",
+    "schema": "app",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "a", "data_type": "int", "nullable": false, "ordinal_position": 1 },
+          { "name": "b", "data_type": "int", "nullable": false, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "PRIMARY", "unique": true, "primary": true, "columns": [ { "name": "a", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "mysql",
+    "schema": "app",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "a", "data_type": "int", "nullable": false, "ordinal_position": 1 },
+          { "name": "b", "data_type": "int", "nullable": false, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "PRIMARY", "unique": true, "primary": true, "columns": [ { "name": "b", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "expected": [
+    {"id":"t/primary/drop_index","op":"drop_index","phase":20,"table":"t","object":"PRIMARY","destructive":true,"selected":true,"reason":"主键列变化，需重建"},
+    {"id":"t/primary/add_index","op":"add_index","phase":80,"table":"t","object":"PRIMARY","destructive":false,"selected":true,"reason":"主键列变化，需重建"}
+  ]
+}

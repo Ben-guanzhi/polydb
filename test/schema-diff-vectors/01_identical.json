@@ -1,0 +1,42 @@
+{
+  "name": "01_identical",
+  "note": "两侧完全一致：必须产出空计划（连相位都不参与）",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "postgres",
+    "schema": "public",
+    "tables": [
+      {
+        "name": "users",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "integer", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "email", "data_type": "character varying(100)", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "users_pkey", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "postgres",
+    "schema": "public",
+    "tables": [
+      {
+        "name": "users",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "email", "data_type": "  CHARACTER   VARYING ( 100 )", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "users_pkey", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "expected": []
+}

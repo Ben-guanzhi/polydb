@@ -1,0 +1,18 @@
+{
+  "name": "16_redis_error",
+  "note": "Redis 无模式概念：任一侧为 Redis 即拒绝比对",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "error_code": "POLYDB_ERR_NOT_SUPPORTED",
+  "error_message": "Redis 无模式概念，不参与结构比对",
+  "source": {
+    "kind": "redis",
+    "schema": "0",
+    "tables": []
+  },
+  "target": {
+    "kind": "redis",
+    "schema": "1",
+    "tables": []
+  },
+  "expected": []
+}

@@ -1,0 +1,38 @@
+{
+  "name": "05_type_nullability_autoincrement",
+  "note": "同一列的多处差异合并成一条 alter_column，flags 与 reason 顺序固定：类型→可空性→默认值→自增",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "postgres",
+    "schema": "public",
+    "tables": [
+      {
+        "name": "users",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "integer", "nullable": true, "ordinal_position": 1, "is_auto_increment": false }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "postgres",
+    "schema": "public",
+    "tables": [
+      {
+        "name": "users",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "bigint", "nullable": false, "ordinal_position": 1, "is_auto_increment": true }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "expected": [
+    {"id":"users/id/alter_column","op":"alter_column","phase":70,"table":"users","object":"id","from":"integer","to":"bigint","flags":["type","nullability","auto_increment"],"destructive":false,"selected":true,"reason":"类型 integer → bigint；可空性 NULL → NOT NULL；自增 否 → 是"}
+  ]
+}

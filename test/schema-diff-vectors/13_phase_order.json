@@ -1,0 +1,58 @@
+{
+  "name": "13_phase_order",
+  "note": "一张表上同时存在七类动作：断言执行相位全序 10<20<30<60<70<80<90",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "integer", "nullable": false, "ordinal_position": 1 },
+          { "name": "gone", "data_type": "text", "nullable": true, "ordinal_position": 2 },
+          { "name": "mutable", "data_type": "text", "nullable": true, "ordinal_position": 3 }
+        ],
+        "indexes": [
+          { "name": "idx_gone", "unique": false, "columns": [ { "name": "gone", "position": 1 } ] }
+        ],
+        "foreign_keys": [
+          { "name": "fk_gone", "columns": [ "gone" ], "referenced_schema": "", "referenced_table": "other", "referenced_columns": [ "id" ] }
+        ]
+      },
+      { "name": "other", "type": "table", "columns": [ { "name": "id", "data_type": "integer", "nullable": false, "ordinal_position": 1 } ], "indexes": [], "foreign_keys": [] }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "integer", "nullable": false, "ordinal_position": 1 },
+          { "name": "mutable", "data_type": "text", "nullable": false, "ordinal_position": 3 },
+          { "name": "added", "data_type": "text", "nullable": true, "ordinal_position": 4 }
+        ],
+        "indexes": [
+          { "name": "idx_added", "unique": false, "columns": [ { "name": "added", "position": 1 } ] }
+        ],
+        "foreign_keys": [
+          { "name": "fk_added", "columns": [ "added" ], "referenced_schema": "", "referenced_table": "other", "referenced_columns": [ "id" ] }
+        ]
+      },
+      { "name": "other", "type": "table", "columns": [ { "name": "id", "data_type": "integer", "nullable": false, "ordinal_position": 1 } ], "indexes": [], "foreign_keys": [] }
+    ]
+  },
+  "expected": [
+    {"id":"t/fk_gone/drop_foreign_key","op":"drop_foreign_key","phase":10,"table":"t","object":"fk_gone","destructive":true,"selected":false,"reason":"外键多余，需删除"},
+    {"id":"t/idx_gone/drop_index","op":"drop_index","phase":20,"table":"t","object":"idx_gone","destructive":true,"selected":false,"reason":"索引多余，需删除"},
+    {"id":"t/gone/drop_column","op":"drop_column","phase":30,"table":"t","object":"gone","from":"text","destructive":true,"selected":false,"reason":"列多余，需删除"},
+    {"id":"t/added/add_column","op":"add_column","phase":60,"table":"t","object":"added","to":"text","destructive":false,"selected":true,"reason":"列缺失，需新增"},
+    {"id":"t/mutable/alter_column","op":"alter_column","phase":70,"table":"t","object":"mutable","from":"text","to":"text","flags":["nullability"],"destructive":false,"selected":true,"reason":"可空性 NULL → NOT NULL"},
+    {"id":"t/idx_added/add_index","op":"add_index","phase":80,"table":"t","object":"idx_added","destructive":false,"selected":true,"reason":"索引缺失，需新增"},
+    {"id":"t/fk_added/add_foreign_key","op":"add_foreign_key","phase":90,"table":"t","object":"fk_added","destructive":false,"selected":true,"reason":"外键缺失，需新增"}
+  ]
+}

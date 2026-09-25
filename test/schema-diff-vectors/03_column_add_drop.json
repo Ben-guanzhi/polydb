@@ -1,0 +1,41 @@
+{
+  "name": "03_column_add_drop",
+  "note": "同表内列的增与删；from/to 携带归一后的类型字面量",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "postgres",
+    "schema": "public",
+    "tables": [
+      {
+        "name": "users",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "integer", "nullable": false, "ordinal_position": 1 },
+          { "name": "tmp_flag", "data_type": "boolean", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "postgres",
+    "schema": "public",
+    "tables": [
+      {
+        "name": "users",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "integer", "nullable": false, "ordinal_position": 1 },
+          { "name": "full_name", "data_type": "TEXT", "nullable": false, "ordinal_position": 2 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "expected": [
+    {"id":"users/tmp_flag/drop_column","op":"drop_column","phase":30,"table":"users","object":"tmp_flag","from":"boolean","destructive":true,"selected":false,"reason":"列多余，需删除"},
+    {"id":"users/full_name/add_column","op":"add_column","phase":60,"table":"users","object":"full_name","to":"text","destructive":false,"selected":true,"reason":"列缺失，需新增"}
+  ]
+}

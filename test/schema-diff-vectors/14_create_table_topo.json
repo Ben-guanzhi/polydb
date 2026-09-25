@@ -1,0 +1,39 @@
+{
+  "name": "14_create_table_topo",
+  "note": "新建表之间的外键依赖拓扑：orders 名字序在前但依赖 users，必须 users 先建",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "postgres",
+    "schema": "public",
+    "tables": []
+  },
+  "target": {
+    "kind": "postgres",
+    "schema": "public",
+    "tables": [
+      {
+        "name": "orders",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "integer", "nullable": false, "ordinal_position": 1 },
+          { "name": "user_id", "data_type": "integer", "nullable": false, "ordinal_position": 2 }
+        ],
+        "indexes": [],
+        "foreign_keys": [
+          { "name": "fk_orders_user", "columns": [ "user_id" ], "referenced_schema": "public", "referenced_table": "users", "referenced_columns": [ "id" ], "on_delete": "cascade" }
+        ]
+      },
+      {
+        "name": "users",
+        "type": "table",
+        "columns": [ { "name": "id", "data_type": "integer", "nullable": false, "ordinal_position": 1 } ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "expected": [
+    {"id":"users//create_table","op":"create_table","phase":50,"table":"users","destructive":false,"selected":true,"reason":"表中缺失，需新建"},
+    {"id":"orders//create_table","op":"create_table","phase":50,"table":"orders","destructive":false,"selected":true,"reason":"表中缺失，需新建"}
+  ]
+}

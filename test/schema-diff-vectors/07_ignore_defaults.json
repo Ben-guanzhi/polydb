@@ -1,0 +1,36 @@
+{
+  "name": "07_ignore_defaults",
+  "note": "打开 ignore_defaults 后，只差默认值的列不再产出变更",
+  "options": { "ignore_defaults": true, "select_destructive": false },
+  "source": {
+    "kind": "mysql",
+    "schema": "app",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "status", "data_type": "varchar(16)", "nullable": false, "ordinal_position": 1, "default_value": "'draft'" }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "mysql",
+    "schema": "app",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "status", "data_type": "varchar(16)", "nullable": false, "ordinal_position": 1, "default_value": "'new'" }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "expected": []
+}

@@ -1,0 +1,25 @@
+{
+  "name": "12_views_skipped",
+  "note": "视图/物化视图 v1 不参与比对：mv_active_users 只出现在目标侧也不产变更。但源侧是视图、目标侧是同名表时，仍按缺失表产出 create_table（执行期由数据库报错兜底）——这是有意的不猜语义",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "postgres",
+    "schema": "public",
+    "tables": [
+      { "name": "v_active_users", "type": "view", "columns": [ { "name": "id", "data_type": "integer", "nullable": false, "ordinal_position": 1 } ], "indexes": [], "foreign_keys": [] },
+      { "name": "t", "type": "table", "columns": [ { "name": "id", "data_type": "integer", "nullable": false, "ordinal_position": 1 } ], "indexes": [], "foreign_keys": [] }
+    ]
+  },
+  "target": {
+    "kind": "postgres",
+    "schema": "public",
+    "tables": [
+      { "name": "v_active_users", "type": "table", "columns": [ { "name": "id", "data_type": "integer", "nullable": false, "ordinal_position": 1 } ], "indexes": [], "foreign_keys": [] },
+      { "name": "mv_active_users", "type": "materialized_view", "columns": [ { "name": "id", "data_type": "integer", "nullable": false, "ordinal_position": 1 } ], "indexes": [], "foreign_keys": [] },
+      { "name": "t", "type": "table", "columns": [ { "name": "id", "data_type": "integer", "nullable": false, "ordinal_position": 1 } ], "indexes": [], "foreign_keys": [] }
+    ]
+  },
+  "expected": [
+    {"id":"v_active_users//create_table","op":"create_table","phase":50,"table":"v_active_users","destructive":false,"selected":true,"reason":"表中缺失，需新建"}
+  ]
+}

@@ -1,0 +1,12 @@
+[package]
+name = "polydb-schema-diff"
+version.workspace = true
+edition.workspace = true
+description = "PolyDB schema compare pure functions (diff + type/default normalization)"
+
+[dependencies]
+polydb-core = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

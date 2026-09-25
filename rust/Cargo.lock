@@ -4981,6 +4981,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "polydb-schema-diff"
+version = "0.1.0"
+dependencies = [
+ "polydb-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "polydb-server"
 version = "0.1.0"
 dependencies = [

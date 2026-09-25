@@ -1,0 +1,42 @@
+{
+  "name": "06_default_normalize",
+  "note": "默认值噪声（外层括号、尾部 ::type 投射、NULL 字面量、引号外大小写）不产差异；真实差异才产 default 标记",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "postgres",
+    "schema": "public",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "a", "data_type": "text", "nullable": true, "ordinal_position": 1, "default_value": "'0'::character varying" },
+          { "name": "b", "data_type": "integer", "nullable": true, "ordinal_position": 2, "default_value": "1" },
+          { "name": "c", "data_type": "text", "nullable": true, "ordinal_position": 3, "default_value": "NULL" }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "postgres",
+    "schema": "public",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "a", "data_type": "text", "nullable": true, "ordinal_position": 1, "default_value": "(('0'))" },
+          { "name": "b", "data_type": "integer", "nullable": true, "ordinal_position": 2, "default_value": "2" },
+          { "name": "c", "data_type": "text", "nullable": true, "ordinal_position": 3 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "expected": [
+    {"id":"t/b/alter_column","op":"alter_column","phase":70,"table":"t","object":"b","from":"integer","to":"integer","flags":["default"],"destructive":false,"selected":true,"reason":"默认值 1 → 2"}
+  ]
+}
