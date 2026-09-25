@@ -2,7 +2,8 @@
 
 > 状态：**E1 已落地（2026-09-25，纯函数层双实现 + 共享向量对拍）**；**E2.0 真快照复核已落地（2026-09-25，
 > SQLite 真引擎采快照喂 diff，抓到 3 个驱动缺陷并双端修复，见附录 A.9）**；**E2 主体已落地（2026-09-25，
-> spec 7 个 DTO + `POST /api/schema/diff` 双端端点 + 契约 SQLite 两文件真跑，见附录 A.10）**；E3–E5 未开工。
+> spec 7 个 DTO + `POST /api/schema/diff` 双端端点 + 契约 SQLite 两文件真跑，见附录 A.10）**；
+> **E3.0 SQLite DDL 取证已落地（2026-09-25，附录 A.11 G1–G9）**；E3 生成器与 E4–E5 未开工。
 > 从 `docs/plan-ui-tablepro-phase3.md` §阶段 D「仍不排期」四件中提出单列。
 > 许可红线不变：TablePro / TableProGo 均为 AGPLv3，**只借鉴交互语义，不移植任何代码**。
 > 架构红线不变：前端不 import driver；core/protocol 无 IO；driver 无 UI 假设；数据面 msgpack；
@@ -44,6 +45,7 @@ MySQL 的 `app_dev` vs `app_prod`），列出表/列/索引/外键四类对象�
 | E2.0 真快照复核 | ✅ 实际 687 行测试（Rust 368 + Go 319）+ 驱动净改 103 行（Rust +44/−24、Go +59/−16） | 零 spec 变更；抓出 3 个驱动缺陷（附录 A.9 F1–F3） |
 | E2 spec DTO + 两端端点 + 契约 | ✅ 实际 spec +187（metadata 71 / openapi 28 / behavior §14 88）、Rust +336/−5、Go +329、契约 +353 | 唯一需要 spec 变更的批次；`/api/schema/ddl` 与 `ddl_in_tx` 推迟到 E3（见 §5） |
 | E3 DDL 生成器补全 | Rust/Go 各 ~350 行 + 单测（**D1 定案后落在服务端**，前端只渲染脚本） | 含 ALTER COLUMN 三态、CREATE/DROP TABLE、顺序依赖与回滚脚本 |
+| E3.0 SQLite DDL 取证 | ✅ 实际 0 行产品代码（纯探测）+ 附录 A.11 G1–G9 | 测出"重建会级联删子表数据""PRAGMA 在事务内是 no-op"两条数据丢失级事实 |
 | E4 Web 向导 | ~700 行（四步 + 预览 + 状态持久化） | 体量参照 M30 导入向导的 1/3 |
 | E5 GUI + TUI 收敛形态 + 文档 | GPUI ~400 行、TUI ~350 行 | 渲染无法无头验证（§7） |
 | 合计 | **约 4.3k 行**（含测试） | 体量参照：约等于当前整个 `rust/crates/ui-gui`（10,048 行）的 43% |
@@ -133,8 +135,18 @@ E2 实际落地（2026-09-25）：
   PG/MySQL/MSSQL/Oracle 与 Redis 按既有 `connected:false` soft-skip）。
   验收门禁全绿，落地实况见附录 A.10。本批只交付 **1 个端点**（`/api/schema/diff`）；
   `/api/schema/ddl` 与 `ddl_in_tx` 能力行推迟到 E3（§5.6）。
-- **E3 语句生成**：在服务端补齐生成器（ALTER COLUMN 的类型/可空/默认三态、CREATE/DROP TABLE、
-  依赖排序、回滚脚本），Web 现成的 `alterSql.ts` 继续服务结构编辑器，**不作为 diff 的出口**
+- **E3.0 SQLite DDL 取证** ✅（2026-09-25）：不写产品代码，先用两端 bundled 真引擎把
+  `DROP COLUMN` 限制、表重建的触发器/级联删除行为、`PRAGMA foreign_keys` 的事务内 no-op、
+  `ddl_in_tx` 真值全部测出来（附录 A.11 G1–G9）。
+- **E3 语句生成（只 SQLite）**：在服务端把计划变成有序脚本（ALTER COLUMN 的类型/可空/默认三态、
+  CREATE/DROP TABLE、依赖排序、回滚脚本）。**已定（2026-09-25）三条**：
+  ① 只覆盖 SQLite，PG/MySQL/MSSQL/Oracle 显式 `NOT_SUPPORTED`（它们的 `on_update`/`on_delete`
+  与 `generic_type` 都还没填，diff 本就比不出差异，先写 5 套语法等于再造"看起来已实现"）；
+  ② 回滚进 v1，用"源/目标互换反向生成"复用同一套规则（§8-2）；
+  ③ `/api/schema/ddl` 入参回传 `source`/`target`/`options` + `selected` 条目 id，服务端**重算**
+  diff——因为 `SchemaDiffEntry` 线路上只有 `from`/`to` 字符串，**不足以生成 DDL**
+  （`add_column` 要完整列定义、`create_table` 要全部列），把定义塞进线路 DTO 会让 diff 响应背上这堆字段。
+  Web 现成的 `alterSql.ts` 继续服务结构编辑器，**不作为 diff 的出口**
   （避免同一个方言规则存在两套真相源）。
 - **E4 Web 向导**：四步（选源 → 选目标 → 差异预览 → 脚本/应用），复用导入向导的
   `Step` 联合类型 + `polydb.<feature>.v1` localStorage 命名 + busy 门禁 + 失败详情展示惯例。
@@ -155,8 +167,13 @@ E2 实际落地（2026-09-25）：
 
 1. ~~D1 选推荐（服务端）还是备选（三端各自实现）？~~ **已定：服务端一处**（2026-09-25），
    E3 的语句生成因此同样落在服务端（两端各一套 + 契约对拍），前端不自带方言规则。
-2. 是否需要"生成回滚脚本"进 v1？（D4 依赖它，成本约 +400 行）
+2. ~~是否需要"生成回滚脚本"进 v1？~~ **已定（2026-09-25）：进 v1**，实现方式是**同一批勾选条目把
+   源/目标互换再走一次生成器**（不新写第二套规则，成本从 +400 行降到响应多一个字段 + 一次互换调用）。
+   代价：数据类动作（`drop_table`/`drop_column`/类型收窄）**DDL 找不回数据**，必须逐条标
+   `non_reversible`（判定规则见附录 A.11 第 5 条），回滚脚本里带显式警告。
 3. `generic_type` 的归一命名表由谁定：以 PG 命名为准、还是自创中立名（`int64`/`text`/`timestamp`…）？
+   **E3 不需要答案**——本轮生成器只覆盖 SQLite，语句直接渲染驱动原 `data_type` 文本；
+   该项与 §8-7 绑定，等有可实测的方言实例再定。
 4. 差异条目里"仅目标库存在"要不要包含**数据不可逆**提示（drop column 会丢数据）——建议 v1 强制红标 + 默认不勾选。
 5. 表数上限：GUI 现有整 schema 外键扫描硬上限 200 表（`ui-gui/src/app.rs:2505-2529`），diff 场景动辄上千表，要不要在 E2 一并放宽/分页？
 6. ~~**SQLite 的比对形态**~~ **已定（2026-09-25）：只做"两个连接 / 两个文件"**，SQLite 的 `schema` 参数固定 `main`。
@@ -406,3 +423,37 @@ Web `tsc --noEmit` clean + vitest **141 passed**；契约全量 **20 顶层 / 50
 3. 四方言的 `on_update`/`on_delete`、`generic_type` 仍未填（§8-7 已定随 E3 补）。
 4. 跨种类比对（如 SQLite vs PG）在纯函数层直接报错，服务端未单独测该分支的线路错误码。
 5. 视图（`TableType::View`）在采集时跳过，"两端都跳过同一张视图"这一条只有单测覆盖，无真实例验证。
+
+### A.11 E3.0 SQLite DDL 取证（2026-09-25，本附录是 E3.1/E3.2 的输入规格）
+
+E3 的语句生成器只覆盖 SQLite（§8 已定），所以先把 SQLite 的 DDL 现实**测出来**再写代码。
+探测手段：`go run ./cmd/polydb-cli -db <file> -e "<SQL>"`（同一文件多次/单次多语句）。
+
+| # | 实测结论 | 证据 | 对生成器的约束 |
+|---|---|---|---|
+| G1 | 两端 bundled SQLite 都 **≥ 3.35** | Go modernc **3.53.4**（`SELECT sqlite_version()`）；Rust rusqlite（libsqlite3-sys 0.30.1）bundled **3.46.0** | `ALTER TABLE … DROP COLUMN` 两端可用，不必退回重建 |
+| G2 | `DROP COLUMN` 有四条硬限制 | 被索引引用 → `error in index ix_t_note after drop column: no such column: note`；被生成列表达式引用 → `error in table t after drop column: no such column: s`；主键列 → `cannot drop PRIMARY KEY column: "id"`；**被 CHECK 引用的列 → 直接成功，CHECK 一并消失** | 主键/索引两种情况能从快照预判 ⇒ 转重建；CHECK 那条是静默改语义，只能靠警告 |
+| G3 | **生成列在快照里是瞎的** | `sl INTEGER GENERATED ALWAYS AS (length(s)) VIRTUAL` 在 `sqlite_master.sql` 里可见，但 `PRAGMA table_info` 不标注它是生成列 ⇒ `ColumnInfo` 拿不到 | 按快照重建会把生成列**悄悄变成普通列** ⇒ 重建必须挂固定警告 |
+| G4 | **重建连带丢触发器** | probe2：重建前 sqlite_master 有 5 个对象（含 `tr_t`），重建后 **4 个** | 同上，警告文案要点名"触发器" |
+| G5 | **FK 开着时重建被引用的父表 = 级联删子表数据** | A/B 同一序列：FK 全程 ON → 子表 `c` 从 1 行变 **0 行**；把 `PRAGMA foreign_keys=OFF` 放在**同一连接、事务之外** → 子表 **1 行保住** | 含重建的脚本**必须**首尾切 PRAGMA |
+| G6 | **`PRAGMA foreign_keys` 在事务内是 no-op** | `BEGIN; PRAGMA foreign_keys=OFF; COMMIT; PRAGMA foreign_keys` → 仍为 **1** | "整脚本包进一个事务"的常规做法会让 G5 的保护失效 ⇒ 响应必须告诉应用方"首尾两条要留在事务外" |
+| G7 | SQLite 的 **DDL 可以在事务里** | `BEGIN; CREATE TABLE yy(…); INSERT …; COMMIT; SELECT` 正常返回 | 本方言 `ddl_in_tx = true` 是**实测值**，不是文档推测 |
+| G8 | 两端连接默认 **FK=ON** 且**单连接实例** | `go/pkg/dbsqlite/dbsqlite.go:29,35`（`SetMaxOpenConns(1)` + `PRAGMA foreign_keys=ON`）、`rust/crates/db-sqlite/src/driver.rs:79`（`execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON")`） | 脚本首尾的 PRAGMA 在同一次应用里确实作用在同一连接上（否则 G5 无法成立） |
+| G9 | 探测方法学的坑 | **polydb-cli 每次调用都是新连接**：第一条调用里的 `PRAGMA foreign_keys=OFF` 对第二条调用毫无影响 ⇒ 我第一轮 A/B 得到了假阳性 | 凡是 per-connection 的断言，必须在**单次多语句调用**内跑完 |
+
+**由取证导出的 E3 规则**（E3.1/E3.2 实现、E3.3 语料、§15 文案都以此为准）：
+
+1. 直改：`create_table` / `drop_table` / `add_column` / `add_index` / `drop_index`。
+2. **恒走重建**：`alter_column` / `add_foreign_key` / `drop_foreign_key`（SQLite 无 `ALTER COLUMN`、
+   无 `ADD/DROP CONSTRAINT`）。
+3. `drop_column`：该列是主键、或出现在任一索引里 ⇒ 转重建；否则直改。生成列依赖判不出来（G3），
+   留给执行期报错，脚本带警告。
+4. 脚本含重建时，首条 `PRAGMA foreign_keys=OFF;`、末条 `PRAGMA foreign_keys=ON;`，
+   并在响应里置 `pragmas_outside_tx = true`（G5 + G6）。**脚本自身不含 `BEGIN`/`COMMIT`**——
+   事务由既有的 `/api/transactions` 负责，SQLite 的 `ddl_in_tx` 为 `true`（G7）。
+5. 不可逆判定：`drop_table`、`drop_column` 恒不可逆；`alter_column` 当 `flags` 含 `type` 或
+   `nullability` 时不可逆，仅 `default` 可逆；其余可逆。
+6. 每条重建附固定警告（触发器丢失 / 生成列退化为普通列 / CHECK 不保留），逐字文案进 behavior.md §15。
+
+**E3.0 未验证**：G2/G5 只在 Go 侧引擎上复现过，rusqlite 侧由 E3.7 的契约真跑兜底；
+视图对重建表的依赖行为未测（SQLite 视图按名字解析，预期不破，但没证据就不写进规则）。
