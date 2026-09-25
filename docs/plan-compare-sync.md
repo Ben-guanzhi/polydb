@@ -3,7 +3,8 @@
 > 状态：**E1 已落地（2026-09-25，纯函数层双实现 + 共享向量对拍）**；**E2.0 真快照复核已落地（2026-09-25，
 > SQLite 真引擎采快照喂 diff，抓到 3 个驱动缺陷并双端修复，见附录 A.9）**；**E2 主体已落地（2026-09-25，
 > spec 7 个 DTO + `POST /api/schema/diff` 双端端点 + 契约 SQLite 两文件真跑，见附录 A.10）**；
-> **E3.0 SQLite DDL 取证已落地（2026-09-25，附录 A.11 G1–G9）**；E3 生成器与 E4–E5 未开工。
+> **E3.0 SQLite DDL 取证已落地（2026-09-25，附录 A.11 G1–G9）**；**E3 生成器与 `/api/schema/ddl` 双端已落地
+> （2026-09-25，附录 A.12）**；**E4 Web 向导已落地（2026-09-26，纯前端零 spec 变更，附录 A.13）**；E5 未开工。
 > 从 `docs/plan-ui-tablepro-phase3.md` §阶段 D「仍不排期」四件中提出单列。
 > 许可红线不变：TablePro / TableProGo 均为 AGPLv3，**只借鉴交互语义，不移植任何代码**。
 > 架构红线不变：前端不 import driver；core/protocol 无 IO；driver 无 UI 假设；数据面 msgpack；
@@ -48,9 +49,9 @@ MySQL 的 `app_dev` vs `app_prod`），列出表/列/索引/外键四类对象�
 | E3.1/E3.2 DDL 生成器（纯函数，只 SQLite） | ✅ 实际 3293 行插入：Rust `ddl.rs` 1706 + Go `ddl.go` 863 + Go 单测 697 + lib 接线 | 直改/重建两路 + 依赖排序 + 回滚 + 勾选守卫，全部在语句层，不碰连接 |
 | E3.3 共享 DDL 语料 | ✅ 实际 2796 行插入：23 份语料 + 双端加载器（Rust 182 / Go 375） | 跑完整管线 diff→SelectEntries→Generate，逐字段对拍；覆盖度是断言 |
 | E3.4–E3.7 协议 + 两端端点 + 契约 | ✅ 实际 1206 行插入：spec 212（metadata 52 / openapi 28 / behavior §15 132）+ 生成 TS 37、Rust 266、Go 283、契约 408 | `/api/schema/ddl` 已进 spec；契约真跑覆盖「应用后收敛 + 回滚复原 + 子表行数不丢」 |
-| E4 Web 向导 | ~700 行（四步 + 预览 + 状态持久化） | 体量参照 M30 导入向导的 1/3 |
+| E4 Web 向导 | ~700 行（四步 + 预览 + 状态持久化） | ✅ 实际 **1228 行**：新建 1132（纯函数 262 + 单测 184 + 组件 686）+ 5 个改动文件 +96/−4。比预估超 1.75×，多出来的是执行编排的三种分派与整组勾选补齐；零 spec 变更、零后端改动（附录 A.13） |
 | E5 GUI + TUI 收敛形态 + 文档 | GPUI ~400 行、TUI ~350 行 | 渲染无法无头验证（§7） |
-| 合计 | 预估 **约 4.3k 行**（含测试）；**E1–E3 实际已 12.9k**（上表 ✅ 行之和） | 超估的原因是共享语料：向量本身即测试资产，一份语料双端跑。E4/E5 预估不变 |
+| 合计 | 预估 **约 4.3k 行**（含测试）；**E1–E4 实际已 14.1k**（上表 ✅ 行之和） | 超估的原因是共享语料：向量本身即测试资产，一份语料双端跑。E4 是唯一"零后端"批次，仍比预估多 1.75×（执行编排三种分派 + 整组勾选补齐）。E5 预估不变 |
 
 ## 4. 关键设计决策（★ = 需要产品确认的分叉）
 
@@ -81,6 +82,12 @@ Rust 无 HttpTransport ⇒ GUI 只能比较**本机 app-core 已打开的两个�
 - 只读连接（`read_only`）三端一律禁应用；`DROP` 类条目单独分组、默认不勾选。
 - 应用走已有事务端点；`ddl_in_tx=false` 的方言（MySQL/Oracle 需实测确认）**不承诺原子性**：
   执行前明确告知"逐条执行、失败不回滚已提交部分"，并生成对应的**回滚脚本**供人工使用。
+
+**D4 的 E4 落地注记（2026-09-26）**：确认强度**换了一次位**——正向应用要求"显式生成脚本 + 显式点击执行"
+（脚本全文预览就是确认物，不再额外要求手输名字），**手输名字用在回滚上**（`non_reversible` 语句全量列出 +
+输入基准侧连接名才放开按钮）。理由：正向是"把库改成你刚逐条看过的样子"，回滚是"再改回一个你已经
+回滚过一次的旧状态"，后者更容易在事后误点。只读连接：客户端不硬禁（真相在服务端 app-core 执行层，
+§12.3），向导在选项里标 `· 只读` 并在选中后给醒目告警"服务端会拒绝写语句"。
 
 **D5 diff 输出是"计划"不是"字符串"。—— E1 已按此实现，形状固定为 9 个 op。**
 `op`：`create_table` / `drop_table` / `add_column` / `drop_column` / `alter_column` /
@@ -157,8 +164,15 @@ E3 收口时 `check` 与 TS 重生成均零漂移（`web/src/api/index.ts` +37 �
   （避免同一个方言规则存在两套真相源）。
   验收：23 份共享语料跑完整管线逐字段对拍 + 契约真跑「应用后计划收敛为空、回滚后计划精确复原、
   重建期间子表行数 1 行不丢」，落地实况见附录 A.12。
-- **E4 Web 向导**：四步（选源 → 选目标 → 差异预览 → 脚本/应用），复用导入向导的
+- **E4 Web 向导** ✅（2026-09-26）：四步（选基准侧 → 选期望侧 → 差异与勾选 → 脚本与应用），复用导入向导的
   `Step` 联合类型 + `polydb.<feature>.v1` localStorage 命名 + busy 门禁 + 失败详情展示惯例。
+  **已定（2026-09-26）四条**：① 形态是**向导 Modal + 三处入口**（活动栏第 4 个图标 / `Ctrl+4`、命令面板
+  `app.compare-sync`、库表树表与 schema 右键），不新增常驻侧栏视图、不动 `ViewId` 状态机；
+  ② 执行通道**按 `pragmas_outside_tx` 分派**——true ⇒ 首尾两条 PRAGMA 走 `/query`（事务外）、主体包一个
+  `/api/transactions` 事务，false ⇒ 逐条 `/query`；③ 回滚进 v1，**由前端代跑**回滚脚本 + 强确认
+  （列出全部 `non_reversible` 语句 + 手输基准侧连接名才放开按钮）；④ 差异预览是**按相位分组的可勾选列表**，
+  破坏性条目红标且默认不勾、`selected` 初值直接采用服务端回值。
+  零 spec 变更、零后端改动，纯前端接线（比对/生成/校验真相全在服务端）。落地实况见附录 A.13。
 - **E5 GUI/TUI + 文档**：GUI 浮层/独立面板（同种类两 schema，D3），TUI 三段视图；
   `docs/frontends.md` 补能力差异行；三端一致回归 + 全端门禁基线刷新。
 
@@ -173,13 +187,18 @@ E3 收口时 `check` 与 TS 重生成均零漂移（`web/src/api/index.ts` +37 �
   但**契约层的 501 响应本机从未真正打出过**（`/api/schema/ddl` 的方言分支同样 soft-skip）。
 - 契约里的"应用脚本"是**逐条 `/query` 顺序执行**，没有走 `/api/transactions`——因为含重建的脚本
   要求首尾两条 PRAGMA 留在事务外（G6）。**「把 `pragmas_outside_tx=false` 的脚本整份包进一个事务」
-  这条真实调用路径只有 E4 的 Web 向导会第一次跑到**，届时需补断言。
+  这条真实调用路径仍未跑到**：E4 的 Web 向导已经实现了这条分派（附录 A.13），但 SQLite 两端能力位恒为
+  `true`，所以浏览器里验证的是"PRAGMA 事务外 + 主体单事务"那一支；另一支（逐条 `/query`）只有纯函数
+  单测覆盖，**契约层仍未对两种分派各加一条断言**。
 - 视图（`CREATE VIEW`）对重建表的依赖行为**仍未测**（E3.0 遗留）：SQLite 视图按名字解析，
   预期不破，但没证据就不写进规则。
 - 只有 SQLite 能端到端真跑（**两个文件 / 两个连接**；E2.0 实测确认驱动不支持 schema 寻址，
   "同库两 schema"需先拍板 §8-6）——所以 v1 的验收以 SQLite 为主，
   其余方言的正确性依赖单测 + 后续在有实例的环境补测。
-- `golangci-lint` v2 本机未安装（Go lint 步骤恒跳过）；GUI(GPUI) 与 Web 渲染无法无头肉眼验证。
+- `golangci-lint` v2 本机未安装（Go lint 步骤恒跳过）；GUI(GPUI) 渲染无法无头肉眼验证。
+  Web 侧 E4 已在真实 Chromium 实例里把向导全流程走通（附录 A.13「浏览器真跑」），但该实例视口固定在
+  ~565×482 且没有可用的改窗口工具，所以**布局只做了数值核对**（行宽/标签宽用 `evaluate_script` 量），
+  宽屏下的视觉排版仍未肉眼确认。
 
 ## 8. 未决问题（开工前需要拍板）
 
@@ -192,7 +211,9 @@ E3 收口时 `check` 与 TS 重生成均零漂移（`web/src/api/index.ts` +37 �
 3. `generic_type` 的归一命名表由谁定：以 PG 命名为准、还是自创中立名（`int64`/`text`/`timestamp`…）？
    **E3 不需要答案**——本轮生成器只覆盖 SQLite，语句直接渲染驱动原 `data_type` 文本；
    该项与 §8-7 绑定，等有可实测的方言实例再定。
-4. 差异条目里"仅目标库存在"要不要包含**数据不可逆**提示（drop column 会丢数据）——建议 v1 强制红标 + 默认不勾选。
+4. ~~差异条目里"仅目标库存在"要不要包含**数据不可逆**提示~~ **已定（2026-09-26，E4 落地即此）**：
+   `destructive` 条目红标 + 默认不勾选，勾选初值直接采用服务端回值（前端不自造规则）；
+   另有「破坏性动作默认勾选」开关供显式放开。见附录 A.13。
 5. 表数上限：GUI 现有整 schema 外键扫描硬上限 200 表（`ui-gui/src/app.rs:2505-2529`），diff 场景动辄上千表，要不要在 E2 一并放宽/分页？
 6. ~~**SQLite 的比对形态**~~ **已定（2026-09-25）：只做"两个连接 / 两个文件"**，SQLite 的 `schema` 参数固定 `main`。
    依据：驱动层 `list_tables` 忽略 `schema` 入参、`PRAGMA table_info` 不支持 schema 前缀（E2.0 实测，附录 A.9 F6）；
@@ -543,6 +564,74 @@ Go `go build ./...` / `go vet ./...` / `go test -count=1 ./...` 全绿（`pkg/sc
 
 **E3 仍未验证（继续诚实披露）**：① 4 种方言 + Redis 的 501 响应**本机没有真正打出过**
 （契约层 soft-skip，只有纯函数语料 d16–d21 恒跑）；② 「`pragmas_outside_tx=false` 的脚本整份包进
-`/api/transactions` 执行」这条真实调用路径无人跑过（契约是逐条 `/query`），E4 第一次跑到；
-③ 视图对重建表的依赖未测；④ Go 侧 `golangci-lint` 本机缺失；⑤ Web/GUI/TUI 三端渲染完全不涉及
+`/api/transactions` 执行」这条真实调用路径无人跑过（契约是逐条 `/query`）。
+**E4 后订正**：向导已实现三种分派并在浏览器跑过"PRAGMA 事务外 + 主体单事务"那一支，但 SQLite 两端
+能力位恒为 `true`/`true`，另两支在本机仍没有真库可跑，详见 A.13；③ 视图对重建表的依赖未测；
+④ Go 侧 `golangci-lint` 本机缺失；⑤ Web/GUI/TUI 三端渲染完全不涉及
 （本批只有服务端 + 生成的 TS 类型）。
+
+### A.13 E4 落地实况（2026-09-26，Web 向导，**零 spec 变更 / 零后端改动**）
+
+**落点**（8 个文件：3 新建 + 5 改动）：
+
+| 层 | 文件 | 行 |
+|---|---|---|
+| 纯函数层 | `web/src/lib/compareSync.ts` | 262（新建） |
+| 纯函数单测 | `web/src/lib/compareSync.test.ts` | 184 / 17 份（新建） |
+| 向导组件 | `web/src/components/CompareSyncWizard.tsx` | 686（新建） |
+| API 包装 | `web/src/lib/api.ts` | +14（`schemaDiff` / `schemaDdl`，走既有 msgpack `request<T>`） |
+| 入口接线 | `web/src/App.tsx` +41/−1、`ActivityBar.tsx` +31/−1、`SchemaBrowser.tsx` +13/−2、`ShortcutPanel.tsx` +1 |
+
+纯函数层承担全部可测逻辑：步序与中文标签（`STEP_ORDER` / `STEP_LABEL` / `PHASE_LABEL` 含 0/255 的
+PRAGMA 段）、按相位分组、默认勾选与破坏性过滤、整表重建的**前端预提示**（`rebuildLikelyTables` /
+`groupGaps` / `fillGroupGaps`）、脚本统计（`summarizeScript`）、执行分派计划（`planExecution` 拆
+`pragmaHead` / `pragmaTail` / `body`）、候选连接（同种类、剔 Redis）、状态持久化。
+**比对与生成的真相一律在服务端**，前端只做渲染与执行——所以 `planExecution` 里那条
+「首尾 PRAGMA 是 `phase===0/255` 且 `entry_ids` 为空」的识别规则，与 A.12 的线路纪律第 3 条直接对齐。
+
+**执行编排**（`applyScript`，正向与回滚共用同一条通道，调用方传哪份跑哪份）：
+
+1. 分派表 `steps[]`：`ddl_in_tx && pragmas_outside_tx` ⇒ 首尾 PRAGMA 标 `inTx:false`、主体全标 `true`；
+   其余情况 ⇒ 全部按 `ddl_in_tx` 走（逐条 `/query`，或整份包一个事务）。
+2. **事务懒开**：第一条 `inTx` 语句才 `beginTransaction`；遇到 `inTx:false` 且事务还开着 ⇒ **先 commit**
+   再跑 PRAGMA（G6：`PRAGMA foreign_keys` 在事务内是 no-op，写进事务等于没关）。
+3. 失败即 `break`：已开事务 ⇒ `rollbackTransaction` + `out.rolledBack=true`，UI 文案区分
+   「主体事务已整体回滚（基准侧未留下半成品）」与「已跳过剩余 N 条（该方言 DDL 不能进事务，中间态需自行处理）」。
+4. `cancelRef` 在每条语句前检查；`txIdRef` 兜住中途关窗/切连接，`finishAndClose` 再兜一次回滚。
+
+**浏览器真跑**（Go `polydb-server` @127.0.0.1:8080 + vite 5173，两个 SQLite 文件连接 `e4_base` / `e4_target`，
+10 条差异 / 8 个相位组）：
+
+| 环节 | 实测结果 |
+|---|---|
+| 三处入口 | 活动栏图标 tooltip「结构比对与同步向导 (Ctrl+4)」、`Ctrl+4`、库表树右键均能开；后端离线时图标置灰 |
+| 步序门禁 | 未选满两侧时「下一步」disabled 且 title 给出原因；候选连接只列同种类、剔 Redis |
+| 差异渲染 | 10 条按相位分组、破坏性红标默认不勾，`selected` 初值直接采用服务端回值（7/10） |
+| 组守卫 | 直接生成 ⇒ 服务端 400 `表 t 需要整表重建，同表变更必须整组勾选：缺少 t/idx_a/drop_index、t/dropme/drop_column`，前端补「可点『整表一起勾』补齐后重试」；补齐后 9/10（未勾的无关破坏性 `gone//drop_table` 保留） |
+| 正向应用 | 12 条全部成功（不可逆 4 / 带告警 3），首尾 PRAGMA 在事务外 |
+| 复查 | 只剩 **1** 条（正是未勾选的 `gone//drop_table`）⇒ 收敛断言成立 |
+| 回滚 | 预览 13 条（10 条不可逆）；强确认列出全部不可逆语句，**输错名（少一个字符）按钮恒 disabled**；输对 `e4_base` 后代跑 13 条全部成功 |
+| 再复查 | 回到 **10** 条 ⇒ 基准侧结构完全退回比对前 |
+| 故意失败 | 把 `t.a` 置 NULL 后重跑正向 ⇒「失败 1 条，主体事务已整体回滚」+ 详情 `#3 相位 20 · t — POLYDB_ERR_QUERY_FAILED: constraint failed: NOT NULL constraint failed: polydb_tmp_t.a (1299)`；随后 `sqlite_master` 核对：无 `p2`、无 `polydb_tmp_*`、`gone`/`idx_a`/`dropme` 都在 ⇒ 零中间态 |
+
+**浏览器与代码 review 抓到并修掉的四个缺陷**：
+
+1. `styles.label` 自带 `text-transform: uppercase` ⇒ 强确认提示把连接名显示成 `E4_BASE`，而要输入的
+   是 `e4_base`（**一个大小写敏感的确认门给了错的答案**）。名字段单独 `textTransform:'none'`。
+2. 生成脚本成功后只清 `error` 没清 `note` ⇒ 上一轮 400 的「整表一起勾」提示残留到 apply 步顶部。
+3. 执行分派最初写成「body + `pragmaTail` 一起进事务」，尾 PRAGMA 因此是 no-op（违 G6）⇒ 改成 `steps[]` 模型。
+4. `loadSyncState` 原样恢复 `step:'apply'`，但差异条目与脚本只在内存 ⇒ 重载后是一页**空白面板**。
+   现在 `review`/`apply` 一律回落 `target`（勾选集本来就不入库，陈旧 id 该让服务端 400）。
+
+**门禁数字（2026-09-26 本机实测）**：`tsc --noEmit` clean；`vitest run` **16 files / 158 passed**
+（本批 +17）；`eslint`（7 个 touched 文件）退出 0；`vite build` 成功（仅既有 >500kB 分块警告）。
+零 spec 变更 ⇒ 未重跑 `genprotocol`；后端零改动 ⇒ Rust/Go/契约数字沿用 E3（150 Rust 测试、
+契约 23 顶层 / 66 子测试）。
+
+**E4 仍未验证（继续诚实披露）**：① 只对 **Go 后端**跑过（Web 同一时刻只连一个后端），Rust server 的
+`/api/schema/*` 由 E2/E3 契约对拍锁定，但**向导本身没打过 Rust**；② `pragmas_outside_tx=false` 与
+`ddl_in_tx=false` 两支分派**本机没有真库可跑**（SQLite 恒 `true`/`true`），只有 `planExecution` + 纯函数
+单测覆盖，契约层也还没对分派各加断言；③ 「取消剩余」在毫秒级的 12 条脚本上来不及点，只有代码路径，
+未肉眼验证；④ Redis / 跨种种类的置灰提示是纯函数 + 条件渲染，未用真 Redis 验证；⑤ 组件没有
+testing-library 渲染测试（沿用本项目惯例：纯函数层单测 + 浏览器验证）；⑥ 验证实例视口固定 ~565×482，
+宽屏视觉排版只做了数值核对（行宽/标签宽）没肉眼比过。

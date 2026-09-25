@@ -16,6 +16,7 @@ import QuickSwitcher from './components/QuickSwitcher';
 import ShortcutPanel from './components/ShortcutPanel';
 import StatusBar from './components/StatusBar';
 import SettingsPanel from './components/SettingsPanel';
+import CompareSyncWizard from './components/CompareSyncWizard';
 import ActivityBar, { type ViewId } from './components/ActivityBar';
 import { onCommands, registerCommand } from './lib/commandRegistry';
 import { startDragResize } from './lib/dragResize';
@@ -62,6 +63,9 @@ const ICONS: Record<ViewId, JSX.Element> = {
   log: <Svg d="M4 5h16v14H4zM4 9h16M4 13h10" />,
 };
 
+// 活动栏底部动作区（非视图切换）
+const COMPARE_ICON = <Svg d="M3 5h7v14H3zM14 5h7v14h-7zM10 12h4M12.5 10.5 14 12l-1.5 1.5" />;
+
 export default function App() {
   const [serverOk, setServerOk] = useState<boolean | null>(null);
   const [serverInfo, setServerInfo] = useState<string>('');
@@ -86,6 +90,13 @@ export default function App() {
   const [qsOpen, setQsOpen] = useState(false);
   const [shortcutOpen, setShortcutOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // E4.5 结构比对与同步向导（Modal，不占侧栏视图位）
+  const [cmpOpen, setCmpOpen] = useState(false);
+  const [cmpPrefill, setCmpPrefill] = useState<{ connId: string } | null>(null);
+  const openCompareSync = useCallback((prefillConnId?: string) => {
+    setCmpPrefill(prefillConnId ? { connId: prefillConnId } : null);
+    setCmpOpen(true);
+  }, []);
   const [commands, setCommands] = useState<import('./lib/commandRegistry').CommandItem[]>([]);
   const [layout, setLayout] = useState(() => loadView());
   const setView = useCallback((v: ViewId) => {
@@ -116,6 +127,9 @@ export default function App() {
         e.preventDefault();
         const views: ViewId[] = ['explorer', 'schema', 'log'];
         setView(views[parseInt(e.key, 10) - 1]);
+      } else if (mod && !e.shiftKey && e.key === '4') {
+        e.preventDefault();
+        openCompareSync();
       } else if (mod && !e.shiftKey && e.key === '\\') {
         e.preventDefault();
         setLayout((l) => {
@@ -134,7 +148,7 @@ export default function App() {
     };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
-  }, [shortcutOpen, settingsOpen, qsOpen, setView]);
+  }, [shortcutOpen, settingsOpen, qsOpen, setView, openCompareSync]);
 
   const refreshConnections = useCallback(async () => {
     try { setConnections(await api.listConnections()); } catch { /* ignore */ }
@@ -272,6 +286,14 @@ export default function App() {
       run: () => setView('log'),
     }));
     unregs.push(registerCommand({
+      id: 'app.compare-sync',
+      label: '结构比对与同步向导…',
+      category: '数据库',
+      hotkey: 'Ctrl+4',
+      keywords: ['compare', 'sync', 'ddl', 'schema', 'diff', '比对', '同步', '结构'],
+      run: () => openCompareSync(),
+    }));
+    unregs.push(registerCommand({
       id: 'app.reset-sidebar-width',
       label: '重置侧栏宽度',
       category: '视图',
@@ -400,6 +422,16 @@ export default function App() {
             { id: 'schema', label: '数据库 · 库表', hotkey: 'Ctrl+2', icon: ICONS.schema, active: layout.activeView === 'schema' },
             { id: 'log', label: '查询日志', hotkey: 'Ctrl+3', icon: ICONS.log, active: layout.activeView === 'log', badge: stats.length || undefined },
           ]}
+          actions={[
+            {
+              id: 'compare-sync',
+              label: '结构比对与同步向导',
+              hotkey: 'Ctrl+4',
+              icon: COMPARE_ICON,
+              disabled: !serverOk,
+              onClick: () => openCompareSync(conn?.kind === 'redis' ? undefined : conn?.id),
+            },
+          ]}
           onSelect={setView}
         />
         <div
@@ -429,6 +461,7 @@ export default function App() {
                 connId={conn.id}
                 onOpenTable={handleOpenTable}
                 onPrefillSql={handlePrefillSql}
+                onCompareSchema={() => openCompareSync(conn.id)}
               />
             ) : conn && conn.kind === 'redis' ? (
               <CollapsiblePane title="Redis 键浏览" variant="main">
@@ -527,6 +560,12 @@ export default function App() {
         onSwitchConn={(c) => { setConn(c); setContext(null); }}
       />
       <ShortcutPanel open={shortcutOpen} onClose={() => setShortcutOpen(false)} />
+      <CompareSyncWizard
+        open={cmpOpen}
+        onClose={() => setCmpOpen(false)}
+        connections={connections}
+        prefill={cmpPrefill}
+      />
       <SettingsPanel open={settingsOpen} onClose={() => setSettingsOpen(false)} />
       <StatusBar serverOk={serverOk} serverInfo={serverInfo} conn={conn} statsCount={stats.length} />
     </div>

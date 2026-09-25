@@ -11,9 +11,11 @@ interface Props {
   connId: string;
   onOpenTable: (schema: string, table: string) => void;
   onPrefillSql?: (sql: string) => void;
+  /** E4.5 表右键「与…结构比对」：由 App 打开向导并预选基准侧 */
+  onCompareSchema?: () => void;
 }
 
-export default function SchemaBrowser({ connId, onOpenTable, onPrefillSql }: Props) {
+export default function SchemaBrowser({ connId, onOpenTable, onPrefillSql, onCompareSchema }: Props) {
   const [schemas, setSchemas] = useState<SchemaInfo[]>([]);
   const [tablesBySchema, setTablesBySchema] = useState<Record<string, TableInfo[]>>({});
   const [selSchema, setSelSchema] = useState<string | null>(null);
@@ -101,7 +103,7 @@ export default function SchemaBrowser({ connId, onOpenTable, onPrefillSql }: Pro
     if (m.table) {
       const t = m.table;
       const q = `${m.schema}.${t}`;
-      return [
+      const items: ContextMenuEntry[] = [
         { header: `${m.schema}.${t}` },
         { key: 'open', label: '打开表', icon: '📋', onClick: () => onOpenTable(m.schema, t) },
         '---',
@@ -129,11 +131,18 @@ export default function SchemaBrowser({ connId, onOpenTable, onPrefillSql }: Pro
           ],
         },
       ];
+      if (onCompareSchema) {
+        items.push('---', { key: 'compare', label: '与…结构比对', icon: '⇄', onClick: () => onCompareSchema() });
+      }
+      return items;
     }
     return [
       { header: m.schema },
       { key: 'select-all', label: '生成 SELECT（全部表）', icon: '⚡', onClick: () => { void api.listTables(connId, m.schema).then((ts) => { const lines = ts.filter((x) => x.type === 'table').map((x) => `SELECT * FROM ${m.schema}.${x.name}\nLIMIT 10;`); if (lines.length) onPrefillSql?.(lines.join('\n\n')); }).catch(() => {}); } },
       { key: 'copy-schema', label: '复制 schema 名', icon: '⧉', onClick: () => { void navigator.clipboard.writeText(m.schema).catch(() => {}); } },
+      ...(onCompareSchema
+        ? ['---' as const, { key: 'compare-schema', label: '结构比对与同步…', icon: '⇄', onClick: () => onCompareSchema() }]
+        : []),
     ];
   };
 

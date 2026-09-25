@@ -20,6 +20,7 @@ const GROUPS: ShortcutGroup[] = [
       { keys: ['Ctrl', '1'], desc: '切换到资源管理器' },
       { keys: ['Ctrl', '2'], desc: '切换到库表视图' },
       { keys: ['Ctrl', '3'], desc: '切换到查询日志' },
+      { keys: ['Ctrl', '4'], desc: '打开结构比对与同步向导' },
     ],
   },
   {

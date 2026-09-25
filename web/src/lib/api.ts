@@ -6,6 +6,7 @@ import type {
   ConnectionInfo,
   ConnectionStatus,
   CreateConnectionRequest,
+  DdlScript,
   ForeignKeyInfo,
   IndexInfo,
   PolyDBError,
@@ -18,6 +19,9 @@ import type {
   RedisSelectDbRequest,
   RedisSetRequest,
   RedisValue,
+  SchemaDdlRequest,
+  SchemaDiffPlan,
+  SchemaDiffRequest,
   SchemaInfo,
   TableCountResult,
   TableInfo,
@@ -203,6 +207,16 @@ export function commitTransaction(txId: string) {
 
 export function rollbackTransaction(txId: string) {
   return request<TransactionInfo>('POST', `/api/transactions/${encodeURIComponent(txId)}/rollback`);
+}
+
+// ─── 结构比对与同步语句生成（Compare & Sync E2/E3）─────────────
+
+export function schemaDiff(req: SchemaDiffRequest) {
+  return request<SchemaDiffPlan>('POST', '/api/schema/diff', req);
+}
+
+export function schemaDdl(req: SchemaDdlRequest) {
+  return request<DdlScript>('POST', '/api/schema/ddl', req);
 }
 
 // ─── 表数据浏览（M11）────────────────────────────────────────

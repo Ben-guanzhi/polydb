@@ -11,8 +11,19 @@ export interface ActivityItem {
   badge?: number | string;
 }
 
+/** 视图切换之外的动作按钮（常驻底部，不参与 ViewId 状态机）。 */
+export interface ActivityAction {
+  id: string;
+  label: string;
+  icon: ReactNode;
+  hotkey?: string;
+  disabled?: boolean;
+  onClick: () => void;
+}
+
 interface Props {
   items: ActivityItem[];
+  actions?: ActivityAction[];
   onSelect: (id: ViewId) => void;
 }
 
@@ -25,7 +36,7 @@ const btnBase: CSSProperties = {
   borderLeft: '2px solid transparent',
 };
 
-export default function ActivityBar({ items, onSelect }: Props) {
+export default function ActivityBar({ items, actions, onSelect }: Props) {
   return (
     <div
       style={{
@@ -71,6 +82,24 @@ export default function ActivityBar({ items, onSelect }: Props) {
           </button>
         );
       })}
+      {actions?.length ? (
+        <>
+          <div style={{ flex: 1 }} />
+          {actions.map((a) => (
+            <button
+              key={a.id}
+              style={{ ...btnBase, color: 'var(--muted)', opacity: a.disabled ? 0.4 : 1 }}
+              title={a.hotkey ? `${a.label} (${a.hotkey})` : a.label}
+              disabled={a.disabled}
+              onClick={a.onClick}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--fg)'; }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--muted)'; }}
+            >
+              {a.icon}
+            </button>
+          ))}
+        </>
+      ) : null}
     </div>
   );
 }
