@@ -49,7 +49,7 @@ MySQL 的 `app_dev` vs `app_prod`），列出表/列/索引/外键四类对象�
 | E3.1/E3.2 DDL 生成器（纯函数，只 SQLite） | ✅ 实际 3293 行插入：Rust `ddl.rs` 1706 + Go `ddl.go` 863 + Go 单测 697 + lib 接线 | 直改/重建两路 + 依赖排序 + 回滚 + 勾选守卫，全部在语句层，不碰连接 |
 | E3.3 共享 DDL 语料 | ✅ 实际 2796 行插入：23 份语料 + 双端加载器（Rust 182 / Go 375） | 跑完整管线 diff→SelectEntries→Generate，逐字段对拍；覆盖度是断言 |
 | E3.4–E3.7 协议 + 两端端点 + 契约 | ✅ 实际 1206 行插入：spec 212（metadata 52 / openapi 28 / behavior §15 132）+ 生成 TS 37、Rust 266、Go 283、契约 408 | `/api/schema/ddl` 已进 spec；契约真跑覆盖「应用后收敛 + 回滚复原 + 子表行数不丢」 |
-| E4 Web 向导 | ~700 行（四步 + 预览 + 状态持久化） | ✅ 实际 **1228 行**：新建 1132（纯函数 262 + 单测 184 + 组件 686）+ 5 个改动文件 +96/−4。比预估超 1.75×，多出来的是执行编排的三种分派与整组勾选补齐；零 spec 变更、零后端改动（附录 A.13） |
+| E4 Web 向导 | ~700 行（四步 + 预览 + 状态持久化） | ✅ 实际 **+1332/−13**（9 个文件）：新建 1138（纯函数 265 + 单测 187 + 组件 686）、5 个代码文件 +96/−4、本文档 +98/−9。比预估超 1.9×，多出来的是执行编排的三种分派与整组勾选补齐；零 spec 变更、零后端改动（附录 A.13） |
 | E5 GUI + TUI 收敛形态 + 文档 | GPUI ~400 行、TUI ~350 行 | 渲染无法无头验证（§7） |
 | 合计 | 预估 **约 4.3k 行**（含测试）；**E1–E4 实际已 14.1k**（上表 ✅ 行之和） | 超估的原因是共享语料：向量本身即测试资产，一份语料双端跑。E4 是唯一"零后端"批次，仍比预估多 1.75×（执行编排三种分派 + 整组勾选补齐）。E5 预估不变 |
 
@@ -572,15 +572,15 @@ Go `go build ./...` / `go vet ./...` / `go test -count=1 ./...` 全绿（`pkg/sc
 
 ### A.13 E4 落地实况（2026-09-26，Web 向导，**零 spec 变更 / 零后端改动**）
 
-**落点**（8 个文件：3 新建 + 5 改动）：
+**落点**（8 个源文件：3 新建 + 5 改动；提交 `b848473` 合计 +1332/−13，含本文档 +98/−9）：
 
 | 层 | 文件 | 行 |
 |---|---|---|
-| 纯函数层 | `web/src/lib/compareSync.ts` | 262（新建） |
-| 纯函数单测 | `web/src/lib/compareSync.test.ts` | 184 / 17 份（新建） |
+| 纯函数层 | `web/src/lib/compareSync.ts` | 265（新建） |
+| 纯函数单测 | `web/src/lib/compareSync.test.ts` | 187 / 17 份（新建） |
 | 向导组件 | `web/src/components/CompareSyncWizard.tsx` | 686（新建） |
 | API 包装 | `web/src/lib/api.ts` | +14（`schemaDiff` / `schemaDdl`，走既有 msgpack `request<T>`） |
-| 入口接线 | `web/src/App.tsx` +41/−1、`ActivityBar.tsx` +31/−1、`SchemaBrowser.tsx` +13/−2、`ShortcutPanel.tsx` +1 |
+| 入口接线 | `web/src/App.tsx` +40/−1、`ActivityBar.tsx` +30/−1、`SchemaBrowser.tsx` +11/−2、`ShortcutPanel.tsx` +1 |
 
 纯函数层承担全部可测逻辑：步序与中文标签（`STEP_ORDER` / `STEP_LABEL` / `PHASE_LABEL` 含 0/255 的
 PRAGMA 段）、按相位分组、默认勾选与破坏性过滤、整表重建的**前端预提示**（`rebuildLikelyTables` /
