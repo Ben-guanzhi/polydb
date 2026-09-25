@@ -148,7 +148,8 @@
   本轮纯前端接线、零 spec 变更；门禁三态顺序（未加载 → 只读 → 非 string）三端一致，
   提交后回读确认、写失败保留输入。Web 门禁抽为 `lib/redisWrite.ts` + 单测，GUI 抽为
   `util::redis_write_block` + 单测。见 `docs/frontends.md`「Redis 整值写回（三端一致，D4）」。
-- 仍不排期（各自需新里程碑再拆）：Rewind 快照（需存储层）、Compare & Sync、Server Dashboard、
+- 仍不排期（各自需新里程碑再拆）：Rewind 快照（需存储层）、Compare & Sync（**已单独立项拆解，
+  见 `docs/plan-compare-sync.md`，2026-09-25，未开工**）、Server Dashboard、
   左缘连接条 rail。
 
 ## 4. 跨端一致性门禁
