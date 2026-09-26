@@ -5,7 +5,7 @@ use std::sync::Arc;
 use polydb_app_core::AppCore;
 use polydb_core::{
     BeginTransactionRequest, ConnectionId, CreateConnectionRequest, DatabaseKind, IsolationLevel,
-    TableRowsRequest, TransactionStatus,
+    SchemaDdlRequest, SchemaDiffRequest, SchemaDiffTarget, TableRowsRequest, TransactionStatus,
 };
 use polydb_storage::{FileKeyring, Storage};
 use polydb_transport::{LocalTransport, Transport};
@@ -135,5 +135,74 @@ fn rollback_discards_write() {
             0,
             "rolled back write must not persist"
         );
+    });
+}
+
+// 结构比对与同步（E5.3）：Transport 只做委托，规则判定在 app-core / schema-diff。
+// 这里用两个 :memory: SQLite 走通 schema_diff → schema_ddl 的接线与类型形状。
+#[test]
+fn schema_diff_and_ddl_delegate() {
+    let app = setup();
+    let t = LocalTransport::new(Arc::clone(&app));
+    let base: ConnectionId = t.create_connection(&sqlite_req("base")).unwrap().id;
+    let want: ConnectionId = t.create_connection(&sqlite_req("want")).unwrap().id;
+
+    smol::block_on(async {
+        t.execute(
+            base,
+            "CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT)",
+            &[],
+        )
+        .await
+        .unwrap();
+        t.execute(
+            want,
+            "CREATE TABLE t(id INTEGER PRIMARY KEY, name VARCHAR(30), email TEXT)",
+            &[],
+        )
+        .await
+        .unwrap();
+
+        let diff_req = SchemaDiffRequest {
+            source: SchemaDiffTarget {
+                connection_id: base,
+                schema: None,
+            },
+            target: SchemaDiffTarget {
+                connection_id: want,
+                schema: None,
+            },
+            options: None,
+        };
+        let plan = t.schema_diff(&diff_req).await.unwrap();
+        let ids: Vec<String> = plan.entries.iter().map(|e| e.id.clone()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "t/email/add_column".to_string(),
+                "t/name/alter_column".to_string()
+            ],
+            "diff entries must come back in plan order"
+        );
+
+        let script = t
+            .schema_ddl(&SchemaDdlRequest {
+                source: diff_req.source.clone(),
+                target: diff_req.target.clone(),
+                options: None,
+                selected: ids,
+            })
+            .await
+            .unwrap();
+        // 改列类型要重建表 ⇒ 首尾 PRAGMA 包裹，两个能力位都得传上来给前端分派执行。
+        assert!(script.ddl_in_tx, "SQLite DDL 可进事务");
+        assert!(script.pragmas_outside_tx, "PRAGMA 必须留在事务外");
+        let head = script.statements.first().expect("脚本非空");
+        let tail = script.statements.last().expect("脚本非空");
+        assert_eq!(head.sql, "PRAGMA foreign_keys=OFF;");
+        assert_eq!(tail.sql, "PRAGMA foreign_keys=ON;");
+        assert_eq!(head.phase, 0);
+        assert_eq!(tail.phase, 255);
+        assert!(!script.rollback.is_empty(), "回滚脚本随正向一起给出");
     });
 }

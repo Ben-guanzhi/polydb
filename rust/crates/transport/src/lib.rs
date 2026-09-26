@@ -4,9 +4,10 @@ use async_trait::async_trait;
 use polydb_app_core::AppCore;
 use polydb_core::{
     BeginTransactionRequest, ColumnInfo, ConnectionId, ConnectionInfo, ConnectionStatus,
-    CoreResult, CreateConnectionRequest, ForeignKeyInfo, IndexInfo, QueryResult, RedisKeyType,
-    RedisReply, RedisScanPage, RedisValue, SchemaInfo, TableInfo, TableRowsRequest,
-    TableRowsResult, TransactionInfo, UpdateConnectionRequest, Value,
+    CoreResult, CreateConnectionRequest, DdlScript, ForeignKeyInfo, IndexInfo, QueryResult,
+    RedisKeyType, RedisReply, RedisScanPage, RedisValue, SchemaDdlRequest, SchemaDiffPlan,
+    SchemaDiffRequest, SchemaInfo, TableInfo, TableRowsRequest, TableRowsResult, TransactionInfo,
+    UpdateConnectionRequest, Value,
 };
 
 #[async_trait]
@@ -98,6 +99,11 @@ pub trait Transport: Send + Sync {
     ) -> CoreResult<QueryResult>;
     async fn commit_transaction(&self, txn_id: &str) -> CoreResult<TransactionInfo>;
     async fn rollback_transaction(&self, txn_id: &str) -> CoreResult<TransactionInfo>;
+
+    // ─── 结构比对与同步（E5.3）──────────────────────────────
+    // 只转发 app-core：差异判定与语句生成全在核心层，传输层不做任何规则。
+    async fn schema_diff(&self, req: &SchemaDiffRequest) -> CoreResult<SchemaDiffPlan>;
+    async fn schema_ddl(&self, req: &SchemaDdlRequest) -> CoreResult<DdlScript>;
 }
 
 pub struct LocalTransport {
@@ -280,5 +286,14 @@ impl Transport for LocalTransport {
 
     async fn rollback_transaction(&self, txn_id: &str) -> CoreResult<TransactionInfo> {
         self.app.rollback_transaction(txn_id).await
+    }
+
+    // ─── 结构比对与同步（E5.3）──────────────────────────────
+    async fn schema_diff(&self, req: &SchemaDiffRequest) -> CoreResult<SchemaDiffPlan> {
+        self.app.schema_diff(req).await
+    }
+
+    async fn schema_ddl(&self, req: &SchemaDdlRequest) -> CoreResult<DdlScript> {
+        self.app.schema_ddl(req).await
     }
 }
