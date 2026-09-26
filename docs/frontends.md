@@ -43,7 +43,7 @@ polydb 有多个前端，均遵守 AGENTS.md 铁律：**只经 `app-core`（进�
   | 全局 | `F1` 帮助面板 · `F8` 取消在途查询 · `Ctrl+C` 退出 · `Esc` 返回/关面板 |
   | 连接列表 | `↑/↓`·`k/j` 选择 · `Enter` 连接进库表 · `n` 新建 · `e` **编辑选中连接** · `t` 测试 · `d` 删除（连按两次确认） · `r` 刷新 · `q` 退出 |
   | 连接表单 | `Tab`/`Shift+Tab` 切字段 · `←/→` 切类型（编辑态改为移动光标，类型不可改） · `Enter` 新建/保存 · `Esc` 返回 |
-  | 库表结构 | `↑/↓` 选表 · `Enter` 表详情 · `s` 切 schema · `Ctrl+P` 跨 schema 搜表 · `q` 查询编辑器 · `F7` 浏览数据 |
+  | 库表结构 | `↑/↓` 选表 · `Enter` 表详情 · `s` 切 schema · `Ctrl+P` 跨 schema 搜表 · `q` 查询编辑器 · `F7` 浏览数据 · `c` **结构比对与同步向导** |
   | 表详情 | `↑/↓` 切表 · `q` 查询该表 · `F7` 浏览数据 |
   | Quick-open | 输入即时过滤 · `↑/↓` 选择 · `Enter` 打开 · `Esc` 返回 |
   | 查询编辑器 | `Tab` 补全表/列 · `F5`/`Ctrl+E` 执行 · `F9` **按方言生成并执行 EXPLAIN** · `F8` 取消 · `F4` 查询历史抽屉 · `F6` 导航结果 · `Ctrl+←/→` 词级移动 |
@@ -52,6 +52,9 @@ polydb 有多个前端，均遵守 AGENTS.md 铁律：**只经 `app-core`（进�
   | 数据浏览 | `↑/↓` 行 · `←/→` 翻页 · `Shift+←/→` 移列 · `Enter` 完整值 · `/`·`Tab` 进过滤栏 · `e` 编辑单元格（需主键且非只读） · `u` 撤销暂存 · `w` 审阅并提交（单事务，失败回滚） · `s` 排序 · `p` 页大小 50/200/1000 · `c` 精确计数 · `o` AND/OR · `d` 删末条过滤 · `r` 刷新 |
   | 过滤栏编辑 | `Tab`/`Shift+Tab` 列·操作符·值·(第二值)·(大小写) · `←/→` 调整当前格 · `↑/↓` 循环选列 · `Enter` 应用 · `Esc` 取消 |
   | 变更审阅 | `↑/↓` 看语句 · `Enter`/`y` 提交 · `u` 撤销 · `Esc`/`n` 返回 |
+  | 结构比对·① 选期望侧 | `↑/↓`·`k/j` 选择 · `Enter` 比对两侧结构 · `Esc` 退出向导（基准侧=进入向导时打开的那条连接） |
+  | 结构比对·② 差异勾选 | `↑/↓`·`k/j` 条目 · `Space`/`Enter` 勾选 · `a` 只勾非破坏 · `A` 全选 · `i` 忽略默认值 · `n` 破坏性默认勾选（两者都重跑比对） · `f` 整表补齐重建组 · `g` 生成脚本 · `r` 重比对 · `Esc` 返回 |
+  | 结构比对·③ 脚本与执行 | `↑/↓`·`k/j` 滚动 · `x` 执行正向 · `r` 代跑回滚（需逐字输入基准侧连接名） · `c` 复查差异 · `Esc` 返回勾选 |
   | Redis 键 | `↑/↓` 选键 · `Enter` 看值 · `/` 模式过滤 · `g` 加载更多 · `b` 切 db 0–15 · `c` 命令行 · `e` **写回 string 值**（`Enter` 提交并回读，`Esc` 放弃） · `r` 刷新 |
 
 - 执行计划（`F9`）由 `go/pkg/explain` 负责：按连接方言包成 `EXPLAIN QUERY PLAN`（SQLite）/
@@ -71,6 +74,8 @@ polydb 有多个前端，均遵守 AGENTS.md 铁律：**只经 `app-core`（进�
   - Redis 值写回：三端同为 **string 整值写回**（TUI `e`、GUI/Web 键值面板「✎ 写回整值」），
     提交后回读确认；list/hash/set/zset 仍走命令行 `exec_command` 按元素改（见「Redis 整值写回」一节）。
   - Quick Switcher：三端同为 `Ctrl+P`（语义各异：TUI 跨 schema 搜表、Web 搜表、GUI 在已开对象 tab 间跳转）。
+  - 结构同步向导：TUI 库表结构视图 `c`（基准侧=当前连接）；GUI `Ctrl+4` 或顶栏「⇄ 结构同步」；
+    Web `Ctrl+4`、活动栏图标、库表树/schema/表右键多处入口。
 
 ## GUI（M1 扩展，Rust + GPUI）
 
@@ -82,7 +87,8 @@ polydb 有多个前端，均遵守 AGENTS.md 铁律：**只经 `app-core`（进�
   侧栏 schema→表→列树 + schema 切换、数据浏览（过滤栏 18 op + 大小写三态/排序/页大小/精确计数/Inspector 尾板/
   虚拟滚动网格）、变更跟踪编辑（Review + 单事务提交/回滚 + 撤销栈 + 只读门禁）、连接 CRUD 表单、
   结果导出 CSV/TSV/JSON/NDJSON/Markdown/INSERT、Redis 键浏览 + string 整值写回、SQL 编辑器选区/剪贴板/
-  undo-redo + Quick Switcher（`Ctrl+P` 在已开对象 tab 间跳转）、执行计划浮层（`F9`）。
+  undo-redo + Quick Switcher（`Ctrl+P` 在已开对象 tab 间跳转）、执行计划浮层（`F9`）、
+  结构同步向导浮层（`Ctrl+4` / 顶栏「⇄ 结构同步」，见「结构比对与同步」一节）。
   主题走 `theme.rs` token（dark 默认 + light）。
 - 顶栏「■ 取消」为多语句尽力而为取消（当前语句跑完、剩余跳过）；驱动层无中断，故不是即时取消。
 - 运行：`cd rust && cargo run -p polydb-gui`（构建含 GPUI，Windows 下首次编译较慢）
@@ -152,6 +158,38 @@ polydb 有多个前端，均遵守 AGENTS.md 铁律：**只经 `app-core`（进�
 - 只读连接（`read_only`）三端都禁写：Web 经 `App.tsx` 透传 `readOnly`，GUI 走 `is_read_only()`，
   TUI 在 `kvStartEdit` 门禁中判定。
 
+## 结构比对与同步（三端一致，E5）
+
+- **规则层只有一份**：`rust/crates/schema-diff` ↔ `go/pkg/schemadiff`，比对与语句生成都在服务端
+  （`POST /api/schema/diff`、`POST /api/schema/ddl`，见 `spec/behavior.md` §14/§15）。三端各自实现的
+  **只有呈现层**：Web `web/src/lib/compareSync.ts`、TUI `go/pkg/cmpsync`、GUI
+  `rust/crates/ui-gui/src/cmpsync.rs`——同一组纯函数（相位名/操作名/分组/勾选/缺口/执行编排/强确认），
+  外加「文案逐字一致」的回归测试钉住（Rust `wizard_step_labels_match_the_web_wizard`、
+  Go `TestCompareWizardHelpAndFooter`）。前端之间不互相 import，也都不 import driver。
+- **方向语义三端同**：基准侧 = 要被改成期望侧样子的一侧，**也是唯一执行侧**；期望侧只读，不写一句 SQL。
+- **步骤数不同**（唯一的形态差异，其余口径一致）：Web/GUI 四步（选基准侧 → 选期望侧 → 差异与勾选 →
+  脚本与应用），TUI 三段（选期望侧 → 差异勾选 → 脚本执行）——TUI 从库表视图进入，基准侧就是当前
+  打开的那条连接，省掉一步。GUI 是**浮层 Modal**，四步在层内自走，不动工作区的单活动连接状态机。
+- **两个选项都是服务端口径**，改了必须重跑比对（勾选集由服务端按选项重算，客户端不缓存、更不落盘）：
+  `ignore_defaults`（忽略默认值差异）与 `select_destructive`（破坏性条目默认勾选）。GUI/TUI 键位同为
+  `i`/`n`，Web 是两个复选框。TUI 刻意把 `i`/`n` 的分派放在「比对为空即早退」之前：否则误开忽略默认值
+  后发现两侧一致，就再也关不掉了。
+- **执行通道按能力位分派**，三端同一判据，并在向导里翻成人话显示：
+  `pragmas_outside_tx=true` ⇒ 首尾两条 PRAGMA 走事务外、主体包一个事务（失败整体回滚）；
+  `ddl_in_tx=false` ⇒ 逐条执行（该方言 DDL 隐式提交，失败留下中间态）。三句文案三端逐字相同
+  （「首尾 PRAGMA 事务外 · 主体单事务（失败整体回滚）」等）。
+- **回滚口径**：由前端**代跑**回滚脚本 + **逐字输入基准侧连接名**强确认，三端同；只有正向脚本
+  完整成功后回滚入口才放开（GUI/TUI 的 `r`、Web 的按钮 disabled）。正向只要求「显式生成 + 显式执行」。
+  不可逆语句（`non_reversible`）在确认前逐条列出。
+- **门禁三端同**：Redis 无模式概念不参与；v1 只比同一种数据库（跨种类拒绝）；只读基准侧拒绝进入/执行；
+  重建表条目必须整组勾选，缺口在生成前本地拦下（`f` 补齐重建组）；勾选集里的陈旧 id 由服务端拒
+  （`POLYDB_ERR_INVALID_PARAM`）。schema 一律不下发，服务端按 §14.5 取默认（SQLite 恒 `main`），
+  所以 GUI/TUI 无 schema 下拉（Web 仅在多方言时显示）。
+- 可比连接范围不同：Web 与 TUI 远程模式=该 server 上登记的全部连接；GUI 与 TUI 本机模式=本机
+  app-core 的那份连接清单（跨服务器请用 Web/TUI）。
+- 列表窗口化：三端都把长列表/长脚本按可视行数裁窗，并在首尾打「↑ 上方还有 N 行 / ↓ 下方还有 N 项」，
+  保证高亮项恒在视野内；GUI 在比对/执行在途时点遮罩**不关闭**向导，避免丢掉半途失败详情。
+
 ## 已知未验证项
 
 - 阶段 A–D 收口时的契约对拍（2026-09-25）为 `51 RUN / 51 PASS / 0 SKIP / 0 FAIL`，但其中
@@ -163,3 +201,9 @@ polydb 有多个前端，均遵守 AGENTS.md 铁律：**只经 `app-core`（进�
   不可达时整段跳过，因此没有服务端验证数字。同理适用于 D2 的 `RedisScanPage.db` 回显与
   D1 的 MSSQL `regex → NOT_SUPPORTED`。
 - GUI 编辑框（GPUI 单行输入 + `▏` 光标）与 Web `textarea` 的渲染效果未做肉眼验证。
+- E5 的 GUI 向导浮层与 TUI 三段视图**均未肉眼验证**：GPUI 无法无头渲染，TUI 只在按键测试里断言
+  字符串产物（`compareView()` 文本），没有真实终端里看过排版。四步/三段的**行为**由按键驱动测试覆盖
+  （Go `internal/tui/compare_test.go` 真 app-core + `:memory:` SQLite 全链路；Rust 只有纯函数层
+  `cmpsync.rs` 单测，向导状态机与渲染**没有 GUI 端测试**——这是 E5 最大的验证缺口，如实披露）。
+- 非 SQLite 方言在三端只能得到服务端 501：`is_comparable_kind` 只挡 Redis，PG/MySQL/MSSQL/Oracle
+  放进请求由 `/api/schema/ddl` 拒绝，但**该 501 响应本机从未真正打出过**（契约层同分支 soft-skip）。

@@ -4,7 +4,8 @@
 > SQLite 真引擎采快照喂 diff，抓到 3 个驱动缺陷并双端修复，见附录 A.9）**；**E2 主体已落地（2026-09-25，
 > spec 7 个 DTO + `POST /api/schema/diff` 双端端点 + 契约 SQLite 两文件真跑，见附录 A.10）**；
 > **E3.0 SQLite DDL 取证已落地（2026-09-25，附录 A.11 G1–G9）**；**E3 生成器与 `/api/schema/ddl` 双端已落地
-> （2026-09-25，附录 A.12）**；**E4 Web 向导已落地（2026-09-26，纯前端零 spec 变更，附录 A.13）**；E5 未开工。
+> （2026-09-25，附录 A.12）**；**E4 Web 向导已落地（2026-09-26，纯前端零 spec 变更，附录 A.13）**；
+> **E5 GUI + TUI 向导与文档已落地（2026-09-26，同样零 spec 变更，附录 A.14）**。
 > 从 `docs/plan-ui-tablepro-phase3.md` §阶段 D「仍不排期」四件中提出单列。
 > 许可红线不变：TablePro / TableProGo 均为 AGPLv3，**只借鉴交互语义，不移植任何代码**。
 > 架构红线不变：前端不 import driver；core/protocol 无 IO；driver 无 UI 假设；数据面 msgpack；
@@ -50,8 +51,8 @@ MySQL 的 `app_dev` vs `app_prod`），列出表/列/索引/外键四类对象�
 | E3.3 共享 DDL 语料 | ✅ 实际 2796 行插入：23 份语料 + 双端加载器（Rust 182 / Go 375） | 跑完整管线 diff→SelectEntries→Generate，逐字段对拍；覆盖度是断言 |
 | E3.4–E3.7 协议 + 两端端点 + 契约 | ✅ 实际 1206 行插入：spec 212（metadata 52 / openapi 28 / behavior §15 132）+ 生成 TS 37、Rust 266、Go 283、契约 408 | `/api/schema/ddl` 已进 spec；契约真跑覆盖「应用后收敛 + 回滚复原 + 子表行数不丢」 |
 | E4 Web 向导 | ~700 行（四步 + 预览 + 状态持久化） | ✅ 实际 **+1332/−13**（9 个文件）：新建 1138（纯函数 265 + 单测 187 + 组件 686）、5 个代码文件 +96/−4、本文档 +98/−9。比预估超 1.9×，多出来的是执行编排的三种分派与整组勾选补齐；零 spec 变更、零后端改动（附录 A.13） |
-| E5 GUI + TUI 收敛形态 + 文档 | GPUI ~400 行、TUI ~350 行 | 渲染无法无头验证（§7） |
-| 合计 | 预估 **约 4.3k 行**（含测试）；**E1–E4 实际已 14.1k**（上表 ✅ 行之和） | 超估的原因是共享语料：向量本身即测试资产，一份语料双端跑。E4 是唯一"零后端"批次，仍比预估多 1.75×（执行编排三种分派 + 整组勾选补齐）。E5 预估不变 |
+| E5 GUI + TUI 收敛形态 + 文档 | GPUI ~400 行、TUI ~350 行 | ✅ 实际 **+4724/−21**（13 个文件；Go 2424 / Rust 2300，7 个提交）：TUI 侧 1496（`compare.go` 终 765 + `commands.go` 137 + 按键测试 496）、Go 呈现层纯函数 677、Go 传输层 251；GUI 侧 1640（`app.rs` 926 + `view.rs` 714）+ `cmpsync.rs` 563 + Rust 传输层 88。比预估多 2.2×，多出来的是**呈现层三套同构纯函数**与按键驱动的端到端测试（预估只算了渲染）。渲染仍无法无头验证（§7，实况见附录 A.14） |
+| 合计 | 预估 **约 4.7k 行**（E1–E5）；**E1–E5 实际已 18.8k**（上表 ✅ 行之和） | 超估的原因是共享语料：向量本身即测试资产，一份语料双端跑。E4 是唯一"零后端"批次，仍比预估多 1.9×；E5 同样"零 spec、零后端规则"，但三端各自要一套呈现层纯函数 + 按键测试，超 2.2× |
 
 ## 4. 关键设计决策（★ = 需要产品确认的分叉）
 
@@ -173,8 +174,14 @@ E3 收口时 `check` 与 TS 重生成均零漂移（`web/src/api/index.ts` +37 �
   （列出全部 `non_reversible` 语句 + 手输基准侧连接名才放开按钮）；④ 差异预览是**按相位分组的可勾选列表**，
   破坏性条目红标且默认不勾、`selected` 初值直接采用服务端回值。
   零 spec 变更、零后端改动，纯前端接线（比对/生成/校验真相全在服务端）。落地实况见附录 A.13。
-- **E5 GUI/TUI + 文档**：GUI 浮层/独立面板（同种类两 schema，D3），TUI 三段视图；
-  `docs/frontends.md` 补能力差异行；三端一致回归 + 全端门禁基线刷新。
+- **E5 GUI/TUI + 文档**：✅ 已落地（2026-09-26，零 spec 变更）。四组分叉经确认定案：
+  ① **三批推进** Go+TUI → Rust+GUI → 文档收口，每批独立门禁 + 独立中文提交；
+  ② GUI 形态 = **浮层 Modal，四步在层内自走**（不碰 `workspace: Option<usize>` 单活动连接状态机，
+     因此不需要"临时切活动连接"这套危险动作）；③ TUI 形态 = **独立 view + 三段**（沿 `viewExplain` 先例，
+     基准侧取进入时的当前连接，故比 Web/GUI 少一步）；④ 两端回滚口径 = **代跑回滚 + 逐字输入基准侧
+     连接名强确认**（与 Web 对齐），正向只要求"显式生成 + 显式执行"，执行通道按
+     `pragmas_outside_tx` / `ddl_in_tx` 分派。入口：GUI 顶栏「⇄ 结构同步」+ `Ctrl+4`、TUI 库表视图 `c`。
+  `docs/frontends.md` 新增「结构比对与同步（三端一致，E5）」一节 + TUI 键位表三段行。落地实况见附录 A.14。
 
 ## 7. 本机不可验证清单（先把话说在前面）
 
@@ -196,6 +203,12 @@ E3 收口时 `check` 与 TS 重生成均零漂移（`web/src/api/index.ts` +37 �
   "同库两 schema"需先拍板 §8-6）——所以 v1 的验收以 SQLite 为主，
   其余方言的正确性依赖单测 + 后续在有实例的环境补测。
 - `golangci-lint` v2 本机未安装（Go lint 步骤恒跳过）；GUI(GPUI) 渲染无法无头肉眼验证。
+- **E5 之后仍缺的两类证据**（2026-09-26 收口时明确）：① GUI 向导的**状态机 + 渲染没有测试**——
+  Rust 侧只有 `cmpsync.rs` 纯函数单测与 `transport/tests`，`app.rs` 的按键分派与 `view.rs` 的浮层
+  没有 GUI 端测试（本项目无 GPUI 测试基建），只能靠 TUI 侧同构的 keystroke 测试背书；
+  ② TUI 向导只在**本机模式**（进程内 app-core）真跑过，远程模式（打 polydb-server 的 HTTP 路径）
+  的 UI 链路未验证——该 HTTP 路径本身由 E2/E3 契约对拍锁定，但"向导点下去走的是 Remote transport"
+  这件事没有端到端证据。
   Web 侧 E4 已在真实 Chromium 实例里把向导全流程走通（附录 A.13「浏览器真跑」），但该实例视口固定在
   ~565×482 且没有可用的改窗口工具，所以**布局只做了数值核对**（行宽/标签宽用 `evaluate_script` 量），
   宽屏下的视觉排版仍未肉眼确认。
@@ -635,3 +648,65 @@ PRAGMA 段）、按相位分组、默认勾选与破坏性过滤、整表重建�
 未肉眼验证；④ Redis / 跨种种类的置灰提示是纯函数 + 条件渲染，未用真 Redis 验证；⑤ 组件没有
 testing-library 渲染测试（沿用本项目惯例：纯函数层单测 + 浏览器验证）；⑥ 验证实例视口固定 ~565×482，
 宽屏视觉排版只做了数值核对（行宽/标签宽）没肉眼比过。
+
+### A.14 E5 落地实况（2026-09-26，GUI + TUI 向导 + 文档，**零 spec 变更**）
+
+**提交序列**（每批独立门禁 + 独立中文提交，7 个提交合计 +4724/−21）：
+
+| 提交 | 内容 |
+|---|---|
+| `f48986e` | E5.0 Go 传输层 `SchemaDiff` / `SchemaDDL`（Local + Remote，含 214 行双后端测试） |
+| `47c9acf` | E5.1 Go 呈现层纯函数 `pkg/cmpsync`（380 + 单测 297 / 16 份） |
+| `6d3d3be` | E5.2 TUI `viewCompare` 三段向导 + 执行编排 + 代跑回滚（`compare.go` 740 + `commands.go` 137 + 按键测试 428） |
+| `ed60c08` | E5.3 Rust `Transport` trait 补 `schema_diff` / `schema_ddl`（+ 本机真跑测试 70） |
+| `6cf53a7` | E5.4 GUI 呈现层纯函数 `ui-gui/src/cmpsync.rs`（497 / 8 份单测） |
+| `1ad03a8` | E5.5 GUI 浮层向导四步 + 执行/回滚（`app.rs` +926、`view.rs` +714、`cmpsync.rs` +66/3 份单测） |
+| `d207b1b` | E5.2 补：TUI 的 `i` 忽略默认值（三端口径齐平，+ 空计划下选项键被锁死的修复） |
+
+**三端呈现层同构**（规则层仍是唯一一份：`polydb-schema-diff` ↔ `pkg/schemadiff` + 两个服务端端点）：
+
+| 职责 | Web | TUI/GUI 对应 |
+|---|---|---|
+| 相位名 / 操作名 | `PHASE_LABEL` / `OP_LABEL` | `PhaseLabel`/`OpLabel`（Go）、`phase_label`/`op_label`（Rust） |
+| 按相位分组 + 默认勾选 | `groupByPhase` / `defaultSelection` | `GroupByPhase`/`DefaultSelection`、`group_by_phase`/`default_selection` |
+| 整表重建缺口 | `groupGaps` / `fillGroupGaps` | `GroupGaps`/`FillGroupGaps`、同名 snake_case |
+| 执行分派 | `planExecution` | `PlanExecution` / `plan_execution`（`pragma_head`/`pragma_tail`/`body`/`wrap_in_tx`） |
+| 能力位 → 人话 | 组件内联三句 | `cmpExecMode`（Go）/ `exec_mode`（Rust），三句逐字相同 |
+| 强确认 | 输入名比对 | `ConfirmMatches` / `confirm_matches`（只剥首尾空白，逐字才算） |
+| 列表裁窗 | CSS 滚动 + 行数提示 | `ListWindow` / `list_window` +「↑ 上方还有 N 行」 |
+
+**文案一致性钉在测试里**：Rust `wizard_step_labels_match_the_web_wizard` 断言四步步骤名与 Web
+`STEP_LABEL` 逐字相等；Go `TestCompareWizardHelpAndFooter` 断言三段页脚与 F1 键位表含 `i`/`n`/`x`/`r`/`c`
+与「逐字输入基准侧连接名」。三端页脚同一条语句的措辞差异视为缺陷，不是风格问题。
+
+**行为级真跑**（Go 侧，真 app-core + Local transport + `:memory:` SQLite 两个连接，绕开一切 mock）：
+`TestCompareWizardSyncAndRollback` 把 ①选期望侧 → ②差异勾选（含破坏性默认不勾、7/10 勾选）→ `f` 补齐
+重建组 → `g` 生成 → `x` 正向 → `c` 复查收敛 → `r` 强确认（错名不放行）→ 代跑回滚 → 再复查退回原状
+整条链路按 keystroke 驱动跑完；`TestApplyScriptSyncDispatch` 直接验两种执行分派（事务内失败整体回滚、
+`ddl_in_tx=false` 逐条留下中间态）；`TestCompareScriptViewScrollWindow` 验裁窗；
+`TestCompareWizardOptionKeys` 验 `i`/`n` 翻状态即重跑、请求带得上、且空计划改得动。
+
+**GUI 形态定案的实际收益**：浮层 Modal 与 `main` 同级渲染 ⇒ SQL 编辑器的 `on_key_down` 不是它的祖先，
+键位天然隔离，不需要给既有 action 前缀加 guard；四步在层内自走 ⇒ 全程不碰 `workspace` 单活动连接状态机，
+"临时把活动连接切到期望侧再切回来"这个最危险的想法直接消失。点击行 = 先挪高亮再走该步 Enter 语义
+（`cmp_set_cur`），键盘与鼠标共用一份游标。列表按可视行裁窗（连接 12 / 语句 8 / 回滚预览 5）而不是
+接 GPUI 滚动 API，保证游标恒在视野内且"上方还有 N 行"文案三端一致。**比对/执行在途时点遮罩不关闭**，
+半途失败详情不会被误触丢掉。
+
+**门禁数字（2026-09-26 本机实测，E5 收口基线）**：协议漂移 `go run . check` OK（**64** 个 spec 类型对
+Rust/Go 双向核对，E5 零 spec 变更）、`… ts --check` 无漂移；Rust `cargo check` / `clippy --workspace
+--all-targets -- -D warnings` / `fmt --all -- --check` 全干净，`cargo test --workspace` **162 绿**
+（`polydb_ui_gui` **59** = G 系基线 48 + `cmpsync` 11；`polydb_schema_diff` 36、`snapshot_diff` 10）；
+Go `go build` / `go vet` 干净，`go test ./...` **189 顶层 + 14 子测试全绿、0 失败**（`internal/tui` 50、
+`pkg/cmpsync` 16）；Web `tsc --noEmit` 干净、vitest **158 绿**；契约对拍 **23 顶层 / 66 子测试 PASS，
+0 FAIL**（网络方言与 Redis 仍在用例内部 soft-skip：`e2_schema_diff_test.go:227,271`、
+`e3_schema_ddl_test.go:327`）。两处环境事实需记录：本机 **无 `make`**（Git Bash 未装），所有门禁按展开后的
+直接命令跑；`golangci-lint` v2 仍缺，Go lint 步骤恒跳过。
+**E5 未验证项（如实披露）**：① GUI 与 TUI 的**渲染均未肉眼验证**（GPUI 无法无头，TUI 只在测试里断言
+字符串产物）；② GUI 向导的**状态机与渲染没有测试**——`cmpsync.rs` 的 11 份纯函数单测覆盖的是可测逻辑，
+E5 在 `app.rs` 新增的 926 行按键分派与在 `view.rs` 新增的 714 行浮层只能靠 TUI 侧的同构测试间接背书，
+这是 E5 最大的缺口；
+③ 非 SQLite 方言三端只能拿到服务端 501，而**该 501 本机从未真正打出过**；④ `pragmas_outside_tx=false` /
+`ddl_in_tx=false` 两支分派在 GUI/TUI 同样只有纯函数与 Go 侧 `TestApplyScriptSyncDispatch` 覆盖，
+真库（PG/MySQL）跑不到；⑤ TUI 远程模式（打 polydb-server）的向导链路未真跑，只在本机模式测过；
+⑥ `golangci-lint` v2 本机仍未安装，Go lint 步骤恒跳过。
