@@ -8,6 +8,8 @@
 
 mod app;
 mod changes;
+#[allow(dead_code)] // E5.4 先落纯函数层 + 单测；E5.5 接线后移除本行（真用不上的函数届时刻意删掉）
+mod cmpsync;
 mod explain;
 mod exporters;
 mod filters;

@@ -12,3 +12,8 @@ gpui = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+# 仅测试构造 DTO 用（ConnectionInfo 的时间戳与 uuid 主键）
+chrono = { workspace = true }
+uuid = { workspace = true }
