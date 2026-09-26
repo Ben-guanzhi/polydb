@@ -235,7 +235,7 @@ E3 收口时 `check` 与 TS 重生成均零漂移（`web/src/api/index.ts` +37 �
    另有「破坏性动作默认勾选」开关供显式放开。见附录 A.13。
 5. ~~表数上限：GUI 现有整 schema 外键扫描硬上限 200 表，diff 场景动辄上千表，要不要在 E2 一并放宽/分页？~~
    **E6.4 已订正：这个问题问错了对象**（附录 A.18）。`.take(200)` 在
-   `rust/crates/ui-gui/src/app.rs:2635` 的 `load_incoming`（表页「关系」轨道列**入向外键**时逐表扫
+   `rust/crates/ui-gui/src/app.rs` 的 `load_incoming`（表页「关系」轨道列**入向外键**时逐表扫
    `list_foreign_keys`），**与结构比对无关**；比对路径（两端 `collect_snapshot`）本来就**没有任何表数上限**。
    真正剩下的不是"上限要不要放宽"，而是"每表 3 次串行元数据查询"的扇出代价——已实测：
    SQLite 内嵌引擎上 1000 表 ≈ 25 ms（Go 单侧快照）/ 两侧比对 ≈ 137 ms（Rust，dev 构建），
@@ -859,7 +859,7 @@ A.15 的 G14 留下一句话没人接：`ddl_in_tx=false` 那一支失败后"数
 
 | 说法 | 实测 |
 |---|---|
-| "比对路径有 200 表上限" | **错**。`.take(200)` 只在 `rust/crates/ui-gui/src/app.rs:2635` 的 `load_incoming`（表页"关系"轨道列入向外键扫描），比对路径两端 `collect_snapshot` 都没有任何截断 |
+| "比对路径有 200 表上限" | **错**。`.take(200)` 只在 `rust/crates/ui-gui/src/app.rs` 的 `load_incoming`（表页"关系"轨道列入向外键扫描，E6.3 抽层后在 `:2576`），比对路径两端 `collect_snapshot` 都没有任何截断 |
 | "diff 需要放宽/分页" | **不需要**（SQLite 内嵌引擎上，见下面数字）；改代码前先把量级测清楚，本批的产出就是这几个数字 |
 | 真实代价 | 每表 **3 次串行元数据查询**（`list_columns` / `list_indexes` / `list_foreign_keys`）+ 每次采集 1 次 `list_tables` ⇒ 单次 `schema_diff` 是 **2×(1+3n)** 次查询 |
 
