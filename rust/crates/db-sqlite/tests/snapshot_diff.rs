@@ -39,6 +39,17 @@ fn snapshot(conn: &SqliteConn, schema: &str) -> Snapshot {
     let tables = smol::block_on(d.list_tables(schema)).unwrap();
     let mut snaps = Vec::new();
     for t in tables {
+        // 与 app-core 的 collect_snapshot 同口径（E6.5）：视图只带名字与类型，零元数据查询。
+        if t.table_type != polydb_core::TableType::Table {
+            snaps.push(TableSnapshot {
+                name: t.name,
+                table_type: Some(t.table_type),
+                columns: Vec::new(),
+                indexes: Vec::new(),
+                foreign_keys: Vec::new(),
+            });
+            continue;
+        }
         snaps.push(TableSnapshot {
             name: t.name.clone(),
             table_type: Some(t.table_type),

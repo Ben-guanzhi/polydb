@@ -242,6 +242,30 @@ func tableMap(snap *Snapshot) map[string]*TableSnapshot {
 	return m
 }
 
+// viewNames 是快照里的视图名（按小写键升序，同名只留首个出现的原样大小写）。
+//
+// 视图**不进**比对（tableMap 已把它们跳掉，见 behavior.md §14.1），但生成器必须知道这些名字：
+// 重建用的临时表名不能撞上它们（A.15 G17），删表/重建对视图的影响也要能警告出来（A.15 G13/G16）。
+// SQLite 没有依赖目录 ⇒ 这里只有名字，判定不了「哪个视图引用了哪张表」。
+func viewNames(snap *Snapshot) []string {
+	first := map[string]string{}
+	for i := range snap.Tables {
+		t := &snap.Tables[i]
+		if !isView(t) {
+			continue
+		}
+		k := lowerASCII(t.Name)
+		if _, ok := first[k]; !ok {
+			first[k] = t.Name
+		}
+	}
+	out := make([]string, 0, len(first))
+	for _, k := range sortedKeys(first) {
+		out = append(out, first[k])
+	}
+	return out
+}
+
 func columnMap(t *TableSnapshot) map[string]*protocol.ColumnInfo {
 	m := make(map[string]*protocol.ColumnInfo, len(t.Columns))
 	for i := range t.Columns {

@@ -3,7 +3,7 @@
 //! 输入 = 两侧快照 + **已勾选**的变更条目（E1 的 `Entry`），输出 = 有序语句脚本 + 回滚脚本。
 //! 零 IO、零 UI：语句只是文本，执行由调用方走既有的 `/query` 或 `/api/transactions`。
 //!
-//! 规则全部来自 `docs/plan-compare-sync.md` 附录 A.11 的**实测取证**（不是文档推测）：
+//! 规则全部来自 `docs/plan-compare-sync.md` 附录 A.11 / A.15 的**实测取证**（不是文档推测）：
 //!
 //! 1. 直改：`create_table` / `drop_table` / `add_column` / `drop_column` / `add_index` / `drop_index`。
 //! 2. 恒走重建：`alter_column` / `add_foreign_key` / `drop_foreign_key`
@@ -23,6 +23,9 @@
 //!    丢弃的对象（例：删一个被索引覆盖的列 ⇒ 整表重建 ⇒ 回滚只 ADD COLUMN 会永久留下没有索引的表）。
 //! 8. 勾选校验（`select_entries`）：id 必须属于当前计划；进入重建的表必须**整组**勾选，
 //!    否则该表上未勾选的变更会被重建语句一并落地。
+//! 9. 视图不参与比对，但**名字**要进快照（E6.5，取证 A.15 G13/G16/G17）：临时表名避让它们，
+//!    删表与重建挂粗粒度视图警告——SQLite 没有依赖目录，判定不了「哪个视图引用了哪张表」，
+//!    所以只报数不猜。
 //!
 //! 其余方言显式 `NOT_SUPPORTED`（定案见 §8-1 与 §8-7：四方言的 `on_update`/`on_delete`、
 //! `generic_type` 尚未落地，diff 比不出差异，凭文档盲写语法等于「数字上已实现、实际未验证」）。
@@ -35,7 +38,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::normalize::{fold_spaces, lower_ascii, normalize_type};
 use crate::{
-    column_map, index_object, index_sig, table_map, Entry, Op, Options, Snapshot, TableSnapshot,
+    column_map, index_object, index_sig, table_map, view_names, Entry, Op, Options, Snapshot,
+    TableSnapshot,
 };
 
 /// 固定警告文案：逐字进 `spec/behavior.md` §15，并由共享向量语料锁定。
@@ -49,6 +53,42 @@ pub const W_ADD_COLUMN_LIMITS: &str =
     "SQLite 的 ADD COLUMN 只接受常量默认值，非空表上加 NOT NULL 且无默认值的列也会报错";
 pub const W_REBUILD_NEW_NOT_NULL: &str =
     "重建只复制两侧同名列，新增的 NOT NULL 列若无默认值会让数据搬运 INSERT 报错";
+
+/// 视图警告里的名单上限：再多只报数不报名（警告是给人扫一眼的）。
+const VIEW_WARN_MAX: usize = 5;
+
+/// 「N 个视图（a, b 等）」——快照里的视图名升序，超过 5 个以「等」收尾。
+fn view_scope(names: &[String]) -> String {
+    let head = names
+        .iter()
+        .take(VIEW_WARN_MAX)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if names.len() > VIEW_WARN_MAX {
+        format!("{} 个视图（{head} 等）", names.len())
+    } else {
+        format!("{} 个视图（{head}）", names.len())
+    }
+}
+
+/// 删表的视图警告（取证 A.15 G16：`DROP` 没有依赖检查，语句会成功、视图就此失效，
+/// 且原先**一条警告都没有**）。文案逐字进 behavior.md §15，Go 侧必须一致。
+fn w_view_drop(views: &[String]) -> String {
+    format!(
+        "本库现有 {}：DROP TABLE 不检查依赖，语句会成功，但引用它的视图将失效（快照不含视图定义，判定不了是哪一个）",
+        view_scope(views)
+    )
+}
+
+/// 重建的视图警告（取证 A.15 G13：失败点不在 `DROP` 而在 `ALTER TABLE … RENAME`，
+/// 它会重解析依赖视图 ⇒ 整条重建直接报错）。
+fn w_view_rebuild(views: &[String]) -> String {
+    format!(
+        "本库现有 {}：重建经 RENAME，而 SQLite 改名时会重解析依赖该表的视图 ⇒ 有视图引用它就整条重建报错",
+        view_scope(views)
+    )
+}
 
 const PRAGMA_FK_OFF: &str = "PRAGMA foreign_keys=OFF;";
 const PRAGMA_FK_ON: &str = "PRAGMA foreign_keys=ON;";
@@ -426,7 +466,12 @@ fn create_warnings(kind: DatabaseKind, t: &TableSnapshot) -> Vec<String> {
     w
 }
 
-fn rebuild_warnings(kind: DatabaseKind, tgt: &TableSnapshot, src: &TableSnapshot) -> Vec<String> {
+fn rebuild_warnings(
+    kind: DatabaseKind,
+    tgt: &TableSnapshot,
+    src: &TableSnapshot,
+    views: &[String],
+) -> Vec<String> {
     let mut w = vec![
         W_TRIGGERS.to_string(),
         W_GENERATED_COLUMNS.to_string(),
@@ -444,10 +489,14 @@ fn rebuild_warnings(kind: DatabaseKind, tgt: &TableSnapshot, src: &TableSnapshot
     if has_new_not_null {
         w.push(W_REBUILD_NEW_NOT_NULL.to_string());
     }
+    if !views.is_empty() {
+        w.push(w_view_rebuild(views));
+    }
     w
 }
 
-/// 重建用的临时表名：与任一侧快照里的表重名时追加序号。
+/// 重建用的临时表名：与任一侧快照里的**表或视图**重名时追加序号
+/// （撞视图同样会让首条 `CREATE TABLE` 失败，A.15 G17）。
 fn tmp_name(base: &str, taken: &BTreeSet<String>) -> String {
     let mut cand = format!("polydb_tmp_{base}");
     let mut n = 2usize;
@@ -458,6 +507,15 @@ fn tmp_name(base: &str, taken: &BTreeSet<String>) -> String {
     cand
 }
 
+/// 一次 `emit_script` 在**被执行侧**看得见的名字。
+///
+/// `taken` 是临时表必须避让的已占用名（表名 + 视图名，G17）；`views` 是被执行侧的视图名单，
+/// 只用来出视图告警（G13/G16）。两者同源于同一对快照，故合并传参。
+struct Seen {
+    taken: BTreeSet<String>,
+    views: Vec<String>,
+}
+
 /// 重建一张表：建新表 → 搬同名列 → 删旧表 → 改名 → 补用户索引。
 ///
 /// 整组语句的 `phase` 取该表在计划里**第一个**条目的相位（组的输出位置就在那里），
@@ -466,12 +524,12 @@ fn rebuild_statements(
     kind: DatabaseKind,
     tgt: &TableSnapshot,
     src: &TableSnapshot,
-    taken: &BTreeSet<String>,
+    seen: &Seen,
     entry_ids: &[String],
     phase: u8,
     non_reversible: bool,
 ) -> Vec<Statement> {
-    let tmp = tmp_name(&tgt.name, taken);
+    let tmp = tmp_name(&tgt.name, &seen.taken);
     let sc = column_map(src);
     let common: Vec<String> = ordered_columns(tgt)
         .into_iter()
@@ -489,7 +547,7 @@ fn rebuild_statements(
             ),
             phase,
             &tgt.name,
-            rebuild_warnings(kind, tgt, src),
+            rebuild_warnings(kind, tgt, src, &seen.views),
             non_reversible,
         ),
         mk_stmt(
@@ -550,6 +608,7 @@ fn direct_statement(
     e: &Entry,
     src: Option<&TableSnapshot>,
     tgt: Option<&TableSnapshot>,
+    views: &[String],
 ) -> CoreResult<Statement> {
     let one = vec![e.id.clone()];
     let nr = entry_non_reversible(e);
@@ -569,14 +628,22 @@ fn direct_statement(
                 nr,
             ))
         }
-        Op::DropTable => Ok(mk_stmt(
-            &one,
-            format!("DROP TABLE {};", quote_ident(&e.table)),
-            e.phase,
-            &e.table,
-            Vec::new(),
-            nr,
-        )),
+        Op::DropTable => {
+            // 库里一个视图都没有 ⇒ 没什么可警告的，保持原有的空警告。
+            let warnings: Vec<String> = if views.is_empty() {
+                Vec::new()
+            } else {
+                vec![w_view_drop(views)]
+            };
+            Ok(mk_stmt(
+                &one,
+                format!("DROP TABLE {};", quote_ident(&e.table)),
+                e.phase,
+                &e.table,
+                warnings,
+                nr,
+            ))
+        }
         Op::AddColumn => {
             let t = table_or_err(tgt, &e.table)?;
             let c = column_of(t, &e.object).ok_or_else(|| {
@@ -674,9 +741,17 @@ fn emit_script(
 ) -> CoreResult<(Vec<Statement>, BTreeSet<String>)> {
     let src = table_map(source);
     let tgt = table_map(target);
+    // 警告只报**被改的那一侧**（source 是执行侧）的视图：回滚方向会互换两侧，
+    // 因此回滚脚本的视图警告按回滚真正要动的库来出。
+    let views = view_names(source);
     let mut taken: BTreeSet<String> = BTreeSet::new();
     taken.extend(src.keys().cloned());
     taken.extend(tgt.keys().cloned());
+    // 视图名也要占位：临时表撞上**视图**同样让首条 CREATE TABLE 失败（A.15 G17，
+    // 而 `table_map` 为了「视图不参与比对」把它们跳掉了，所以这里得单独取一次）。
+    taken.extend(views.iter().map(|n| lower_ascii(n)));
+    taken.extend(view_names(target).into_iter().map(|n| lower_ascii(&n)));
+    let seen = Seen { taken, views };
 
     // 1. 哪些表必须整体重建（条目自身触发，或来自 forced——回滚方向承接正向的重建）
     let mut rebuild: BTreeSet<String> = BTreeSet::new();
@@ -712,7 +787,7 @@ fn emit_script(
             }
             let t = table_or_err(tgt.get(&k).copied(), &e.table)?;
             let s = table_or_err(src.get(&k).copied(), &e.table)?;
-            out.extend(rebuild_statements(kind, t, s, &taken, ids, *phase, *nr));
+            out.extend(rebuild_statements(kind, t, s, &seen, ids, *phase, *nr));
             continue;
         }
         out.push(direct_statement(
@@ -720,6 +795,7 @@ fn emit_script(
             e,
             src.get(&k).copied(),
             tgt.get(&k).copied(),
+            &seen.views,
         )?);
     }
 
@@ -1311,6 +1387,119 @@ mod tests {
         let tt = snap(DatabaseKind::Sqlite, vec![tgt]);
         let out = gen(&s, &tt, &[entry(Op::AddIndex, "t", "sqlite_autoindex_t_1")]);
         assert!(out.statements[1].sql.contains("\"polydb_tmp_t_2\""));
+    }
+
+    fn view(name: &str) -> TableSnapshot {
+        let mut t = table(name, Vec::new());
+        t.table_type = Some(TableType::View);
+        t
+    }
+
+    #[test]
+    fn view_names_sort_by_lowercase_and_dedup_case_insensitively() {
+        let s = snap(
+            DatabaseKind::Sqlite,
+            vec![
+                table("t", vec![col("a", "text", true, 1)]),
+                view("v_b"),
+                view("V_A"),
+                view("v_a"),
+                view("v_c"),
+            ],
+        );
+        // 键取小写 ⇒ 顺序按小写字节；同名只留首个，与 table_map 的 or_insert 同规则
+        assert_eq!(view_names(&s), ["V_A", "v_b", "v_c"]);
+        let single = snap(
+            DatabaseKind::Sqlite,
+            vec![table("t", Vec::new()), view("v_a")],
+        );
+        assert_eq!(view_names(&single), ["v_a"]);
+        let no_view = snap(DatabaseKind::Sqlite, vec![table("t", Vec::new())]);
+        assert!(view_names(&no_view).is_empty());
+    }
+
+    #[test]
+    fn view_scope_lists_at_most_five_names() {
+        let many: Vec<String> = (0..7).map(|i| format!("v_{i}")).collect();
+        assert_eq!(view_scope(&many), "7 个视图（v_0, v_1, v_2, v_3, v_4 等）");
+        assert_eq!(view_scope(&["v_a".into()]), "1 个视图（v_a）");
+        assert_eq!(
+            view_scope(&["v_a".into(), "v_b".into()]),
+            "2 个视图（v_a, v_b）"
+        );
+    }
+
+    #[test]
+    fn drop_table_and_rebuild_warn_about_views_on_the_executed_side() {
+        let src = snap(
+            DatabaseKind::Sqlite,
+            vec![
+                table(
+                    "t",
+                    vec![pk_col("id", "INTEGER"), col("a", "text", true, 2)],
+                ),
+                view("z_report"),
+                view("a_report"),
+                view("polydb_tmp_t"),
+            ],
+        );
+        let out = gen(
+            &src,
+            &snap(DatabaseKind::Sqlite, Vec::new()),
+            &[entry(Op::DropTable, "t", "")],
+        );
+        assert_eq!(out.statements[0].warnings, [w_view_drop(&view_names(&src))]);
+        // 目标侧没有视图 ⇒ 回滚（在目标侧建表）不该带视图警告
+        assert!(out.rollback[0]
+            .warnings
+            .contains(&W_CREATE_TABLE.to_string()));
+        assert!(!out.rollback[0].warnings.iter().any(|w| w.contains("视图")));
+
+        let mut tgt = table(
+            "t",
+            vec![pk_col("id", "INTEGER"), col("a", "text", false, 2)],
+        );
+        tgt.indexes = vec![idx("sqlite_autoindex_t_1", false, true, &["a"])];
+        let out2 = gen(
+            &src,
+            &snap(DatabaseKind::Sqlite, vec![tgt]),
+            &[entry(Op::AddIndex, "t", "sqlite_autoindex_t_1")],
+        );
+        let head = &out2.statements[1];
+        assert_eq!(
+            head.warnings.last().unwrap(),
+            &w_view_rebuild(&view_names(&src))
+        );
+        // 视图名占掉了 polydb_tmp_t ⇒ 临时表改名，且警告里点的是视图名
+        assert!(head.sql.contains("\"polydb_tmp_t_2\""));
+        assert!(head.warnings.iter().any(|w| {
+            w.contains("a_report") && w.contains("z_report") && w.contains("重建经 RENAME")
+        }));
+    }
+
+    #[test]
+    fn no_views_means_no_view_warning_anywhere() {
+        let src = snap(
+            DatabaseKind::Sqlite,
+            vec![table("t", vec![col("a", "text", true, 1)])],
+        );
+        let tgt = snap(
+            DatabaseKind::Sqlite,
+            vec![table("t", vec![col("a", "text", false, 1)])],
+        );
+        let out = gen(&src, &tgt, &[entry(Op::DropTable, "t", "")]);
+        assert!(out.statements[0].warnings.is_empty());
+        let mut e = entry(Op::AlterColumn, "t", "a");
+        e.flags = vec![ColumnFlag::Nullability];
+        let out2 = gen(&src, &tgt, &[e]);
+        for st in out2.statements.iter().chain(out2.rollback.iter()) {
+            assert!(
+                !st.warnings.iter().any(|w| w.contains("视图")),
+                "无视图时不该出现视图警告：{:?}",
+                st.warnings
+            );
+        }
+        assert!(view_names(&src).is_empty());
     }
 
     #[test]

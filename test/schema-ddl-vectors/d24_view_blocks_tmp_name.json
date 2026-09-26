@@ -1,0 +1,163 @@
+{
+  "name": "d24_view_blocks_tmp_name",
+  "note": "E6.5 A 档：视图名进快照 ⇒ 重建的临时名必须让开同名**视图**（修复前会正好撞上，首条 CREATE TABLE 即 already exists）。重建语句同时挂粗粒度视图警告，且警告只报**被改那一侧**（source）的视图 ⇒ 回滚方向互换两侧，target 没有视图所以回滚不带视图警告。视图不参与比对，diff 条目里不该出现它。",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "a", "data_type": "TEXT", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      },
+      { "name": "v_report", "type": "view", "columns": [], "indexes": [], "foreign_keys": [] },
+      { "name": "polydb_tmp_t", "type": "view", "columns": [], "indexes": [], "foreign_keys": [] }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "a", "data_type": "VARCHAR(40)", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": ["t/a/alter_column"],
+  "expected": {
+    "statements": [
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=OFF;",
+        "phase": 0,
+        "table": "",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "t/a/alter_column"
+        ],
+        "sql": "CREATE TABLE \"polydb_tmp_t_2\"(\"id\" integer NOT NULL,\"a\" varchar(40),PRIMARY KEY (\"id\"));",
+        "phase": 70,
+        "table": "t",
+        "warnings": [
+          "重建表会丢失该表上的触发器（快照不含触发器）",
+          "生成列会退化为普通列（快照不标注生成列）",
+          "CHECK 约束会丢失（快照不含 CHECK 约束）",
+          "主键整数列的 AUTOINCREMENT 关键字无法从快照还原",
+          "本库现有 2 个视图（polydb_tmp_t, v_report）：重建经 RENAME，而 SQLite 改名时会重解析依赖该表的视图 ⇒ 有视图引用它就整条重建报错"
+        ],
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/a/alter_column"
+        ],
+        "sql": "INSERT INTO \"polydb_tmp_t_2\"(\"id\",\"a\") SELECT \"id\",\"a\" FROM \"t\";",
+        "phase": 70,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/a/alter_column"
+        ],
+        "sql": "DROP TABLE \"t\";",
+        "phase": 70,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/a/alter_column"
+        ],
+        "sql": "ALTER TABLE \"polydb_tmp_t_2\" RENAME TO \"t\";",
+        "phase": 70,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=ON;",
+        "phase": 255,
+        "table": "",
+        "non_reversible": false
+      }
+    ],
+    "rollback": [
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=OFF;",
+        "phase": 0,
+        "table": "",
+        "non_reversible": false
+      },
+      {
+        "entry_ids": [
+          "t/a/alter_column"
+        ],
+        "sql": "CREATE TABLE \"polydb_tmp_t_2\"(\"id\" integer NOT NULL,\"a\" text,PRIMARY KEY (\"id\"));",
+        "phase": 70,
+        "table": "t",
+        "warnings": [
+          "重建表会丢失该表上的触发器（快照不含触发器）",
+          "生成列会退化为普通列（快照不标注生成列）",
+          "CHECK 约束会丢失（快照不含 CHECK 约束）",
+          "主键整数列的 AUTOINCREMENT 关键字无法从快照还原"
+        ],
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/a/alter_column"
+        ],
+        "sql": "INSERT INTO \"polydb_tmp_t_2\"(\"id\",\"a\") SELECT \"id\",\"a\" FROM \"t\";",
+        "phase": 70,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/a/alter_column"
+        ],
+        "sql": "DROP TABLE \"t\";",
+        "phase": 70,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [
+          "t/a/alter_column"
+        ],
+        "sql": "ALTER TABLE \"polydb_tmp_t_2\" RENAME TO \"t\";",
+        "phase": 70,
+        "table": "t",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": [],
+        "sql": "PRAGMA foreign_keys=ON;",
+        "phase": 255,
+        "table": "",
+        "non_reversible": false
+      }
+    ],
+    "pragmas_outside_tx": true,
+    "ddl_in_tx": true
+  },
+  "error_code": "",
+  "error_message": ""
+}

@@ -356,7 +356,9 @@
 ### 14.1 快照采集
 
 服务端为 `source` / `target` 各采一份快照：`list_tables` → 逐表 `list_columns` /
-`list_indexes` / `list_foreign_keys`。视图与物化视图**整体跳过**（不参与比对，也不报错）。
+`list_indexes` / `list_foreign_keys`。视图与物化视图**不参与比对**（不报错、不产出条目），
+但**名字要进快照**（`type` 标为 `view` / `materialized_view`，列/索引/外键为空，
+采集时不为其发任何元数据查询）：生成器需要这份名单来避让临时表名并出视图告警（见 §15.3、§15.8）。
 两侧连接必须是**同一种数据库**，且**不得为 Redis**。
 
 ### 14.2 归一规则（把「同一语义、不同写法」折叠成可比较的字面量）
@@ -482,7 +484,8 @@ SQLite 的 `ALTER TABLE` 能力极窄（取证 G1–G4），故按动作分两�
 4. `ALTER TABLE "polydb_tmp_{表名}" RENAME TO "原表"`；
 5. 目标侧的每个**用户索引**补一条 `CREATE [UNIQUE] INDEX …`（autoindex 已并进第 1 步）。
 
-临时表名与任一侧快照里的表重名时追加序号（`polydb_tmp_t_2`），避让规则确定，双端一致。
+临时表名与任一侧快照里的**表名或视图名**重名时追加序号（`polydb_tmp_t_2`），避让规则确定，
+双端一致（视图名占位是取证 G17：临时表撞同名视图时首条 `CREATE TABLE` 直接报 `already exists`）。
 
 **重建组的输出位置**：整组语句出现在该表**第一个**条目的相位上（不是 `alter_column` 的 70），
 `entry_ids` 吸收该表在本次勾选里的**全部**条目 id，只有组内**首条**语句挂重建告警。
@@ -543,6 +546,19 @@ SQLite 的 `ALTER TABLE` 能力极窄（取证 G1–G4），故按动作分两�
 | `W_ADD_COLUMN_LIMITS` | SQLite 的 ADD COLUMN 只接受常量默认值，非空表上加 NOT NULL 且无默认值的列也会报错 | 非常量默认值或 NOT NULL 无默认的新列 |
 | `W_REBUILD_NEW_NOT_NULL` | 重建只复制两侧同名列，新增的 NOT NULL 列若无默认值会让数据搬运 INSERT 报错 | 重建组首条 |
 
+另有两条**带视图名单的动态文案**（不是常量，名单取自 §14.1 进快照的视图名，按小写升序、
+最多点 5 个名字、超出以「等」收尾）：
+
+| 文案 | 挂在哪 |
+|---|---|
+| `本库现有 {N} 个视图（{名单}）：DROP TABLE 不检查依赖，语句会成功，但引用它的视图将失效（快照不含视图定义，判定不了是哪一个）` | `drop_table`（取证 G16：原先一条警告都没有） |
+| `本库现有 {N} 个视图（{名单}）：重建经 RENAME，而 SQLite 改名时会重解析依赖该表的视图 ⇒ 有视图引用它就整条重建报错` | 重建组首条，排在其余重建告警之后（取证 G13） |
+
+告警按**被执行的那一侧**出：回滚方向会互换两侧，故回滚脚本的视图警告描述的是回滚真正要动的库。
+名单为空时整条告警不出现。`drop_column` **不挂**视图告警：删被视图引用的列时引擎自身就报错
+（实测 `error in view v_orders after drop column: no such column: qty`），按 §14.3「不猜语义、
+执行期报错兜底」无需生成器多嘴；而 `DROP TABLE` 引擎**不报错**，所以必须由生成器说话。
+
 告警只作提示，**不做执行前拦截**：真正的失败由数据库在执行期报错兜底。
 
 ### 15.9 其余错误
@@ -556,9 +572,11 @@ SQLite 的 `ALTER TABLE` 能力极窄（取证 G1–G4），故按动作分两�
 
 `test/schema-ddl-vectors/*.json` 一份语料同时喂两端，跑完整管线 **diff → SelectEntries → Generate**，
 逐字段比对（含中文 `warnings`、`non_reversible`、两个 pragmas 位）。
-23 份语料 = 15 份脚本（覆盖 §15.3 全部直改与重建路径、autoindex、无名索引/外键、临时表避让、
-重建组吸收同表条目）+ 8 份错误（4 种方言、Redis、跨种类、过期 id、未整组勾选）。
-覆盖度是**断言**：9 个动作、8 种告警、可逆/不可逆两值、`pragmas_outside_tx` 两值必须全被打到。
+26 份语料 = 18 份脚本（覆盖 §15.3 全部直改与重建路径、autoindex、无名索引/外键、临时表避让
+（表名与视图名）、重建组吸收同表条目、两条视图告警含超 5 个的截断渲染）+ 8 份错误（4 种方言、
+Redis、跨种类、过期 id、未整组勾选）。
+覆盖度是**断言**：9 个动作、8 个告警常量、2 条视图告警（按句头子串判，因为名单是动态的）、
+可逆/不可逆两值、`pragmas_outside_tx` 两值必须全被打到。
 
 `expected` 由 Go 侧生成器回写（`POLYDB_DDL_VECTORS_WRITE=1 go test ./pkg/schemadiff -run WriteDDLVectorExpected`，
 只替换文件里 `"expected"` 这一个 JSON 值，其余逐字节不动），SQL **必须人工复核**后才提交；

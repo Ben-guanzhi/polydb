@@ -1,0 +1,58 @@
+{
+  "name": "d25_drop_table_warns_about_views",
+  "note": "E6.5 A 档：删表引擎层面不拦（DROP 无依赖检查、静默把破视图留在库里，A.15 G16），所以脚本必须自己说出来。名单按小写键升序；回滚方向执行的是 target 侧（没有视图）⇒ 回滚的建表语句不带视图警告。",
+  "options": { "ignore_defaults": false, "select_destructive": true },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "legacy",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      },
+      { "name": "v_legacy", "type": "view", "columns": [], "indexes": [], "foreign_keys": [] },
+      { "name": "b_second", "type": "view", "columns": [], "indexes": [], "foreign_keys": [] }
+    ]
+  },
+  "target": { "kind": "sqlite", "schema": "main", "tables": [] },
+  "selected": ["legacy//drop_table"],
+  "expected": {
+    "statements": [
+      {
+        "entry_ids": [
+          "legacy//drop_table"
+        ],
+        "sql": "DROP TABLE \"legacy\";",
+        "phase": 40,
+        "table": "legacy",
+        "warnings": [
+          "本库现有 2 个视图（b_second, v_legacy）：DROP TABLE 不检查依赖，语句会成功，但引用它的视图将失效（快照不含视图定义，判定不了是哪一个）"
+        ],
+        "non_reversible": true
+      }
+    ],
+    "rollback": [
+      {
+        "entry_ids": [
+          "legacy//create_table"
+        ],
+        "sql": "CREATE TABLE \"legacy\"(\"id\" text);",
+        "phase": 50,
+        "table": "legacy",
+        "warnings": [
+          "新建表只按快照里的列定义生成，不含 CHECK 约束、生成列与触发器"
+        ],
+        "non_reversible": false
+      }
+    ],
+    "pragmas_outside_tx": false,
+    "ddl_in_tx": true
+  },
+  "error_code": "",
+  "error_message": ""
+}

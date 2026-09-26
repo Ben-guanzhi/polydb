@@ -162,10 +162,10 @@ func TestRebuildWithDependentViewRollsBackCleanInsideTx(t *testing.T) {
 	}
 }
 
-// 事实 3：不涉及重建、只是 drop_table 时，DROP **静默成功**并把破视图留在库里
-// （sqlite_master 里条目还在，查询才报错）——与取证 G4「重建静默丢触发器」同类，
-// 而生成器目前对此一个字都不说。
-func TestDropTableLeavesDanglingViewSilently(t *testing.T) {
+// 事实 3：不涉及重建、只是 drop_table 时，DROP **引擎层面仍然静默成功**并把破视图留在库里
+// （sqlite_master 里条目还在，查询才报错）——与取证 G4「重建静默丢触发器」同类。
+// E6.5 拍板 A 档后补的是**语句级警告**：引擎不会拦，但脚本必须把这件事说出来。
+func TestDropTableLeavesDanglingView(t *testing.T) {
 	src := snapshot(t, connWith(t, srcWithViewDDL), "main")
 	tgt := snapshot(t, connWith(t, nil), "main")
 	p := plan(t, src, tgt)
@@ -201,31 +201,76 @@ func TestDropTableLeavesDanglingViewSilently(t *testing.T) {
 	if got := execReport(t, c, "SELECT * FROM v_orders"); !strings.HasPrefix(got, "ERR") {
 		t.Fatalf("视图此时必须已破：%s", got)
 	}
-	// 今天生成器对"删表会留下破视图"一个字都不说（是否补警告见 E6.5 拍板，故此处只记录不断言）。
-	t.Logf("实测：删表语句现有警告 = %v", dropWarnings)
+	// 引擎静默，但语句必须带警告，且警告要点名库里那个视图（E6.5 A 档的粗粒度警告）。
+	if len(dropWarnings) != 1 || !strings.Contains(dropWarnings[0], "v_orders") {
+		t.Fatalf("删表语句必须挂一条点名视图的警告，实际：%v", dropWarnings)
+	}
+	if !strings.Contains(dropWarnings[0], "不检查依赖") {
+		t.Fatalf("警告必须说清「DROP 不检查依赖」这件事：%v", dropWarnings)
+	}
 }
 
-// 事实 4：生成器的临时名去重集看不见视图 ⇒ 库里已有同名**视图**时脚本一开始就撞车。
-func TestTempNameCollidesWithExistingView(t *testing.T) {
+// 事实 4（E6.5 拍板 A 档后从「取证」转为「回归」）：临时名去重集现在**看得见视图**
+// ⇒ 库里已有同名视图时生成的临时名自动避让，整条重建在真引擎上跑得通，那个视图也毫发无损，
+// 并且重建语句带着粗粒度视图警告。
+// 修复前的实测（本测试的旧版本）：临时名正好撞上视图名，首条 CREATE TABLE 即 already exists。
+func TestTempNameAvoidsExistingViewName(t *testing.T) {
 	srcDDL := []string{
 		"CREATE TABLE orders (id INTEGER PRIMARY KEY, qty INTEGER NOT NULL DEFAULT 1)",
 		"INSERT INTO orders (id, qty) VALUES (1, 10)",
 		"CREATE VIEW polydb_tmp_orders AS SELECT 1 AS one",
 	}
 	script := probeScript(t, srcDDL, tgtWiderQtyDDL, "orders")
-	if !strings.Contains(script.Statements[1].SQL, `"polydb_tmp_orders"`) {
-		t.Fatalf("取证前提：生成器用的临时名必须正好是那个视图名：%s", script.Statements[1].SQL)
+	head := script.Statements[1].SQL
+	if !strings.Contains(head, `"polydb_tmp_orders_2"`) {
+		t.Fatalf("临时名必须让开同名视图（撞名是修复前的行为）：%s", head)
 	}
+	if len(script.Statements[1].Warnings) == 0 {
+		t.Fatalf("含视图的库里重建必须挂视图警告，实际一条都没有：%s", head)
+	}
+	if !strings.Contains(script.Statements[1].Warnings[len(script.Statements[1].Warnings)-1], "polydb_tmp_orders") {
+		t.Fatalf("视图警告要点名它挡路的那个视图：%v", script.Statements[1].Warnings)
+	}
+
 	c := connWith(t, srcDDL)
-	first := ""
 	for _, s := range script.Statements {
-		if r := execReport(t, c, s.SQL); strings.HasPrefix(r, "ERR") {
-			first = s.SQL + " ⇒ " + r
-			break
+		if r := execReport(t, c, s.SQL); r != "OK" {
+			t.Fatalf("避让之后整条重建必须全程无错：%s ⇒ %s", s.SQL, r)
 		}
 	}
-	t.Logf("首个失败：%s", first)
-	if !strings.Contains(first, "already exists") {
-		t.Fatalf("临时名撞上同名视图必须立刻失败，实际：%q", first)
+	if got := scalarJSON(t, c, "SELECT count(*) FROM orders"); got != "1" {
+		t.Fatalf("重建后 orders 行数应保持不变：%s", got)
+	}
+	// 库里那份表定义必须真的是新版的（证明确实走了重建，而不是什么都没做）。
+	if got := scalarJSON(t, c, `SELECT sql FROM sqlite_master WHERE type='table' AND name='orders'`); !strings.Contains(strings.ToUpper(got), "TEXT") {
+		t.Fatalf("重建后 orders 的定义应已带上目标侧的 TEXT：%s", got)
+	}
+	// 挡过路的那个视图必须还在、还能查。
+	if got := scalarJSON(t, c, "SELECT one FROM polydb_tmp_orders"); got != "1" {
+		t.Fatalf("同名视图不该被重建波及：%s", got)
+	}
+}
+
+// 补充取证（E6.5 定警告口径时顺带测的）：被视图引用的列能不能直改删掉？
+//
+// 结论：**引擎会拦**，语句直接报错、列原地不动 ⇒ 删列属于 behavior.md §14.3 的
+// 「不猜语义、执行期报错兜底」那一档，所以生成器**不给**删列挂视图警告（报了等于重复报错）。
+// 这与删表正好相反：删表引擎不拦、静默留破视图 ⇒ 必须由生成器说一句话。
+func TestDropColumnReferencedByViewIsBlockedByEngine(t *testing.T) {
+	c := connWith(t, srcWithViewDDL)
+	r := execReport(t, c, "ALTER TABLE orders DROP COLUMN qty")
+	t.Logf("实测：删掉被视图引用的列 ⇒ %s", r)
+	if !strings.HasPrefix(r, "ERR") {
+		t.Fatalf("引擎必须拦住「删掉视图正引用的列」，实际：%s", r)
+	}
+	if !strings.Contains(r, "error in view") {
+		t.Fatalf("报错必须来自视图重解析（error in view …），实际：%s", r)
+	}
+	// 拦下来就得一事无成：列还在、视图还能查、数据没动。
+	if got := scalarJSON(t, c, "SELECT count(*) FROM pragma_table_info('orders') WHERE name='qty'"); got != "1" {
+		t.Fatalf("报错后 qty 必须还在：%s", got)
+	}
+	if got := scalarJSON(t, c, "SELECT count(*) FROM v_orders"); got != "2" {
+		t.Fatalf("报错后视图必须还能查：%s", got)
 	}
 }

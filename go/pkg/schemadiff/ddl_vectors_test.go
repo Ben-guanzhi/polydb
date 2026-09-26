@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/polydb/polydb/pkg/protocol"
@@ -241,6 +242,19 @@ func TestSharedDDLVectorsCoverEveryOpAndWarning(t *testing.T) {
 	} {
 		if !seen[w] {
 			t.Fatalf("DDL 语料未覆盖告警：%s", w)
+		}
+	}
+	// 视图警告（E6.5）是带名字的动态文案，不能按常量逐字比 ⇒ 退一步锁它的两句话头，
+	// 完整的逐字一致性由 d24/d25 两份语料的 expected 兜住。
+	for _, needle := range []string{"DROP TABLE 不检查依赖", "重建经 RENAME"} {
+		hit := false
+		for w := range seen {
+			if strings.Contains(w, needle) {
+				hit = true
+			}
+		}
+		if !hit {
+			t.Fatalf("DDL 语料未覆盖视图警告：%s", needle)
 		}
 	}
 	if nr[true] == 0 || nr[false] == 0 {

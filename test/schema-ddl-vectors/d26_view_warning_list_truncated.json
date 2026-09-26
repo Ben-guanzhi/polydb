@@ -1,0 +1,63 @@
+{
+  "name": "d26_view_warning_list_truncated",
+  "note": "E6.5 A 档：视图超过 5 个时名单截断（计数报全量、名字只点前 5、以「等」收尾），且排序按小写键、展示保留原样大小写、同名大小写只留首个 ⇒ 把 viewScope 这条渲染分支也钉进跨实现对拍。expected 由生成器回写、人工复核。",
+  "options": { "ignore_defaults": false, "select_destructive": true },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "legacy",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      },
+      { "name": "v_6", "type": "view", "columns": [], "indexes": [], "foreign_keys": [] },
+      { "name": "V_5", "type": "view", "columns": [], "indexes": [], "foreign_keys": [] },
+      { "name": "v_5", "type": "view", "columns": [], "indexes": [], "foreign_keys": [] },
+      { "name": "a_1", "type": "view", "columns": [], "indexes": [], "foreign_keys": [] },
+      { "name": "b_2", "type": "view", "columns": [], "indexes": [], "foreign_keys": [] },
+      { "name": "c_3", "type": "view", "columns": [], "indexes": [], "foreign_keys": [] },
+      { "name": "d_4", "type": "view", "columns": [], "indexes": [], "foreign_keys": [] }
+    ]
+  },
+  "target": { "kind": "sqlite", "schema": "main", "tables": [] },
+  "selected": ["legacy//drop_table"],
+  "expected": {
+    "statements": [
+      {
+        "entry_ids": [
+          "legacy//drop_table"
+        ],
+        "sql": "DROP TABLE \"legacy\";",
+        "phase": 40,
+        "table": "legacy",
+        "warnings": [
+          "本库现有 6 个视图（a_1, b_2, c_3, d_4, V_5 等）：DROP TABLE 不检查依赖，语句会成功，但引用它的视图将失效（快照不含视图定义，判定不了是哪一个）"
+        ],
+        "non_reversible": true
+      }
+    ],
+    "rollback": [
+      {
+        "entry_ids": [
+          "legacy//create_table"
+        ],
+        "sql": "CREATE TABLE \"legacy\"(\"id\" text);",
+        "phase": 50,
+        "table": "legacy",
+        "warnings": [
+          "新建表只按快照里的列定义生成，不含 CHECK 约束、生成列与触发器"
+        ],
+        "non_reversible": false
+      }
+    ],
+    "pragmas_outside_tx": false,
+    "ddl_in_tx": true
+  },
+  "error_code": "",
+  "error_message": ""
+}

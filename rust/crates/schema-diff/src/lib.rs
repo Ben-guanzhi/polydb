@@ -288,6 +288,23 @@ pub(crate) fn table_map(snap: &Snapshot) -> BTreeMap<String, &TableSnapshot> {
     m
 }
 
+/// 快照里的视图名（按小写键升序，同名只留首个出现的原样大小写）。
+///
+/// 视图**不进**比对（`table_map` 已把它们跳掉，见 behavior.md §14.1），但生成器必须知道这些
+/// 名字：重建用的临时表名不能撞上它们（A.15 G17），删表/重建对视图的影响也要能警告出来
+/// （A.15 G13/G16）。SQLite 没有依赖目录 ⇒ 这里只有名字，判定不了「哪个视图引用了哪张表」。
+pub(crate) fn view_names(snap: &Snapshot) -> Vec<String> {
+    let mut m: BTreeMap<String, String> = BTreeMap::new();
+    for t in &snap.tables {
+        if !is_view(t) {
+            continue;
+        }
+        m.entry(lower_ascii(&t.name))
+            .or_insert_with(|| t.name.clone());
+    }
+    m.into_values().collect()
+}
+
 pub(crate) fn column_map(t: &TableSnapshot) -> BTreeMap<String, &ColumnInfo> {
     let mut m = BTreeMap::new();
     for c in &t.columns {

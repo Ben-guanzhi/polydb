@@ -25,7 +25,8 @@ func defaultSchema(kind protocol.DatabaseKind) string {
 	}
 }
 
-// collectSnapshot 采集一个（连接, schema）的结构快照；视图/物化视图整体跳过（§14.1）。
+// collectSnapshot 采集一个（连接, schema）的结构快照。视图/物化视图**不参与比对**，
+// 但名字要进快照（只带名字与类型，不发元数据查询）——生成器要用它避让临时表名、出视图告警（§14.1）。
 func (a *AppCore) collectSnapshot(ctx context.Context, t protocol.SchemaDiffTarget) (*schemadiff.Snapshot, error) {
 	c, err := a.ensure(ctx, t.ConnectionID)
 	if err != nil {
@@ -53,7 +54,13 @@ func (a *AppCore) collectSnapshot(ctx context.Context, t protocol.SchemaDiffTarg
 	}
 	snap := &schemadiff.Snapshot{Kind: kind, Schema: schema}
 	for _, tb := range tables {
+		// 视图（E6.5，取证 A.15）：只带**名字与类型**进快照——它不参与比对，但生成器要用这些
+		// 名字避让临时表、并据此挂视图警告。零元数据查询 ⇒ 采集扇出仍是每表 3 次。
 		if tb.Type != protocol.TableTypeTable {
+			snap.Tables = append(snap.Tables, schemadiff.TableSnapshot{
+				Name: tb.Name,
+				Type: tb.Type,
+			})
 			continue
 		}
 		cols, err := sql.ListColumns(ctx, schema, tb.Name)

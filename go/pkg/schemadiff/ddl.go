@@ -4,7 +4,7 @@
 // 输入 = 两侧快照 + 已勾选的变更条目（Diff 的 Entry），输出 = 有序语句脚本 + 回滚脚本。
 // 零 IO、零 UI：语句只是文本，执行由调用方走既有的 /query 或 /api/transactions。
 //
-// 规则全部来自 docs/plan-compare-sync.md 附录 A.11 的实测取证（不是文档推测）：
+// 规则全部来自 docs/plan-compare-sync.md 附录 A.11 / A.15 的实测取证（不是文档推测）：
 //
 //  1. 直改：create_table / drop_table / add_column / drop_column / add_index / drop_index。
 //  2. 恒走重建：alter_column / add_foreign_key / drop_foreign_key
@@ -24,6 +24,9 @@
 //     丢弃的对象（例：删一个被索引覆盖的列 ⇒ 整表重建 ⇒ 回滚只 ADD COLUMN 会永久留下没有索引的表）。
 //  8. 勾选校验（SelectEntries）：id 必须属于当前计划；进入重建的表必须**整组**勾选，
 //     否则该表上未勾选的变更会被重建语句一并落地。
+//  9. 视图不参与比对，但**名字**要进快照（E6.5，取证 A.15 G13/G16/G17）：临时表名避让它们，
+//     删表与重建挂粗粒度视图警告——SQLite 没有依赖目录，判定不了「哪个视图引用了哪张表」，
+//     所以只报数不猜。
 //
 // 其余方言显式 NOT_SUPPORTED（定案见 §8-1 与 §8-7：四方言的 on_update/on_delete、
 // generic_type 尚未落地，diff 比不出差异，凭文档盲写语法等于「数字上已实现、实际未验证」）。
@@ -48,6 +51,30 @@ const (
 	WAddColumnLimits   = "SQLite 的 ADD COLUMN 只接受常量默认值，非空表上加 NOT NULL 且无默认值的列也会报错"
 	WRebuildNewNotNull = "重建只复制两侧同名列，新增的 NOT NULL 列若无默认值会让数据搬运 INSERT 报错"
 )
+
+// viewWarnMax 是视图警告里的名单上限：再多只报数不报名（警告是给人扫一眼的）。
+const viewWarnMax = 5
+
+// viewScope 渲染「N 个视图（a, b 等）」，名单按小写键升序（与 Rust 侧同一渲染）。
+func viewScope(names []string) string {
+	head := strings.Join(names, ", ")
+	if len(names) > viewWarnMax {
+		head = strings.Join(names[:viewWarnMax], ", ") + " 等"
+	}
+	return fmt.Sprintf("%d 个视图（%s）", len(names), head)
+}
+
+// wViewDrop 是删表的视图警告（取证 A.15 G16：DROP 没有依赖检查，语句会成功、视图就此失效，
+// 且原先一条警告都没有）。文案与 Rust 侧逐字一致。
+func wViewDrop(views []string) string {
+	return fmt.Sprintf("本库现有 %s：DROP TABLE 不检查依赖，语句会成功，但引用它的视图将失效（快照不含视图定义，判定不了是哪一个）", viewScope(views))
+}
+
+// wViewRebuild 是重建的视图警告（取证 A.15 G13：失败点不在 DROP 而在 ALTER TABLE … RENAME，
+// 它会重解析依赖视图 ⇒ 整条重建直接报错）。文案与 Rust 侧逐字一致。
+func wViewRebuild(views []string) string {
+	return fmt.Sprintf("本库现有 %s：重建经 RENAME，而 SQLite 改名时会重解析依赖该表的视图 ⇒ 有视图引用它就整条重建报错", viewScope(views))
+}
 
 const (
 	pragmaFKOff = "PRAGMA foreign_keys=OFF;"
@@ -474,7 +501,7 @@ func createWarnings(kind protocol.DatabaseKind, t *TableSnapshot) []string {
 	return w
 }
 
-func rebuildWarnings(kind protocol.DatabaseKind, tgt, src *TableSnapshot) []string {
+func rebuildWarnings(kind protocol.DatabaseKind, tgt, src *TableSnapshot, views []string) []string {
 	w := []string{WTriggers, WGeneratedColumns, WCheckConstraints}
 	if hasIntegerPK(kind, tgt) {
 		w = append(w, WAutoincrement)
@@ -488,10 +515,14 @@ func rebuildWarnings(kind protocol.DatabaseKind, tgt, src *TableSnapshot) []stri
 			break
 		}
 	}
+	if len(views) > 0 {
+		w = append(w, wViewRebuild(views))
+	}
 	return w
 }
 
-// tmpName 是重建用的临时表名：与任一侧快照里的表重名时追加序号。
+// tmpName 是重建用的临时表名：与任一侧快照里的**表或视图**重名时追加序号
+// （撞视图同样会让首条 CREATE TABLE 失败，A.15 G17）。
 func tmpName(base string, taken map[string]bool) string {
 	cand := "polydb_tmp_" + base
 	for n := 2; taken[lowerASCII(cand)]; n++ {
@@ -500,12 +531,21 @@ func tmpName(base string, taken map[string]bool) string {
 	return cand
 }
 
+// seen 是一次 emitScript 在**被执行侧**看得见的名字。
+//
+// taken 是临时表必须避让的已占用名（表名 + 视图名，A.15 G17）；views 是被执行侧的视图名单，
+// 只用来出视图告警（A.15 G13/G16）。两者同源于同一对快照，故合并传参（与 Rust 侧 `Seen` 同形）。
+type seen struct {
+	taken map[string]bool
+	views []string
+}
+
 // rebuildStatements 重建一张表：建新表 → 搬同名列 → 删旧表 → 改名 → 补用户索引。
 //
 // 整组语句的 Phase 取该表在计划里**第一个**条目的相位（组的输出位置就在那里），
 // EntryIDs 是该表被吸收的全部条目。
-func rebuildStatements(kind protocol.DatabaseKind, tgt, src *TableSnapshot, taken map[string]bool, entryIDs []string, phase int, nonReversible bool) []Statement {
-	tmp := tmpName(tgt.Name, taken)
+func rebuildStatements(kind protocol.DatabaseKind, tgt, src *TableSnapshot, sn *seen, entryIDs []string, phase int, nonReversible bool) []Statement {
+	tmp := tmpName(tgt.Name, sn.taken)
 	sc := columnMap(src)
 	var common []string
 	for _, c := range orderedColumns(tgt) {
@@ -516,7 +556,7 @@ func rebuildStatements(kind protocol.DatabaseKind, tgt, src *TableSnapshot, take
 	list := joinIdents(common)
 	out := []Statement{
 		mkStmt(entryIDs, fmt.Sprintf("CREATE TABLE %s(%s);", quoteIdent(tmp), createTableBody(kind, tgt)),
-			phase, tgt.Name, rebuildWarnings(kind, tgt, src), nonReversible),
+			phase, tgt.Name, rebuildWarnings(kind, tgt, src, sn.views), nonReversible),
 		mkStmt(entryIDs, fmt.Sprintf("INSERT INTO %s(%s) SELECT %s FROM %s;", quoteIdent(tmp), list, list, quoteIdent(src.Name)),
 			phase, tgt.Name, nil, nonReversible),
 		mkStmt(entryIDs, fmt.Sprintf("DROP TABLE %s;", quoteIdent(src.Name)),
@@ -539,8 +579,8 @@ func rebuildStatements(kind protocol.DatabaseKind, tgt, src *TableSnapshot, take
 	return out
 }
 
-// directStatement 把直改动作翻成单条语句（规则 1）。
-func directStatement(kind protocol.DatabaseKind, e *Entry, src, tgt *TableSnapshot) (Statement, error) {
+// directStatement 把直改动作翻成单条语句（规则 1）。views 是**被改那一侧**快照里的视图名。
+func directStatement(kind protocol.DatabaseKind, e *Entry, src, tgt *TableSnapshot, views []string) (Statement, error) {
 	one := []string{e.ID}
 	nr := entryNonReversible(e)
 	switch e.Op {
@@ -552,7 +592,12 @@ func directStatement(kind protocol.DatabaseKind, e *Entry, src, tgt *TableSnapsh
 		sql := fmt.Sprintf("CREATE TABLE %s(%s);", quoteIdent(t.Name), createTableBody(kind, t))
 		return mkStmt(one, sql, e.Phase, e.Table, createWarnings(kind, t), nr), nil
 	case OpDropTable:
-		return mkStmt(one, fmt.Sprintf("DROP TABLE %s;", quoteIdent(e.Table)), e.Phase, e.Table, nil, nr), nil
+		// 库里一个视图都没有 ⇒ 没什么可警告的，保持原有的空警告。
+		var warnings []string
+		if len(views) > 0 {
+			warnings = []string{wViewDrop(views)}
+		}
+		return mkStmt(one, fmt.Sprintf("DROP TABLE %s;", quoteIdent(e.Table)), e.Phase, e.Table, warnings, nr), nil
 	case OpAddColumn:
 		t, err := tableOrErr(tgt, e.Table)
 		if err != nil {
@@ -604,6 +649,9 @@ func directStatement(kind protocol.DatabaseKind, e *Entry, src, tgt *TableSnapsh
 func emitScript(kind protocol.DatabaseKind, source, target *Snapshot, entries []Entry, forced map[string]bool) ([]Statement, map[string]bool, error) {
 	src := tableMap(source)
 	tgt := tableMap(target)
+	// 警告只报**被改的那一侧**（source 是执行侧）的视图：回滚方向会互换两侧，
+	// 因此回滚脚本的视图警告按回滚真正要动的库来出。
+	views := viewNames(source)
 	taken := map[string]bool{}
 	for k := range src {
 		taken[k] = true
@@ -611,6 +659,15 @@ func emitScript(kind protocol.DatabaseKind, source, target *Snapshot, entries []
 	for k := range tgt {
 		taken[k] = true
 	}
+	// 视图名也要占位：临时表撞上**视图**同样让首条 CREATE TABLE 失败（A.15 G17，
+	// 而 tableMap 为了「视图不参与比对」把它们跳掉了，所以这里得单独取一次）。
+	for _, n := range views {
+		taken[lowerASCII(n)] = true
+	}
+	for _, n := range viewNames(target) {
+		taken[lowerASCII(n)] = true
+	}
+	sn := &seen{taken: taken, views: views}
 
 	// 1. 哪些表必须整体重建（条目自身触发，或来自 forced——回滚方向承接正向的重建）
 	rebuild := map[string]bool{}
@@ -663,10 +720,10 @@ func emitScript(kind protocol.DatabaseKind, source, target *Snapshot, entries []
 			if err != nil {
 				return nil, nil, err
 			}
-			out = append(out, rebuildStatements(kind, t, s, taken, g.ids, g.phase, g.nr)...)
+			out = append(out, rebuildStatements(kind, t, s, sn, g.ids, g.phase, g.nr)...)
 			continue
 		}
-		st, err := directStatement(kind, e, src[k], tgt[k])
+		st, err := directStatement(kind, e, src[k], tgt[k], sn.views)
 		if err != nil {
 			return nil, nil, err
 		}

@@ -374,6 +374,95 @@ func TestTmpTableNameAvoidsExistingTables(t *testing.T) {
 	}
 }
 
+func dview(name string) TableSnapshot {
+	return TableSnapshot{Name: name, Type: protocol.TableTypeView}
+}
+
+func TestViewNamesSortByLowercaseAndDedupCaseInsensitively(t *testing.T) {
+	s := dsnap(protocol.DatabaseKindSQLite,
+		dtable("t", dcol("a", "text", true, 1)),
+		dview("v_b"), dview("V_A"), dview("v_a"), dview("v_c"),
+	)
+	// 键取小写 ⇒ 顺序按小写字节；同名只留首个，与 tableMap 的先到先得同规则
+	eqStrs(t, viewNames(s), []string{"V_A", "v_b", "v_c"}, "视图名单")
+	eqStrs(t, viewNames(dsnap(protocol.DatabaseKindSQLite, dview("v_a"))),
+		[]string{"v_a"}, "单个视图")
+	if got := viewNames(dsnap(protocol.DatabaseKindSQLite, dtable("t"))); len(got) != 0 {
+		t.Fatalf("无视图时不该有名：%q", got)
+	}
+}
+
+func TestViewScopeListsAtMostFiveNames(t *testing.T) {
+	many := []string{"v_0", "v_1", "v_2", "v_3", "v_4", "v_5", "v_6"}
+	if got, want := viewScope(many), "7 个视图（v_0, v_1, v_2, v_3, v_4 等）"; got != want {
+		t.Fatalf("超量渲染不符：got %q want %q", got, want)
+	}
+	if got, want := viewScope([]string{"v_a"}), "1 个视图（v_a）"; got != want {
+		t.Fatalf("单个渲染不符：%q", got)
+	}
+	if got, want := viewScope([]string{"v_a", "v_b"}), "2 个视图（v_a, v_b）"; got != want {
+		t.Fatalf("两个渲染不符：%q", got)
+	}
+}
+
+func TestDropTableAndRebuildWarnAboutViewsOnTheExecutedSide(t *testing.T) {
+	src := dsnap(protocol.DatabaseKindSQLite,
+		dtable("t", dpkCol("id", "INTEGER"), dcol("a", "text", true, 2)),
+		dview("z_report"), dview("a_report"), dview("polydb_tmp_t"),
+	)
+	out := dgen(t, src, dsnap(protocol.DatabaseKindSQLite), []Entry{dentry(OpDropTable, "t", "")})
+	eqStrs(t, out.Statements[0].Warnings, []string{wViewDrop(viewNames(src))}, "删表警告")
+	// 目标侧没有视图 ⇒ 回滚（在目标侧建表）不该带视图警告
+	if !strings.Contains(strings.Join(out.Rollback[0].Warnings, "|"), WCreateTable) {
+		t.Fatalf("回滚应保留建表警告：%q", out.Rollback[0].Warnings)
+	}
+	for _, w := range out.Rollback[0].Warnings {
+		if strings.Contains(w, "视图") {
+			t.Fatalf("回滚侧无视图，不该出视图警告：%s", w)
+		}
+	}
+
+	tgt := dwithIndexes(
+		dtable("t", dpkCol("id", "INTEGER"), dcol("a", "text", false, 2)),
+		didx("sqlite_autoindex_t_1", false, true, "a"),
+	)
+	out2 := dgen(t, src, dsnap(protocol.DatabaseKindSQLite, tgt),
+		[]Entry{dentry(OpAddIndex, "t", "sqlite_autoindex_t_1")})
+	head := out2.Statements[1]
+	last := head.Warnings[len(head.Warnings)-1]
+	if last != wViewRebuild(viewNames(src)) {
+		t.Fatalf("重建警告末条必须是视图警告：got %q want %q", last, wViewRebuild(viewNames(src)))
+	}
+	// 视图名占掉了 polydb_tmp_t ⇒ 临时表改名，且警告里点的是视图名
+	if !strings.Contains(head.SQL, `"polydb_tmp_t_2"`) {
+		t.Fatalf("临时表名必须避让视图：%s", head.SQL)
+	}
+	for _, needle := range []string{"a_report", "polydb_tmp_t", "z_report", "重建经 RENAME"} {
+		if !strings.Contains(last, needle) {
+			t.Fatalf("视图警告缺 %s：%s", needle, last)
+		}
+	}
+}
+
+func TestNoViewsMeansNoViewWarningAnywhere(t *testing.T) {
+	src := dsnap(protocol.DatabaseKindSQLite, dtable("t", dcol("a", "text", true, 1)))
+	tgt := dsnap(protocol.DatabaseKindSQLite, dtable("t", dcol("a", "text", false, 1)))
+	out := dgen(t, src, tgt, []Entry{dentry(OpDropTable, "t", "")})
+	if len(out.Statements[0].Warnings) != 0 {
+		t.Fatalf("无视图时删表不该有警告：%q", out.Statements[0].Warnings)
+	}
+	e := dentry(OpAlterColumn, "t", "a")
+	e.Flags = []ColumnFlag{FlagNullability}
+	out2 := dgen(t, src, tgt, []Entry{e})
+	for _, st := range append(append([]Statement{}, out2.Statements...), out2.Rollback...) {
+		for _, w := range st.Warnings {
+			if strings.Contains(w, "视图") {
+				t.Fatalf("无视图时不该出现视图警告：%s", w)
+			}
+		}
+	}
+}
+
 func TestAddColumnWithRiskyDefinitionWarns(t *testing.T) {
 	src := dtable("t", dcol("a", "text", true, 1))
 	tgtNN := dtable("t", dcol("a", "text", true, 1), dcol("b", "text", false, 2))

@@ -487,7 +487,8 @@ impl AppCore {
 
     // ─── 结构比对（Compare & Sync E2，behavior.md §14）───────
 
-    /// 采集一个（连接, schema）的结构快照。视图/物化视图整体跳过（§14.1）。
+    /// 采集一个（连接, schema）的结构快照。视图/物化视图**不参与比对**，但名字要进快照
+    /// （只带名字与类型、不发元数据查询）——生成器要用它避让临时表名、出视图告警（§14.1）。
     async fn collect_snapshot(&self, target: &SchemaDiffTarget) -> CoreResult<Snapshot> {
         self.ensure_connected(&target.connection_id)?;
         let conn = self.get_conn(target.connection_id)?;
@@ -507,7 +508,16 @@ impl AppCore {
         let sql = conn.as_sql()?;
         let mut tables = Vec::new();
         for t in sql.list_tables(&schema).await? {
+            // 视图（E6.5，取证 A.15）：只带**名字与类型**进快照——它不参与比对，但生成器要用
+            // 这些名字避让临时表、并据此挂视图警告。零元数据查询 ⇒ 采集扇出仍是每表 3 次。
             if t.table_type != TableType::Table {
+                tables.push(TableSnapshot {
+                    name: t.name,
+                    table_type: Some(t.table_type),
+                    columns: Vec::new(),
+                    indexes: Vec::new(),
+                    foreign_keys: Vec::new(),
+                });
                 continue;
             }
             tables.push(TableSnapshot {

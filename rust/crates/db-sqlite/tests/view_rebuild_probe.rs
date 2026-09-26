@@ -1,7 +1,10 @@
 //! E6.0 取证（Rust 侧，镜像 `go/pkg/dbsqlite/view_rebuild_probe_test.go`）：
 //! SQLite 视图按名字在查询期解析，那么「重建表」（CREATE tmp → INSERT SELECT → DROP 原表 →
 //! RENAME）到底怎么处理依赖它的视图？`docs/plan-compare-sync.md` §7 一直记着"没证据就不写进规则"。
-//! 用 bundled 真引擎把四条事实钉死，结论写回该文档 A.15；是否据此改生成器另见 E6.5 的拍板。
+//! 用 bundled 真引擎把四条事实钉死，结论写回该文档 A.15。
+//!
+//! E6.5 已拍板（A 档：视图名进快照 + 粗粒度警告），故后两条事实在这里**同时是修复的回归**：
+//! 事实 3 断言删表语句必须带警告，事实 4 断言临时名必须让开同名视图。
 
 use polydb_core::{DatabaseKind, Value};
 use polydb_db_core::DatabaseDriver;
@@ -54,6 +57,17 @@ fn snapshot(conn: &SqliteConn, schema: &str) -> Snapshot {
     let d = sql(conn);
     let mut snaps = Vec::new();
     for t in smol::block_on(d.list_tables(schema)).unwrap() {
+        // 与 app-core 的 collect_snapshot 同口径（E6.5）：视图只带名字与类型，零元数据查询。
+        if t.table_type != polydb_core::TableType::Table {
+            snaps.push(TableSnapshot {
+                name: t.name,
+                table_type: Some(t.table_type),
+                columns: Vec::new(),
+                indexes: Vec::new(),
+                foreign_keys: Vec::new(),
+            });
+            continue;
+        }
         snaps.push(TableSnapshot {
             name: t.name.clone(),
             table_type: Some(t.table_type),
@@ -167,11 +181,11 @@ fn rebuild_with_dependent_view_rolls_back_clean_inside_tx() {
     );
 }
 
-/// 事实 3：不涉及重建、只是 `drop_table` 时，DROP **静默成功**并把破视图留在库里
-/// （`sqlite_master` 里条目还在，查询才报错）——与取证 G4「重建静默丢触发器」同类，
-/// 而生成器目前对此一个字都不说。
+/// 事实 3：不涉及重建、只是 `drop_table` 时，DROP **引擎层面仍然静默成功**并把破视图留在库里
+/// （`sqlite_master` 里条目还在，查询才报错）——与取证 G4「重建静默丢触发器」同类。
+/// E6.5 拍板 A 档后补的是**语句级警告**：引擎不会拦，但脚本必须把这件事说出来。
 #[test]
-fn drop_table_leaves_a_dangling_view_silently() {
+fn drop_table_leaves_a_dangling_view_but_warns() {
     let source = snapshot(&conn_with(SRC_WITH_VIEW), "main");
     let target = snapshot(&conn_with(&[]), "main");
     let plan = diff(&source, &target, &Options::default()).unwrap();
@@ -184,15 +198,22 @@ fn drop_table_leaves_a_dangling_view_silently() {
         .filter(|s| s.sql.starts_with("DROP TABLE"))
         .map(|s| s.warnings.clone())
         .collect();
-    // 今天生成器对"删表会留下破视图"一个字都不说（是否补警告见 E6.5 拍板，故此处只记录不断言）。
-    println!("实测：删表语句现有警告 = {warnings:?}");
+    println!("实测：删表语句的警告 = {warnings:?}");
+    // 引擎静默，但语句必须带警告，且警告要点名库里那个视图（E6.5 A 档的粗粒度警告）。
+    assert_eq!(warnings.len(), 1, "这条脚本里就该有一条删表语句");
+    let w = &warnings[0];
+    assert_eq!(w.len(), 1, "删表只挂一条视图警告：{w:?}");
+    assert!(
+        w[0].contains("v_orders") && w[0].contains("不检查依赖"),
+        "警告必须点名视图并说清「DROP 不检查依赖」：{w:?}"
+    );
 
     let conn = conn_with(SRC_WITH_VIEW);
     for s in &script.statements {
         assert_eq!(
             exec_report(&conn, &s.sql),
             "OK",
-            "删表脚本必须全程无错（静默）"
+            "删表脚本必须全程无错（引擎层面静默）"
         );
     }
     assert_eq!(
@@ -209,30 +230,93 @@ fn drop_table_leaves_a_dangling_view_silently() {
     );
 }
 
-/// 事实 4：生成器的临时名去重集看不见视图 ⇒ 库里已有同名**视图**时脚本一开始就撞车。
+/// 事实 4（E6.5 拍板 A 档后从「取证」转为「回归」）：临时名去重集现在**看得见视图**
+/// ⇒ 库里已有同名视图时生成的临时名自动避让，整条重建在真引擎上跑得通，那个视图也毫发无损，
+/// 并且重建语句带着粗粒度视图警告。
+/// 修复前的实测（本测试的旧版本）：临时名正好撞上视图名，首条 `CREATE TABLE` 即 already exists。
 #[test]
-fn temp_name_collides_with_existing_view() {
+fn temp_name_avoids_an_existing_view_name() {
     let src: &[&str] = &[
         "CREATE TABLE orders (id INTEGER PRIMARY KEY, qty INTEGER NOT NULL DEFAULT 1)",
         "INSERT INTO orders (id, qty) VALUES (1, 10)",
         "CREATE VIEW polydb_tmp_orders AS SELECT 1 AS one",
     ];
     let script = probe_script(src, TGT_WIDER_QTY, "orders");
+    let head = &script.statements[1];
     assert!(
-        script.statements[1].sql.contains("\"polydb_tmp_orders\""),
-        "取证前提：生成器用的临时名必须正好是那个视图名：{}",
-        script.statements[1].sql
+        head.sql.contains("\"polydb_tmp_orders_2\""),
+        "临时名必须让开同名视图（撞名是修复前的行为）：{}",
+        head.sql
     );
+    assert!(
+        head.warnings
+            .last()
+            .is_some_and(|w| w.contains("polydb_tmp_orders")),
+        "视图警告要点名它挡路的那个视图：{:?}",
+        head.warnings
+    );
+
     let conn = conn_with(src);
-    let mut first = String::new();
     for s in &script.statements {
-        let r = exec_report(&conn, &s.sql);
-        if r.starts_with("ERR") {
-            first = format!("{} ⇒ {r}", s.sql);
-            break;
-        }
+        assert_eq!(
+            exec_report(&conn, &s.sql),
+            "OK",
+            "避让之后整条重建必须全程无错：{}",
+            s.sql
+        );
     }
-    println!("首个失败：{first}");
-    assert!(!first.is_empty(), "与视图同名的临时表必须撞车");
-    assert!(first.contains("already exists"));
+    assert_eq!(
+        scalar(&conn, "SELECT count(*) FROM orders"),
+        "1",
+        "重建后 orders 行数应保持不变"
+    );
+    assert!(
+        scalar(
+            &conn,
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='orders'"
+        )
+        .to_uppercase()
+        .contains("TEXT"),
+        "库里那份表定义必须真的是新版的"
+    );
+    // 挡过路的那个视图必须还在、还能查。
+    assert_eq!(
+        scalar(&conn, "SELECT one FROM polydb_tmp_orders"),
+        "1",
+        "同名视图不该被重建波及"
+    );
+}
+
+/// 补充取证（E6.5 定警告口径时顺带测的）：被视图引用的列能不能直改删掉？
+///
+/// 结论：**引擎会拦**，语句直接报错、列原地不动 ⇒ 删列属于 behavior.md §14.3 的
+/// 「不猜语义、执行期报错兜底」那一档，所以生成器**不给**删列挂视图警告（报了等于重复报错）。
+/// 这与删表正好相反：删表引擎不拦、静默留破视图 ⇒ 必须由生成器说一句话。
+#[test]
+fn drop_column_referenced_by_view_is_blocked_by_engine() {
+    let conn = conn_with(SRC_WITH_VIEW);
+    let r = exec_report(&conn, "ALTER TABLE orders DROP COLUMN qty");
+    println!("实测：删掉被视图引用的列 ⇒ {r}");
+    assert!(
+        r.starts_with("ERR"),
+        "引擎必须拦住「删掉视图正引用的列」，实际：{r}"
+    );
+    assert!(
+        r.contains("error in view"),
+        "报错必须来自视图重解析（error in view …），实际：{r}"
+    );
+    // 拦下来就得一事无成：列还在、视图还能查、数据没动。
+    assert_eq!(
+        scalar(
+            &conn,
+            "SELECT count(*) FROM pragma_table_info('orders') WHERE name='qty'"
+        ),
+        "1",
+        "报错后 qty 必须还在"
+    );
+    assert_eq!(
+        scalar(&conn, "SELECT count(*) FROM v_orders"),
+        "2",
+        "报错后视图必须还能查"
+    );
 }

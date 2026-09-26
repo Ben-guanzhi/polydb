@@ -52,6 +52,11 @@ func snapshot(t *testing.T, c *Conn, schema string) *schemadiff.Snapshot {
 	}
 	snap := &schemadiff.Snapshot{Kind: protocol.DatabaseKindSQLite, Schema: schema}
 	for _, tb := range tables {
+		// 与 app-core 的 collect_snapshot 同口径（E6.5）：视图只带名字与类型，零元数据查询。
+		if tb.Type != protocol.TableTypeTable {
+			snap.Tables = append(snap.Tables, schemadiff.TableSnapshot{Name: tb.Name, Type: tb.Type})
+			continue
+		}
 		cols, err := c.ListColumns(ctx, schema, tb.Name)
 		if err != nil {
 			t.Fatalf("list_columns %s: %v", tb.Name, err)

@@ -111,14 +111,16 @@ func installCounter(t *testing.T, a *AppCore, id string) *fanCounter {
 }
 
 // TestSnapshotFanOutIsThreeQueriesPerTable 把"每表 3 次串行元数据查询"钉成精确计数，
-// 并证明**视图一次都不查**（§14.1 的"快照看不见视图"在调用次数上的形状）。
+// 并证明**视图一次都不查**：E6.5 之后视图的名字会进快照（§14.1 改成"视图不参与比对、
+// 但名字进快照"），代价仍然是零——采集只给它名字与类型，三条元数据查询一次都不发。
 func TestSnapshotFanOutIsThreeQueriesPerTable(t *testing.T) {
 	a, id := newSQLiteApp(t)
 	const n = 12
+	const nv = 5
 	createTables(t, a, id, n)
 	ctx := context.Background()
-	// 再塞 5 张视图：它们会出现在 ListTables 结果里，然后被 table_type 过滤掉。
-	for i := range 5 {
+	// 再塞 5 张视图：它们出现在 ListTables 结果里，并作为"只有名字"的条目进快照。
+	for i := range nv {
 		v := fmt.Sprintf("v%d", i)
 		if _, err := a.Execute(ctx, id, fmt.Sprintf(`CREATE VIEW %s AS SELECT id FROM t0;`, v)); err != nil {
 			t.Fatalf("create view %s: %v", v, err)
@@ -130,8 +132,23 @@ func TestSnapshotFanOutIsThreeQueriesPerTable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("collect snapshot: %v", err)
 	}
-	if len(snap.Tables) != n {
-		t.Fatalf("snapshot tables=%d want %d（视图不该进快照）", len(snap.Tables), n)
+	var gotViews int
+	for _, tb := range snap.Tables {
+		if tb.Type == protocol.TableTypeTable {
+			continue
+		}
+		gotViews++
+		// 视图条目必须**空**元数据：非空就说明采集为它多发了查询，扇出口径作废。
+		if len(tb.Columns) != 0 || len(tb.Indexes) != 0 || len(tb.ForeignKeys) != 0 {
+			t.Fatalf("视图 %s 的快照条目带了元数据：%d/%d/%d", tb.Name,
+				len(tb.Columns), len(tb.Indexes), len(tb.ForeignKeys))
+		}
+	}
+	if len(snap.Tables) != n+nv {
+		t.Fatalf("snapshot tables=%d want %d（%d 表 + %d 视图名）", len(snap.Tables), n+nv, n, nv)
+	}
+	if gotViews != nv {
+		t.Fatalf("视图条目 = %d，want %d（E6.5：视图名必须进快照）", gotViews, nv)
 	}
 	if cnt.tables != 1 {
 		t.Fatalf("ListTables 调用 %d 次，want 1", cnt.tables)
@@ -144,7 +161,8 @@ func TestSnapshotFanOutIsThreeQueriesPerTable(t *testing.T) {
 	if total != 1+3*n {
 		t.Fatalf("总元数据查询 = %d，want 1+3n = %d", total, 1+3*n)
 	}
-	t.Logf("实测：n=%d 表 ⇒ 元数据查询 %d 次（1 次 ListTables + 每表 3 次），视图 5 张贡献 0 次", n, total)
+	t.Logf("实测：n=%d 表 + %d 视图 ⇒ 元数据查询 %d 次（1 次 ListTables + 每表 3 次），视图名进快照但贡献 0 次",
+		n, nv, total)
 }
 
 // TestSnapshotNoTableCountCap 直接证伪"比对路径有 200 表上限"：
