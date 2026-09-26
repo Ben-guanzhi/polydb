@@ -58,6 +58,13 @@ type Client interface {
 	// BrowseRowsCount 对同过滤条件执行精确 COUNT(*)（behavior.md §13.1，只读操作）。
 	BrowseRowsCount(ctx context.Context, id, schema, table string, req *protocol.TableRowsRequest) (uint64, error)
 
+	// 结构比对与同步（Compare & Sync E5，behavior.md §14/§15）。
+	// SchemaDiff 只读采集两侧快照并产出差异计划；SchemaDDL 由服务端**重算**计划后
+	// 生成脚本（勾选校验、陈旧 id 与重建组未整组勾选都会报错）。
+	// 两端（Local/Remote）行为一致：Local 直调 app-core，Remote 打同一组 REST 端点。
+	SchemaDiff(ctx context.Context, req *protocol.SchemaDiffRequest) (*protocol.SchemaDiffPlan, error)
+	SchemaDDL(ctx context.Context, req *protocol.SchemaDdlRequest) (*protocol.DdlScript, error)
+
 	// 事务（T3 变更跟踪编辑；单次 finalize 语义见 spec/behavior.md §10）。
 	// Begin 在连接上开启事务；ExecuteInTx 在事务内跑一条参数化 SQL；
 	// Commit/Rollback 二选一 finalize（重复 finalize 返回 TRANSACTION_NOT_FOUND）。

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -375,5 +376,218 @@ func TestLocalCancelNoop(t *testing.T) {
 	}
 	if _, err := c.ExecuteQuery(ctx, "x", info.ID, "SELECT 1"); err == nil {
 		t.Fatal("已取消 ctx 下执行未报错（已建连路径）")
+	}
+}
+
+// ─── 结构比对与同步（Compare & Sync E5.0）────────────────────
+
+// cmpClients 用同一份 app-core 装配出 Local 与 Remote（httptest 真服务端），
+// 于是两个实现看到的连接与库内结构完全相同——差异只可能来自传输层本身。
+type cmpClients struct {
+	app    *appcore.AppCore
+	both   []namedClient
+	local  Client
+	remote Client
+}
+
+type namedClient struct {
+	name string
+	c    Client
+}
+
+func newCmpClients(t *testing.T) *cmpClients {
+	t.Helper()
+	fx := newFixture(t)
+	srv := httptest.NewServer(server.New(fx.app).Handler())
+	t.Cleanup(srv.Close)
+	loc, rem := NewLocal(fx.app), NewRemote(srv.URL)
+	return &cmpClients{
+		app:    fx.app,
+		both:   []namedClient{{"local", loc}, {"remote", rem}},
+		local:  loc,
+		remote: rem,
+	}
+}
+
+// newSQLiteConn 建一个内存 SQLite 连接并按序灌入 DDL。
+func (cs *cmpClients) newSQLiteConn(t *testing.T, name string, ddl ...string) string {
+	t.Helper()
+	info, err := cs.app.CreateConnection(&protocol.CreateConnectionRequest{
+		Name: name, Kind: protocol.DatabaseKindSQLite, Database: ":memory:",
+	})
+	if err != nil {
+		t.Fatalf("create %s: %v", name, err)
+	}
+	for _, s := range ddl {
+		if _, err := cs.app.Execute(context.Background(), info.ID, s); err != nil {
+			t.Fatalf("seed %s %q: %v", name, s, err)
+		}
+	}
+	return info.ID
+}
+
+func cmpTarget(id protocol.ConnectionID) protocol.SchemaDiffTarget {
+	return protocol.SchemaDiffTarget{ConnectionID: id}
+}
+
+// diffIDs 比对一次并返回条目 id（同时校验按相位升序）。
+func diffIDs(t *testing.T, c Client, source, target string) []string {
+	t.Helper()
+	plan, err := c.SchemaDiff(context.Background(), &protocol.SchemaDiffRequest{
+		Source: cmpTarget(source), Target: cmpTarget(target),
+	})
+	if err != nil {
+		t.Fatalf("diff: %v", err)
+	}
+	var ids []string
+	lastPhase := 0
+	for _, e := range plan.Entries {
+		if e.Phase < lastPhase {
+			t.Fatalf("计划未按相位升序：%v", plan.Entries)
+		}
+		lastPhase = e.Phase
+		ids = append(ids, e.ID)
+	}
+	return ids
+}
+
+// applyStatements 逐条 Execute（自动提交）。事务化编排属 E5.2 的 TUI 侧，
+// 这里只验传输接线：生成的语句能否原样送达并生效。
+func applyStatements(t *testing.T, c Client, connID string, stmts []protocol.DdlStatement) {
+	t.Helper()
+	for i, s := range stmts {
+		if _, err := c.Execute(context.Background(), connID, s.SQL); err != nil {
+			t.Fatalf("应用第 %d 条 %q: %v", i, s.SQL, err)
+		}
+	}
+}
+
+func TestCompareSyncEmptyPlanIsSlice(t *testing.T) {
+	cs := newCmpClients(t)
+	id := cs.newSQLiteConn(t, "same", "CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT)")
+	for _, pair := range cs.both {
+		plan, err := pair.c.SchemaDiff(context.Background(), &protocol.SchemaDiffRequest{
+			Source: cmpTarget(id), Target: cmpTarget(id),
+		})
+		if err != nil {
+			t.Fatalf("%s: diff: %v", pair.name, err)
+		}
+		if plan.Entries == nil {
+			t.Fatalf("%s: 空计划必须是 [] 而不是 null", pair.name)
+		}
+		if len(plan.Entries) != 0 {
+			t.Fatalf("%s: 同库自比应无差异：%v", pair.name, plan.Entries)
+		}
+	}
+}
+
+// TestCompareSyncStaleSelectionRejected 覆盖 §15.5 的勾选校验：陈旧 id 必须报错，
+// 两个实现给出的错误码一致。
+func TestCompareSyncStaleSelectionRejected(t *testing.T) {
+	cs := newCmpClients(t)
+	id := cs.newSQLiteConn(t, "one", "CREATE TABLE t(id INTEGER)")
+	for _, pair := range cs.both {
+		_, err := pair.c.SchemaDDL(context.Background(), &protocol.SchemaDdlRequest{
+			Source: cmpTarget(id), Target: cmpTarget(id),
+			Selected: []string{"nope//add_column"},
+		})
+		var pe *protocol.PolyDBError
+		if !errors.As(err, &pe) {
+			t.Fatalf("%s: 期望 PolyDBError，got %T %v", pair.name, err, err)
+		}
+		if pe.Code != protocol.ErrInvalidParam {
+			t.Fatalf("%s: code = %v, want %v", pair.name, pe.Code, protocol.ErrInvalidParam)
+		}
+	}
+}
+
+// TestCompareSyncLocalRemoteParity 跑完整回路：比对 → 生成 → 应用 → 复比收敛 → 回滚 → 复比还原，
+// 每一步都断言 Local 与 Remote 的线路结果逐字一致。
+func TestCompareSyncLocalRemoteParity(t *testing.T) {
+	cs := newCmpClients(t)
+	ctx := context.Background()
+	// 基准侧比期望侧多一张 gone 表、name 类型更窄、缺 email 列。
+	source := cs.newSQLiteConn(t, "base",
+		"CREATE TABLE t(id INTEGER PRIMARY KEY, name VARCHAR(20))",
+		"CREATE TABLE gone(id INTEGER)")
+	target := cs.newSQLiteConn(t, "want",
+		"CREATE TABLE t(id INTEGER PRIMARY KEY, name VARCHAR(30), email TEXT)")
+
+	var ref *protocol.SchemaDiffPlan
+	for _, pair := range cs.both {
+		plan, err := pair.c.SchemaDiff(ctx, &protocol.SchemaDiffRequest{
+			Source: cmpTarget(source), Target: cmpTarget(target),
+		})
+		if err != nil {
+			t.Fatalf("%s: diff: %v", pair.name, err)
+		}
+		if ref == nil {
+			ref = plan
+			var got []string
+			for _, e := range plan.Entries {
+				got = append(got, e.ID)
+			}
+			want := []string{"gone//drop_table", "t/email/add_column", "t/name/alter_column"}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("%s: 条目 = %v, want %v", pair.name, got, want)
+			}
+			continue
+		}
+		if !reflect.DeepEqual(plan, ref) {
+			t.Fatalf("%s 与 local 的比对结果不一致\n got %#v\nwant %#v", pair.name, plan, ref)
+		}
+	}
+
+	// 只勾默认选中的非破坏项（drop_table 默认不勾）。
+	var selected []string
+	for _, e := range ref.Entries {
+		if e.Selected {
+			selected = append(selected, e.ID)
+		}
+	}
+	if len(selected) != 2 {
+		t.Fatalf("默认勾选 = %v, want 2 条", selected)
+	}
+
+	var refScript *protocol.DdlScript
+	for _, pair := range cs.both {
+		script, err := pair.c.SchemaDDL(ctx, &protocol.SchemaDdlRequest{
+			Source: cmpTarget(source), Target: cmpTarget(target),
+			Selected: selected,
+		})
+		if err != nil {
+			t.Fatalf("%s: ddl: %v", pair.name, err)
+		}
+		if script.Statements == nil || script.Rollback == nil {
+			t.Fatalf("%s: 脚本切片必须是 [] 而不是 null", pair.name)
+		}
+		if !script.PragmasOutsideTx || !script.DdlInTx {
+			t.Fatalf("%s: SQLite 能力位应 pragmas_outside_tx/ddl_in_tx 皆 true，got %+v", pair.name, script)
+		}
+		// alter_column 走整表重建 ⇒ 首尾各一条 PRAGMA（相位 0 / 255，entry_ids 为空）。
+		head := script.Statements[0]
+		tail := script.Statements[len(script.Statements)-1]
+		if head.Phase != 0 || tail.Phase != 255 || len(head.EntryIDs) != 0 || len(tail.EntryIDs) != 0 {
+			t.Fatalf("%s: PRAGMA 包裹条不符：head=%+v tail=%+v", pair.name, head, tail)
+		}
+		if refScript == nil {
+			refScript = script
+			continue
+		}
+		if !reflect.DeepEqual(script, refScript) {
+			t.Fatalf("%s 与 local 的脚本不一致\n got %#v\nwant %#v", pair.name, script, refScript)
+		}
+	}
+
+	// 正向应用（local 通道）后，从 remote 通道复比：只剩未勾选的 drop_table。
+	applyStatements(t, cs.local, source, refScript.Statements)
+	if got := diffIDs(t, cs.remote, source, target); !reflect.DeepEqual(got, []string{"gone//drop_table"}) {
+		t.Fatalf("应用后残余差异 = %v, want [gone//drop_table]", got)
+	}
+
+	// 回滚（remote 通道）后，从 local 通道复比：差异还原为最初的三条。
+	applyStatements(t, cs.remote, source, refScript.Rollback)
+	if got := diffIDs(t, cs.local, source, target); len(got) != 3 {
+		t.Fatalf("回滚后差异 = %v, want 3 条", got)
 	}
 }

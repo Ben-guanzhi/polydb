@@ -101,6 +101,16 @@ func (l *Local) BrowseRowsCount(ctx context.Context, id, schema, table string, r
 	return l.app.BrowseRowsCount(ctx, id, schema, table, req)
 }
 
+// ─── 结构比对与同步（E5）───────────────────────────────────
+
+func (l *Local) SchemaDiff(ctx context.Context, req *protocol.SchemaDiffRequest) (*protocol.SchemaDiffPlan, error) {
+	return l.app.SchemaDiff(ctx, req)
+}
+
+func (l *Local) SchemaDDL(ctx context.Context, req *protocol.SchemaDdlRequest) (*protocol.DdlScript, error) {
+	return l.app.SchemaDDL(ctx, req)
+}
+
 // ─── 事务（T3）─────────────────────────────────────────────
 
 func (l *Local) BeginTransaction(ctx context.Context, id string) (*protocol.TransactionInfo, error) {

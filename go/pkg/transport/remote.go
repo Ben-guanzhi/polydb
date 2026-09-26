@@ -295,6 +295,26 @@ func (r *Remote) BrowseRowsCount(ctx context.Context, id, schema, table string, 
 	return out.Count, nil
 }
 
+// ─── 结构比对与同步（E5）───────────────────────────────────
+
+// SchemaDiff 远程走 POST /api/schema/diff（msgpack 数据面，behavior.md §14）。
+func (r *Remote) SchemaDiff(ctx context.Context, req *protocol.SchemaDiffRequest) (*protocol.SchemaDiffPlan, error) {
+	var out protocol.SchemaDiffPlan
+	if err := r.do(ctx, http.MethodPost, "/api/schema/diff", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SchemaDDL 远程走 POST /api/schema/ddl（msgpack 数据面，behavior.md §15）。
+func (r *Remote) SchemaDDL(ctx context.Context, req *protocol.SchemaDdlRequest) (*protocol.DdlScript, error) {
+	var out protocol.DdlScript
+	if err := r.do(ctx, http.MethodPost, "/api/schema/ddl", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // ─── 事务（T3）─────────────────────────────────────────────
 
 func (r *Remote) BeginTransaction(ctx context.Context, id string) (*protocol.TransactionInfo, error) {
