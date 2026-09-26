@@ -9,18 +9,20 @@ use std::sync::Arc;
 
 use gpui::*;
 
+use async_trait::async_trait;
+
 type BoxFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 use polydb_core::{
-    BeginTransactionRequest, ColumnInfo, ConnectionId, ConnectionInfo, CreateConnectionRequest,
-    DatabaseKind, DdlScript, DdlStatement, FilterCondition, FilterLogic, ForeignKeyInfo, IndexInfo,
-    OrderClause, QueryResult, RedisKeyInfo, RedisValue, ResultColumn, SchemaDdlRequest,
-    SchemaDiffEntry, SchemaDiffOptions, SchemaDiffRequest, SchemaDiffTarget, SchemaInfo,
-    SortDirection, TableInfo, TableRowsRequest, UpdateConnectionRequest, Value,
+    BeginTransactionRequest, ColumnInfo, ConnectionId, ConnectionInfo, CoreResult,
+    CreateConnectionRequest, DatabaseKind, FilterCondition, FilterLogic, ForeignKeyInfo, IndexInfo,
+    OrderClause, QueryResult, RedisKeyInfo, RedisValue, ResultColumn, SchemaDiffOptions,
+    SchemaDiffRequest, SchemaDiffTarget, SchemaInfo, SortDirection, TableInfo, TableRowsRequest,
+    UpdateConnectionRequest, Value,
 };
 use polydb_transport::Transport;
 
 use crate::changes::{self, ChangeQueue, Row};
-use crate::cmpsync;
+use crate::cmpsync::{self, CmpAction, SyncExec};
 use crate::exporters::{self, ExportFormat};
 use crate::filters::{self, FilterDraft, FilterPreset};
 use crate::presets;
@@ -537,114 +539,53 @@ pub(crate) enum QuickTarget {
 }
 
 // ─── E5.5 结构比对与同步向导（浮层，四步在层内自走）───
+//
+// E6.3 抽层：步骤枚举、向导态、执行结果结构与「哪个键在哪一步干什么」的按键表全部
+// 搬到 `cmpsync.rs`（纯层，无 gpui），`app.rs` 这里只剩接线——发 IO、`cx.notify()`、
+// 把纯层返回的文案写进 `status`。re-export 让 `crate::app::CmpStep` 的旧路径仍可用。
 
-/// 向导步骤：与 Web `STEP_ORDER` / `STEP_LABEL` 同序同名。
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CmpStep {
-    Source,
-    Target,
-    Review,
-    Apply,
+pub(crate) use crate::cmpsync::{CmpStep, CompareState};
+
+/// 把 `cmpsync::run_script` 需要的五个动作接到真实线路（E6.3）。
+/// 抽层之前这段逻辑内联在 `cmp_apply` 的 `self.io` async 闭包里，
+/// 于是三份呈现实现中唯有 GUI 这一份的分派环路没有测试可挂。
+pub(crate) struct TransportExec<'a> {
+    t: &'a dyn Transport,
+    id: ConnectionId,
 }
 
-impl CmpStep {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            CmpStep::Source => "选基准侧",
-            CmpStep::Target => "选期望侧",
-            CmpStep::Review => "差异与勾选",
-            CmpStep::Apply => "脚本与应用",
-        }
-    }
-}
-
-/// 一条执行失败的语句（只记首个失败，其余计入 `SyncOutcome::skipped`）。
-#[derive(Clone)]
-pub(crate) struct FailedStmt {
-    pub(crate) index: usize,
-    pub(crate) phase: u8,
-    pub(crate) table: String,
-    pub(crate) entries: Vec<String>,
-    pub(crate) sql: String,
-    pub(crate) reason: String,
-}
-
-/// 一次脚本执行的结果，与 Go `cmpsync.ApplyOutcome` 同口径。
-#[derive(Clone)]
-pub(crate) struct SyncOutcome {
-    pub(crate) ran: usize,
-    pub(crate) failed: Vec<FailedStmt>,
-    pub(crate) skipped: usize,
-    pub(crate) rolled_back: bool,
-    /// true ⇒ 这次跑的是回滚脚本。
-    pub(crate) rollback: bool,
-}
-
-/// 向导态。刻意**不落盘**：存下来的勾选集下一轮必然陈旧（behavior.md §15.5 第一条守卫）。
-pub(crate) struct CompareState {
-    pub(crate) step: CmpStep,
-    /// 已确认的两侧（步骤 ①② 只挪高亮，Enter 才写回这里）。
-    pub(crate) src: ConnectionId,
-    pub(crate) tgt: Option<ConnectionId>,
-    /// ①② 两步各自列表的高亮下标。
-    pub(crate) src_cur: usize,
-    pub(crate) tgt_cur: usize,
-    pub(crate) ignore_defaults: bool,
-    pub(crate) select_destructive: bool,
-    /// 比对 / 生成 / 执行在途（期间拒绝再次触发）。
-    pub(crate) loading: bool,
-    pub(crate) entries: Vec<SchemaDiffEntry>,
-    pub(crate) sel: Vec<String>,
-    pub(crate) entry_cur: usize,
-    pub(crate) gaps: Vec<cmpsync::GroupGap>,
-    pub(crate) script: Option<DdlScript>,
-    pub(crate) stmt_cur: usize,
-    pub(crate) outcome: Option<SyncOutcome>,
-    /// 正向脚本已成功执行 ⇒ 才允许代跑回滚。
-    pub(crate) applied: bool,
-    /// 回滚强确认输入态。
-    pub(crate) confirming: bool,
-    pub(crate) confirm_buf: String,
-    pub(crate) confirm_cursor: usize,
-}
-
-impl CompareState {
-    fn new(src: ConnectionId, src_cur: usize) -> Self {
-        Self {
-            step: CmpStep::Source,
-            src,
-            tgt: None,
-            src_cur,
-            tgt_cur: 0,
-            ignore_defaults: false,
-            select_destructive: false,
-            loading: false,
-            entries: Vec::new(),
-            sel: Vec::new(),
-            entry_cur: 0,
-            gaps: Vec::new(),
-            script: None,
-            stmt_cur: 0,
-            outcome: None,
-            applied: false,
-            confirming: false,
-            confirm_buf: String::new(),
-            confirm_cursor: 0,
-        }
+#[async_trait]
+impl SyncExec for TransportExec<'_> {
+    async fn begin(&self) -> CoreResult<String> {
+        let info = self
+            .t
+            .begin_transaction(&BeginTransactionRequest {
+                connection_id: self.id,
+                isolation_level: None,
+            })
+            .await?;
+        Ok(info.id.to_string())
     }
 
-    fn recalc_gaps(&mut self) {
-        self.gaps = cmpsync::group_gaps(&self.entries, &self.sel);
+    async fn exec_in_tx(&self, tx: &str, sql: &str) -> CoreResult<()> {
+        self.t.execute_in_transaction(tx, sql, &[]).await?;
+        Ok(())
     }
-}
 
-/// 列表高亮移动（`delta` 为 ±1，越界回绕，与 TUI/GUI 其它列表一致）。
-fn shift_index(cur: usize, total: usize, delta: isize) -> usize {
-    if total == 0 {
-        return 0;
+    async fn exec(&self, sql: &str) -> CoreResult<()> {
+        self.t.execute(self.id, sql, &[]).await?;
+        Ok(())
     }
-    let cur = cur.min(total - 1) as isize;
-    ((cur + delta + total as isize) % total as isize) as usize
+
+    async fn commit(&self, tx: &str) -> CoreResult<()> {
+        self.t.commit_transaction(tx).await?;
+        Ok(())
+    }
+
+    async fn rollback(&self, tx: &str) -> CoreResult<()> {
+        self.t.rollback_transaction(tx).await?;
+        Ok(())
+    }
 }
 
 pub struct PolyDBApp {
@@ -2841,6 +2782,10 @@ impl PolyDBApp {
 
     // ─── E5.5 结构比对与同步向导（浮层四步，语义对齐 Web 向导与 TUI 的 viewCompare）───
     // 判定与语句生成全在服务端；本段只做「选两侧 → 勾条目 → 取脚本 → 按能力位执行」的编排。
+    //
+    // E6.3 抽层后的分工：状态怎么变（游标、勾选集、确认缓冲）、键在哪一步干什么、
+    // 文案长什么样 ⇒ 全在 `cmpsync.rs`（纯层，无 gpui，可按键驱动测试）；
+    // 这里只剩三件事——把连接列表喂给纯层、发 IO、把纯层返回的文案写进 `status`。
 
     /// ① 基准侧候选：所有可参与比对的连接（Redis 无模式概念，服务端拒）。
     pub(crate) fn cmp_source_list(&self) -> Vec<ConnectionInfo> {
@@ -2880,10 +2825,6 @@ impl PolyDBApp {
             .map(|x| x.name)
             .unwrap_or_else(|| "（未选）".into());
         (src, tgt)
-    }
-
-    fn cmp_applied(&self) -> bool {
-        self.compare.as_ref().is_some_and(|c| c.applied)
     }
 
     /// 打开向导：三道守卫与 TUI 的 `openCompare` 同口径（连接缺失 / Redis / 基准侧只读）。
@@ -2926,6 +2867,7 @@ impl PolyDBApp {
     }
 
     /// 列表高亮移动（四步共用：① 基准侧 ② 期望侧 ③ 条目 ④ 语句）。
+    /// 总数只有这里知道——①② 步来自连接列表，③④ 步来自向导态自身。
     pub(crate) fn cmp_move(&mut self, delta: isize, cx: &mut Context<Self>) {
         let total = match self.compare.as_ref() {
             Some(c) => match c.step {
@@ -2941,12 +2883,7 @@ impl PolyDBApp {
             None => return,
         };
         if let Some(c) = self.compare.as_mut() {
-            match c.step {
-                CmpStep::Source => c.src_cur = shift_index(c.src_cur, total, delta),
-                CmpStep::Target => c.tgt_cur = shift_index(c.tgt_cur, total, delta),
-                CmpStep::Review => c.entry_cur = shift_index(c.entry_cur, total, delta),
-                CmpStep::Apply => c.stmt_cur = shift_index(c.stmt_cur, total, delta),
-            }
+            c.shift(delta, total);
         }
         cx.notify();
     }
@@ -2954,12 +2891,7 @@ impl PolyDBApp {
     /// 点击行 = 先把高亮挪过去，再走该步的 Enter 语义（键盘与鼠标共用一套状态）。
     pub(crate) fn cmp_set_cur(&mut self, ix: usize, cx: &mut Context<Self>) {
         if let Some(c) = self.compare.as_mut() {
-            match c.step {
-                CmpStep::Source => c.src_cur = ix,
-                CmpStep::Target => c.tgt_cur = ix,
-                CmpStep::Review => c.entry_cur = ix,
-                CmpStep::Apply => c.stmt_cur = ix,
-            }
+            c.set_cur(ix);
         }
         cx.notify();
     }
@@ -2981,13 +2913,13 @@ impl PolyDBApp {
             cx.notify();
             return;
         }
-        if let Some(c) = self.compare.as_mut() {
-            c.src = chosen.id;
-            c.tgt = None;
-            c.tgt_cur = 0;
-            c.step = CmpStep::Target;
+        let status = self
+            .compare
+            .as_mut()
+            .map(|c| c.goto_target(chosen.id, &chosen.name));
+        if let Some(status) = status {
+            self.status = status;
         }
-        self.status = format!("结构同步向导 ② 选期望侧（基准：{}）", chosen.name);
         cx.notify();
     }
 
@@ -3040,8 +2972,7 @@ impl PolyDBApp {
             options: Some(opts),
         };
         if let Some(c) = self.compare.as_mut() {
-            c.loading = true;
-            c.outcome = None;
+            c.begin_io();
         }
         self.status = "比对中…".into();
         cx.notify();
@@ -3049,190 +2980,77 @@ impl PolyDBApp {
             cx,
             move |t| Box::pin(async move { t.schema_diff(&req).await }),
             move |this, out, cx| {
-                let (plan, err) = match out {
-                    Ok(p) => (Some(p), None),
-                    Err(e) => (None, Some(format!("比对失败: {e}"))),
-                };
-                let mut refreshed = false;
-                let mut empty = false;
-                if let Some(c) = this.compare.as_mut() {
-                    c.loading = false;
-                    if let Some(plan) = plan {
-                        c.entries = plan.entries;
-                        c.sel = cmpsync::default_selection(&c.entries);
-                        c.entry_cur = 0;
-                        c.script = None;
-                        c.applied = false;
-                        c.recalc_gaps();
-                        c.step = CmpStep::Review;
-                        empty = c.entries.is_empty();
-                        refreshed = true;
+                let status = match out {
+                    Ok(plan) => this.compare.as_mut().map(|c| c.finish_diff(plan.entries)),
+                    Err(e) => {
+                        if let Some(c) = this.compare.as_mut() {
+                            c.fail_io();
+                        }
+                        Some(format!("比对失败: {e}"))
                     }
-                }
-                if let Some(err) = err {
-                    this.status = err;
-                } else if refreshed {
-                    this.status = if empty {
-                        "两侧结构一致，无需同步".into()
-                    } else {
-                        this.cmp_status_review()
-                    };
+                };
+                if let Some(status) = status {
+                    this.status = status;
                 }
                 cx.notify();
             },
         );
     }
 
-    /// ③ 步的状态行：已勾计数（含破坏性）+ 缺口提示。
-    fn cmp_status_review(&self) -> String {
-        let Some(c) = self.compare.as_ref() else {
-            return String::new();
-        };
-        let destruct = c
-            .entries
-            .iter()
-            .filter(|e| e.destructive && c.sel.iter().any(|s| s == &e.id))
-            .count();
-        let mut s = format!(
-            "共 {} 条变更 · 已勾 {} 条（其中破坏性 {}）",
-            c.entries.len(),
-            c.sel.len(),
-            destruct
-        );
-        if let Some(g) = c.gaps.first() {
-            s += &format!(" · ⚠ 重建表 {} 未整组勾选（按 f 补齐）", g.table);
-        }
-        s
-    }
-
-    /// 勾选/取消一条（Space / 点击复选框）。
+    /// Space / 点击复选框：勾选集与缺口由纯层重算。
     pub(crate) fn cmp_toggle_entry(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let Some(c) = self.compare.as_mut() else {
-            return;
-        };
-        let Some(id) = c.entries.get(ix).map(|e| e.id.clone()) else {
-            return;
-        };
-        c.sel = cmpsync::toggle_entry(&c.sel, &id);
-        c.recalc_gaps();
-        let s = self.cmp_status_review();
-        self.status = s;
+        let status = self.compare.as_mut().and_then(|c| c.toggle_at(ix));
+        if let Some(status) = status {
+            self.status = status;
+        }
         cx.notify();
     }
 
-    /// `a` 只勾非破坏 / `A` 全选 / `f` 补齐重建组，都是整份替换勾选集。
+    /// `a` 只勾非破坏 / `A` 全选。
     pub(crate) fn cmp_select_all(&mut self, only_safe: bool, cx: &mut Context<Self>) {
-        let Some(c) = self.compare.as_mut() else {
-            return;
-        };
-        c.sel = if only_safe {
-            cmpsync::non_destructive_ids(&c.entries)
-        } else {
-            cmpsync::all_ids(&c.entries)
-        };
-        c.recalc_gaps();
-        let s = self.cmp_status_review();
-        self.status = s;
+        let status = self.compare.as_mut().map(|c| c.select_all(only_safe));
+        if let Some(status) = status {
+            self.status = status;
+        }
         cx.notify();
     }
 
+    /// `f` 补齐重建组缺口。
     pub(crate) fn cmp_fill_gaps(&mut self, cx: &mut Context<Self>) {
-        let has_gaps = match self.compare.as_ref() {
-            Some(c) => !c.gaps.is_empty(),
-            None => return,
-        };
-        if !has_gaps {
-            self.status = "没有缺口：重建表的条目已整组勾选".into();
-            cx.notify();
-            return;
+        let status = self.compare.as_mut().map(|c| c.fill_gaps());
+        if let Some(status) = status {
+            self.status = status;
         }
-        if let Some(c) = self.compare.as_mut() {
-            c.sel = cmpsync::fill_group_gaps(&c.entries, &c.sel);
-            c.recalc_gaps();
-        }
-        let s = self.cmp_status_review();
-        self.status = s;
         cx.notify();
     }
 
     /// `i` 忽略默认值 / `n` 破坏性默认勾选：都是**服务端**选项，改完必须重跑比对，
     /// 否则屏幕上的计划与 id 就与服务端重算的不是同一份（§15.5）。
     pub(crate) fn cmp_toggle_option(&mut self, ignore: bool, cx: &mut Context<Self>) {
-        let (step, was) = {
-            let Some(c) = self.compare.as_mut() else {
-                return;
-            };
-            let field = if ignore {
-                &mut c.ignore_defaults
-            } else {
-                &mut c.select_destructive
-            };
-            *field = !*field;
-            (c.step, *field)
+        let (status, rerun) = match self.compare.as_mut() {
+            Some(c) => c.toggle_option(ignore),
+            None => return,
         };
-        let name = if ignore {
-            "忽略默认值"
-        } else {
-            "破坏性默认勾选"
-        };
-        self.status = format!("{} = {}", name, if was { "开" } else { "关" });
-        if step == CmpStep::Review {
+        self.status = status;
+        if rerun {
             self.cmp_run_diff(cx);
         }
         cx.notify();
     }
 
-    /// 生成脚本前的门禁：`Ok(req)` 可提交；`Err(Some(提示))` 要显示；`Err(None)` 静默返回。
-    /// 缺口未补齐的勾选集提交给服务端一定 400（§15.5 第二条守卫），呈现层提前拦。
-    fn cmp_ddl_request(&self) -> Result<SchemaDdlRequest, Option<&'static str>> {
-        let c = self.compare.as_ref().ok_or(None)?;
-        if c.loading {
-            return Err(None);
-        }
-        if c.entries.is_empty() {
-            return Err(Some("两侧结构一致，无需同步"));
-        }
-        if c.sel.is_empty() {
-            return Err(Some("尚未勾选任何变更：按 a/A 勾选后再生成"));
-        }
-        if !c.gaps.is_empty() {
-            return Err(Some("⚠ 重建表的条目必须整组勾选：按 f 补齐后再生成"));
-        }
-        let tgt = c.tgt.ok_or(None)?;
-        Ok(SchemaDdlRequest {
-            source: SchemaDiffTarget {
-                connection_id: c.src,
-                schema: None,
-            },
-            target: SchemaDiffTarget {
-                connection_id: tgt,
-                schema: None,
-            },
-            // 必须与比对时同一份选项：回滚方向按它镜像重算。
-            options: Some(SchemaDiffOptions {
-                ignore_defaults: Some(c.ignore_defaults),
-                select_destructive: Some(c.select_destructive),
-            }),
-            // 勾选集按计划顺序回给服务端，与 TUI/Web 的文案口径一致。
-            selected: cmpsync::selected_ids(&c.entries, &c.sel),
-        })
-    }
-
     /// ③ `g`：按勾选集取脚本 → ④。缺口没补齐时不提交（服务端一定 400）。
     pub(crate) fn cmp_generate(&mut self, cx: &mut Context<Self>) {
-        let req = match self.cmp_ddl_request() {
-            Ok(req) => req,
-            Err(why) => {
-                if let Some(why) = why {
-                    self.status = why.into();
-                    cx.notify();
-                }
+        let req = match self.compare.as_ref().map(|c| c.ddl_request()) {
+            Some(Ok(req)) => req,
+            Some(Err(Some(why))) => {
+                self.status = why.into();
+                cx.notify();
                 return;
             }
+            _ => return,
         };
         if let Some(c) = self.compare.as_mut() {
-            c.loading = true;
-            c.outcome = None;
+            c.begin_io();
         }
         self.status = format!("生成脚本：{} 条变更…", req.selected.len());
         cx.notify();
@@ -3240,29 +3058,16 @@ impl PolyDBApp {
             cx,
             move |t| Box::pin(async move { t.schema_ddl(&req).await }),
             move |this, out, cx| {
-                let mut status = String::new();
-                if let Some(c) = this.compare.as_mut() {
-                    c.loading = false;
-                    match out {
-                        Ok(script) => {
-                            let s = cmpsync::summarize_script(&script.statements);
-                            status = format!(
-                                "脚本 {} 条 · 不可逆 {} · 涉及 {} 张表：x 执行 · r 回滚",
-                                s.total,
-                                s.non_reversible,
-                                s.tables.len()
-                            );
-                            c.script = Some(script);
-                            c.step = CmpStep::Apply;
-                            c.stmt_cur = 0;
-                            c.outcome = None;
-                            c.applied = false;
-                            c.confirming = false;
+                let status = match out {
+                    Ok(script) => this.compare.as_mut().map(|c| c.finish_script(script)),
+                    Err(e) => {
+                        if let Some(c) = this.compare.as_mut() {
+                            c.fail_io();
                         }
-                        Err(e) => status = format!("生成脚本失败: {e}"),
+                        Some(format!("生成脚本失败: {e}"))
                     }
-                }
-                if !status.is_empty() {
+                };
+                if let Some(status) = status {
                     this.status = status;
                 }
                 cx.notify();
@@ -3270,195 +3075,37 @@ impl PolyDBApp {
         );
     }
 
-    /// 执行前的门禁：给出要跑的 (连接, 脚本)。`Err(Some(提示))` 需要显示，`Err(None)` 静默。
-    fn cmp_script_to_run(
-        &self,
-        rollback: bool,
-    ) -> Result<(ConnectionId, DdlScript), Option<&'static str>> {
-        let c = self.compare.as_ref().ok_or(None)?;
-        if c.loading {
-            return Err(None);
-        }
-        let script = c
-            .script
-            .clone()
-            .ok_or(Some("还没有脚本：回第三步按 g 生成"))?;
-        if rollback && !c.applied {
-            return Err(Some("还没有成功执行过正向脚本，无需回滚"));
-        }
-        let will_run = if rollback {
-            &script.rollback
-        } else {
-            &script.statements
-        };
-        if will_run.is_empty() {
-            return Err(Some("脚本为空，无需执行"));
-        }
-        Ok((c.src, script))
-    }
-
-    /// ④ `x` / 回滚确认后的执行：按响应里两个能力位分派（§15.4）。
-    /// `rollback=true` 跑 `script.rollback`，只针对刚成功执行的正向脚本。
+    /// ④ `x` / 回滚确认后的执行。分派环路本身在 `cmpsync::run_script`（可单测），
+    /// 这里只给它接上真实线路：`TransportExec` 是那五个动作的 Transport 实现。
     pub(crate) fn cmp_apply(&mut self, cx: &mut Context<Self>, rollback: bool) {
-        let (id, script) = match self.cmp_script_to_run(rollback) {
-            Ok(v) => v,
-            Err(why) => {
-                if let Some(why) = why {
-                    self.status = why.into();
-                    cx.notify();
-                }
+        let run = match self.compare.as_ref().map(|c| c.script_to_run(rollback)) {
+            Some(Ok(v)) => v,
+            Some(Err(Some(why))) => {
+                self.status = why.into();
+                cx.notify();
                 return;
             }
+            _ => return,
         };
-        if let Some(c) = self.compare.as_mut() {
-            c.loading = true;
-            c.confirming = false;
-            c.confirm_buf.clear();
-            c.confirm_cursor = 0;
+        let (id, script) = run;
+        let status = self
+            .compare
+            .as_mut()
+            .map(|c| c.begin_apply(rollback).to_string());
+        if let Some(status) = status {
+            self.status = status;
         }
-        self.status = if rollback {
-            "回滚脚本执行中…"
-        } else {
-            "同步执行中…"
-        }
-        .into();
         cx.notify();
         self.io(
             cx,
             move |t| {
                 Box::pin(async move {
-                    // 浅拷贝语义：只换 statements，两个能力位正向与回滚共用一份。
-                    let mut sc = script.clone();
-                    if rollback {
-                        sc.statements = script.rollback.clone();
-                    }
-                    let plan = cmpsync::plan_execution(&sc);
-                    // (语句, 是否进事务)：PRAGMA 只有确认「主体在事务里」时才需要拆出去，
-                    // 否则整份按 wrap_in_tx 逐条或整体跑（与 Go applyScriptSync 同分支）。
-                    let mut steps: Vec<(&DdlStatement, bool)> = Vec::new();
-                    if plan.wrap_in_tx && sc.pragmas_outside_tx {
-                        if let Some(head) = plan.pragma_head {
-                            steps.push((head, false));
-                        }
-                        steps.extend(plan.body.into_iter().map(|s| (s, true)));
-                        if let Some(tail) = plan.pragma_tail {
-                            steps.push((tail, false));
-                        }
-                    } else {
-                        steps.extend(sc.statements.iter().map(|s| (s, plan.wrap_in_tx)));
-                    }
-                    let mut out = SyncOutcome {
-                        ran: 0,
-                        failed: Vec::new(),
-                        skipped: 0,
-                        rolled_back: false,
-                        rollback,
-                    };
-                    let mut txn: Option<String> = None;
-                    let fail = |out: &mut SyncOutcome,
-                                t: &mut Option<String>,
-                                index: usize,
-                                s: &DdlStatement,
-                                reason: String| {
-                        out.failed.push(FailedStmt {
-                            index,
-                            phase: s.phase,
-                            table: s.table.clone(),
-                            entries: s.entry_ids.clone(),
-                            sql: s.sql.clone(),
-                            reason,
-                        });
-                        out.skipped = steps.len().saturating_sub(index + 1);
-                        *t = None;
-                    };
-                    for (i, (s, in_tx)) in steps.iter().enumerate() {
-                        if *in_tx && txn.is_none() {
-                            match t
-                                .begin_transaction(&BeginTransactionRequest {
-                                    connection_id: id,
-                                    isolation_level: None,
-                                })
-                                .await
-                            {
-                                Ok(info) => txn = Some(info.id.to_string()),
-                                Err(e) => {
-                                    fail(&mut out, &mut txn, i, s, format!("开启事务失败: {e}"));
-                                    break;
-                                }
-                            }
-                        }
-                        // 主体跑完接着是事务外 PRAGMA：先提交，PRAGMA 进事务是 no-op。
-                        if !in_tx {
-                            if let Some(tx) = txn.take() {
-                                if let Err(e) = t.commit_transaction(&tx).await {
-                                    fail(&mut out, &mut txn, i, s, format!("提交失败: {e}"));
-                                    break;
-                                }
-                            }
-                        }
-                        let r = if let Some(tx) = txn.as_ref() {
-                            t.execute_in_transaction(tx, &s.sql, &[]).await
-                        } else {
-                            t.execute(id, &s.sql, &[]).await
-                        };
-                        match r {
-                            Ok(_) => out.ran += 1,
-                            Err(e) => {
-                                fail(&mut out, &mut txn, i, s, e.to_string());
-                                break;
-                            }
-                        }
-                    }
-                    if let Some(tx) = txn {
-                        if !out.failed.is_empty() {
-                            // 主体在事务里 ⇒ 失败即整体回滚，不留中间态。
-                            out.rolled_back = t.rollback_transaction(&tx).await.is_ok();
-                        } else if let Err(e) = t.commit_transaction(&tx).await {
-                            out.failed.push(FailedStmt {
-                                index: steps.len().saturating_sub(1),
-                                phase: 0,
-                                table: String::new(),
-                                entries: Vec::new(),
-                                sql: "(COMMIT)".into(),
-                                reason: format!("提交失败: {e}"),
-                            });
-                        }
-                    }
-                    out
+                    cmpsync::run_script(&script, rollback, &TransportExec { t: &*t, id }).await
                 })
             },
             move |this, out, cx| {
-                let mut status = String::new();
-                if let Some(c) = this.compare.as_mut() {
-                    c.loading = false;
-                    let ok = out.failed.is_empty();
-                    if out.rollback {
-                        if ok {
-                            c.applied = false;
-                            status = format!(
-                                "回滚脚本已执行 {} 条；结构退回去了，正向里丢的数据找不回来（§15.6）",
-                                out.ran
-                            );
-                        } else {
-                            let f = &out.failed[0];
-                            status = format!(
-                                "回滚中断：第 {} 条失败（{}）",
-                                f.index + 1,
-                                f.reason
-                            );
-                        }
-                    } else {
-                        c.applied = ok;
-                        status = if ok {
-                            format!("同步完成：{} 条语句已执行（按 c 复查差异）", out.ran)
-                        } else {
-                            let f = &out.failed[0];
-                            format!("执行中断：第 {} 条失败（{}）", f.index + 1, f.reason)
-                        };
-                    }
-                    c.outcome = Some(out);
-                }
-                if !status.is_empty() {
+                let status = this.compare.as_mut().map(|c| c.finish_apply(out));
+                if let Some(status) = status {
                     this.status = status;
                 }
                 cx.notify();
@@ -3466,30 +3113,21 @@ impl PolyDBApp {
         );
     }
 
-    /// ④ `r`：进入回滚强确认输入态（与 Web/TUI 同口径：逐字输入基准侧连接名）。
+    /// ④ `r`：进入回滚强确认输入态（门禁在纯层：只有正向全成功才允许）。
     pub(crate) fn cmp_start_confirm(&mut self, cx: &mut Context<Self>) {
-        if !self.cmp_applied() {
-            self.status = "还没有成功执行过正向脚本，无需回滚".into();
-            cx.notify();
-            return;
-        }
         let name = self.cmp_names().0;
-        if let Some(c) = self.compare.as_mut() {
-            c.confirming = true;
-            c.confirm_buf.clear();
-            c.confirm_cursor = 0;
+        let status = self.compare.as_mut().map(|c| c.start_confirm(&name));
+        if let Some(status) = status {
+            self.status = status;
         }
-        self.status = format!("代跑回滚不可逆：请逐字输入基准侧连接名「{name}」");
         cx.notify();
     }
 
     pub(crate) fn cmp_cancel_confirm(&mut self, cx: &mut Context<Self>) {
-        if let Some(c) = self.compare.as_mut() {
-            c.confirming = false;
-            c.confirm_buf.clear();
-            c.confirm_cursor = 0;
+        let status = self.compare.as_mut().map(|c| c.cancel_confirm());
+        if let Some(status) = status {
+            self.status = status.into();
         }
-        self.status = "已取消回滚确认".into();
         cx.notify();
     }
 
@@ -3509,28 +3147,8 @@ impl PolyDBApp {
         self.cmp_apply(cx, true);
     }
 
-    fn cmp_confirm_insert(&mut self, text: &str) {
-        let Some(c) = self.compare.as_mut() else {
-            return;
-        };
-        let boundary = char_ceil(&c.confirm_buf, c.confirm_cursor.min(c.confirm_buf.len()));
-        c.confirm_buf.insert_str(boundary, text);
-        c.confirm_cursor = boundary + text.len();
-    }
-
-    fn cmp_confirm_backspace(&mut self) {
-        let Some(c) = self.compare.as_mut() else {
-            return;
-        };
-        if c.confirm_cursor == 0 {
-            return;
-        }
-        let start = char_floor(&c.confirm_buf, c.confirm_cursor);
-        c.confirm_buf.replace_range(start..c.confirm_cursor, "");
-        c.confirm_cursor = start;
-    }
-
     /// 向导键位：与 TUI 的 viewCompare 同集合（外加浮层固有的 Esc/Backspace 返回）。
+    /// E6.3：按键 → 语义这张表在 `cmpsync::key_action`，这里只认 gpui 的事件结构。
     pub(crate) fn on_cmp_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
         let ks = &ev.keystroke;
         let Some(c) = self.compare.as_ref() else {
@@ -3542,15 +3160,17 @@ impl PolyDBApp {
                 "escape" => self.cmp_cancel_confirm(cx),
                 "enter" => self.cmp_submit_confirm(cx),
                 "backspace" => {
-                    self.cmp_confirm_backspace();
+                    if let Some(c) = self.compare.as_mut() {
+                        c.backspace_confirm();
+                    }
                     cx.notify();
                 }
                 _ => {
-                    if let Some(ch) = ks.key_char.as_deref() {
-                        if ch.chars().count() == 1 {
-                            self.cmp_confirm_insert(ch);
-                            cx.notify();
+                    if let Some(ch) = ks.key_char.as_deref().filter(|t| t.chars().count() == 1) {
+                        if let Some(c) = self.compare.as_mut() {
+                            c.insert_confirm(ch);
                         }
+                        cx.notify();
                     }
                 }
             }
@@ -3562,78 +3182,43 @@ impl PolyDBApp {
             }
             return;
         }
-        match ks.key.as_str() {
-            "escape" => {
-                if step == CmpStep::Source {
-                    self.close_compare(cx);
-                    return;
-                }
-                self.cmp_back(cx);
-            }
-            "up" | "k" => self.cmp_move(-1, cx),
-            "down" | "j" => self.cmp_move(1, cx),
-            "i" => self.cmp_toggle_option(true, cx),
-            "n" => self.cmp_toggle_option(false, cx),
-            _ => self.cmp_step_key(step, ks.key.as_str(), loading, cx),
-        }
+        let action = cmpsync::key_action(step, loading, ks.key.as_str());
+        self.cmp_do_action(action, cx);
     }
 
-    /// 每步独有的键（Esc/方向/选项键已在上层分派）。
-    fn cmp_step_key(&mut self, step: CmpStep, key: &str, loading: bool, cx: &mut Context<Self>) {
-        match (step, key) {
-            (CmpStep::Source, "enter") => self.cmp_pick_source(cx),
-            (CmpStep::Target, "enter") => self.cmp_run_diff(cx),
-            (CmpStep::Review, "enter") | (CmpStep::Review, "space") => {
+    /// 纯层给出的动作 → 实体方法。这一层没有判断，只有转接。
+    fn cmp_do_action(&mut self, action: CmpAction, cx: &mut Context<Self>) {
+        match action {
+            CmpAction::Nothing => {}
+            CmpAction::Move(delta) => self.cmp_move(delta, cx),
+            CmpAction::ToggleOption(ignore) => self.cmp_toggle_option(ignore, cx),
+            CmpAction::PickSource => self.cmp_pick_source(cx),
+            CmpAction::RunDiff => self.cmp_run_diff(cx),
+            CmpAction::ToggleAtCursor => {
                 let cur = self.compare.as_ref().map(|c| c.entry_cur).unwrap_or(0);
                 self.cmp_toggle_entry(cur, cx);
             }
-            (CmpStep::Review, "a") => self.cmp_select_all(true, cx),
-            (CmpStep::Review, "A") => self.cmp_select_all(false, cx),
-            (CmpStep::Review, "f") => self.cmp_fill_gaps(cx),
-            (CmpStep::Review, "r") => self.cmp_run_diff(cx),
-            (CmpStep::Review, "g") => self.cmp_generate(cx),
-            (CmpStep::Apply, "x") if !loading => self.cmp_apply(cx, false),
-            (CmpStep::Apply, "r") if !loading => self.cmp_start_confirm(cx),
-            (CmpStep::Apply, "c") if !loading => self.cmp_run_diff(cx),
-            (CmpStep::Apply, "g") if !loading => self.cmp_generate(cx),
-            (_, "backspace") => self.cmp_back(cx),
-            _ => {}
+            CmpAction::SelectAll { only_safe } => self.cmp_select_all(only_safe, cx),
+            CmpAction::FillGaps => self.cmp_fill_gaps(cx),
+            CmpAction::Generate => self.cmp_generate(cx),
+            CmpAction::Apply => self.cmp_apply(cx, false),
+            CmpAction::StartConfirm => self.cmp_start_confirm(cx),
+            CmpAction::Back => self.cmp_back(cx),
+            CmpAction::Close => self.close_compare(cx),
         }
     }
 
-    /// 返回上一步（Esc / Backspace）；① 步的 Esc 由调用侧直接关窗。
+    /// 返回上一步（Esc / Backspace）；① 步的 Esc 由按键表判成 Close。
     fn cmp_back(&mut self, cx: &mut Context<Self>) {
-        let Some(c) = self.compare.as_mut() else {
-            return;
-        };
-        c.outcome = None;
-        c.confirming = false;
-        c.step = match c.step {
-            CmpStep::Source => CmpStep::Source,
-            CmpStep::Target => {
-                c.tgt = None;
-                CmpStep::Source
-            }
-            CmpStep::Review => CmpStep::Target,
-            CmpStep::Apply => CmpStep::Review,
-        };
+        if let Some(c) = self.compare.as_mut() {
+            c.back();
+        }
         cx.notify();
     }
 
     /// 弹层底部键位提示（与 TUI 的 `cmpFooter` 同语义，逐字对齐后写进 docs/frontends.md）。
     pub(crate) fn cmp_footer_text(&self) -> &'static str {
-        let Some(c) = self.compare.as_ref() else {
-            return "";
-        };
-        if c.confirming {
-            return "逐字输入基准侧连接名 · Enter 确认执行回滚 · Esc 取消";
-        }
-        match c.step {
-            CmpStep::Source => "↑/↓ · k/j 选基准侧 · Enter 下一步 · Esc 退出向导（基准侧=要被改成期望侧的样子，也是执行侧）",
-            CmpStep::Target => "↑/↓ · k/j 选期望侧 · i 忽略默认值 · n 破坏性默认勾选 · Enter 开始比对 · Esc 上一步",
-            CmpStep::Review => "↑/↓ · k/j 条目 · Space 勾选 · a 只勾非破坏 · A 全选 · i/n 改选项并重比对 · f 补齐重建组 · g 生成脚本 · Esc 上一步",
-            CmpStep::Apply => "↑/↓ · k/j 滚动 · x 执行正向 · r 代跑回滚 · c 复查差异 · g 重新生成 · Esc 返回勾选",
-        }
+        self.compare.as_ref().map(|c| c.footer()).unwrap_or("")
     }
 
     // ─── 网格数据访问（预览/右键菜单按作用域解析）───
@@ -3756,7 +3341,9 @@ impl PolyDBApp {
         if self.delete_selection() {
             return;
         }
-        let start = char_floor(&self.sql, self.cursor);
+        // 退到**光标前那个字符**的起点：char_floor 落在边界上会原地不动（ASCII 恒如此），
+        // 所以先退一格再取边界——与 `util::edit_line` 的退格同一口径。
+        let start = char_floor(&self.sql, self.cursor - 1);
         self.sql.replace_range(start..self.cursor, "");
         self.cursor = start;
     }
@@ -4163,7 +3750,7 @@ impl PolyDBApp {
         if self.quick_cursor == 0 {
             return;
         }
-        let start = char_floor(&self.quick_query, self.quick_cursor);
+        let start = char_floor(&self.quick_query, self.quick_cursor - 1);
         self.quick_query.replace_range(start..self.quick_cursor, "");
         self.quick_cursor = start;
     }

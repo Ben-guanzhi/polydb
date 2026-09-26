@@ -814,7 +814,7 @@ A.15 的 G14 留下一句话没人接：`ddl_in_tx=false` 那一支失败后"数
 —— **E6.2 已关闭一半**：单事务那一支现在有端到端证据（A.17）；`ddl_in_tx=false` 那一支 SQLite 恒不出现，
 在 SQLite 上**结构上不可能**经 HTTP 跑到，只能等非 SQLite 方言；② Web 的 `runScript` 只验过编排，**没有真发过 HTTP**（真线路由 E5.0 的双后端传输测试背书）；
 ③ 提交阶段本身失败（`commit` 抛错 ⇒ 记失败但不回滚）这条分支两端都还没测；
-④ Rust GUI 的第三份拷贝仍无测试（E6.3）。
+④ Rust GUI 的第三份拷贝仍无测试 —— **A.19 已关闭**（抽层 + 4 份同构断言，并顺带抓到一支"从不回滚"的分歧）。
 
 ### A.17 E6.2 TUI 远程模式向导端到端真跑（2026-09-26，**零生产代码改动**）
 
@@ -893,3 +893,62 @@ Rust 的 `connections` 私有、没有注入驱动的门 ⇒ 那一侧只有**�
 
 **门禁（本批）**：Go `go build ./... && go vet ./...` 干净、`go test ./pkg/appcore/` 绿（新增 2 份 + 1 组三档基准）；
 Rust `cargo test -p polydb-app-core --test snapshot_fanout` **2 绿**。
+
+### A.19 E6.3 GUI 向导状态机抽纯层 + keystroke 级测试（2026-09-26，**顺带修掉两处缺陷，其一为双实现分歧**）
+
+A.16 ④ 那条"Rust GUI 的第三份拷贝仍无测试"到此关闭。这一步是 E6 里唯一一处**必须动 GUI 生产代码**的取证：
+向导的四步状态机长在 `app.rs` 的 GPUI 实体里，执行分派长在 `cmp_apply` 的 `self.io` async 闭包里，
+两处都没法按键、也没法看调用序列。
+
+**落点**：
+
+| 位置 | 内容 |
+|---|---|
+| `ui-gui/src/cmpsync.rs`（563 → 1610 行，含新增测试） | 搬入向导态与全部纯转移：`CmpStep` / `CompareState`（含 20 个方法：`goto_target`、`finish_diff`、`review_status`、`toggle_at`、`select_all`、`fill_gaps`、`toggle_option`、`ddl_request`、`finish_script`、`script_to_run`、`begin_apply`、`finish_apply`、`start_confirm`、`insert/backspace_confirm`、`back`、`footer` …）；新增按键语义表 `CmpAction` + `key_action(step, loading, key)`；新增分派环路 `SyncExec`（5 个动作）+ `run_script(script, rollback, ex)`。**本层不出现任何 gpui 类型** |
+| `ui-gui/src/app.rs`（4215 → 3802 行） | 只剩接线：`on_cmp_key` 解 gpui 事件 → `cmpsync::key_action` → `cmp_do_action`；`TransportExec` 把那 5 个动作落到 `dyn Transport`；发 IO、`cx.notify()`、把纯层返回的文案写进 `status`。`pub(crate) use crate::cmpsync::{CmpStep, CompareState}` 让旧路径不变 |
+| `ui-gui/Cargo.toml` | deps `+ async-trait`；dev-deps `+ polydb-app-core / polydb-storage / smol`——**只在测试里**造真引擎，产品代码路径仍然只依赖 transport（AGENTS.md 第 1 条红线不破） |
+
+**新增 6 份测试**（`cmpsync.rs` 的 `mod tests`，ui-gui **59 → 65 绿**）：
+
+| 测试 | 证据 |
+|---|---|
+| `whole_tx_branch_rolls_back_landed_statements` | `pragmas_outside_tx=false` 那一支：序列必须是 `begin \| tx:… \| tx:… \| rollback`，且回读 `sqlite_master` 里 `ran=1` 的那张表**必须不存在** |
+| `non_tx_branch_leaves_intermediate_state` | `ddl_in_tx=false`：一次 `begin` 都不许有，且已落地语句**必须还在库里**（与上一份互斥） |
+| `keeps_head_and_tail_pragmas_outside_the_tx` | 首尾 PRAGMA 走 `exec:`、主体两条共享**恰好一个**事务、表真建出来 |
+| `rollback_direction_reuses_the_same_dispatch` | `rollback=true` 跑的是 `script.rollback` 那一份，能力位共用、表真被删掉 |
+| `key_action_table_matches_the_other_two_frontends` | 四步 × 每个键逐条钉住：`up/k`·`down/j`·`i/n`·`escape`（① 步关窗、其余后退）·`backspace`，④ 步 `x/r/c/g` 带 loading 门禁、其余步不带 |
+| `wizard_walkthrough_by_keystrokes` | 整条向导用纯转移走一遍：① Enter → ② 选项（不重跑）→ 计划回来 → 缺口文案 → `f` 补齐 → `A`/`a` 勾选口径 → `ddl_request` 的 `selected` 顺序 → ④ 步文案 → `r` 未跑正向被挡 → `x` 成功 → 确认框逐字输入/退格/取消 → `back()` 逐级返回（只有 ②→① 丢期望侧） |
+
+**证据等级与 Go 对齐、与 Web 不对齐**（如实记）：Rust 这一份是**真 `:memory:` SQLite + 真 `LocalTransport`**
+外面套 `Recorder`（只记序列、其余透传，不 mock 数据库），与 A.16 的 Go 侧同一等级；
+Web 只能记假账本（浏览器里没有真引擎）。`ddl_in_tx=false` 那一支仍是**测试手工构造的脚本**给的 false——
+SQLite 服务端不会这么给，两端同此局限（A.16 已记）。
+
+**测试跑出来的两处缺陷（不是设计时想到的）**：
+
+1. **双实现行为分歧，已修**：GUI 的 `fail` 闭包带一个 `*t = None`，把事务句柄连同失败一起清掉
+   ⇒ 循环末尾 `if let Some(tx) = txn` 永假 ⇒ "主体包进事务"那一支**从不发 ROLLBACK**，
+   `rolled_back` 恒 `false`，已落地语句留在库里、服务端事务挂到连接关闭。Go `applyScriptSync` 与 Web `runScript`
+   都会回滚——即三端里只有 Rust GUI 走样。修法：`fail` 不再收 `&mut Option<String>`，与 Go 同形
+   （提交失败那条分支由 `txn.take()` 天然清掉句柄，行为不变）。这条正是第一条测试的序列断言抓到的。
+2. **GUI 三处文本输入退格失效，已修**：`char_floor(s, cursor)` 在光标恰落在 char 边界时**原地不动**
+   （`is_char_boundary(len)` 恒真），于是 `replace_range(cursor..cursor, "")` 删不到任何字符——
+   ASCII 文本下光标永远在边界上 ⇒ 退格键等于没键。命中：向导回滚确认框、SQL 编辑器 `backspace()`、
+   Quick Switcher `quick_line_backspace()`。修法：一律 `char_floor(s, cursor - 1)`，与 `util::edit_line` 一直用的口径一致。
+   **只有向导那处有按键级测试**；另两处挂在 `PolyDBApp` 实体上（要 gpui 窗口才能测），本批只靠
+   `util.rs` 里新增的 3 条 `char_floor` 边界断言钉口径，**未肉眼验证**。
+   这条与历次里程碑记忆里反复出现的"GUI 渲染/交互未肉眼验证"是同一个坑的兑现。
+
+**有意的不等价**（除上面两处修正外本批是纯搬运，中文文案逐字未动）：
+`cmp_toggle_entry` / `cmp_select_all` / `cmp_fill_gaps` 现在在向导未打开时也会走到 `cx.notify()`（渲染空转），
+原来这三处在更早处就返回了。不影响可见行为，记下来以免日后被当成等价搬运。
+
+**门禁（本批）**：`cargo test -p polydb-ui-gui` **65 绿**（+6）、
+`cargo clippy -p polydb-ui-gui --all-targets -- -D warnings` 与 `cargo clippy --workspace --all-targets -- -D warnings` 均零警告、
+`cargo fmt --all -- --check` 干净（写模式仍按项目约定手改）、`cargo check --workspace` 干净。
+Go / Web 零改动，故未重跑（E6.6 统一刷新基线）。
+
+**A.19 未覆盖（如实披露）**：① `on_cmp_key` 里 gpui 事件 → `key_action` 之间那一小段（`key_char` 取字、
+ctrl/platform + `4` 关窗）仍无测试，纯层与实体之间的接缝靠通读；② GUI 向导没有"把按键灌进真窗口跑一遍"的端到端
+（GPUI 缺测试基建），故 GUI 侧证据链是"纯状态机 + 真引擎分派"两级，比 TUI（A.17 有整条按键脚本 + 远程真跑）**短一节**；
+③ 第 2 处缺陷的另两个输入框修正无测试；④ `dd_request` 的 `Err(None)`（在途静默）只有代码路径、无断言。

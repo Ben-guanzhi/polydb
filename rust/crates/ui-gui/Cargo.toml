@@ -9,6 +9,7 @@ polydb-core = { workspace = true }
 polydb-protocol = { workspace = true }
 polydb-transport = { workspace = true }
 gpui = { workspace = true }
+async-trait = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -17,3 +18,9 @@ serde_json = { workspace = true }
 # 仅测试构造 DTO 用（ConnectionInfo 的时间戳与 uuid 主键）
 chrono = { workspace = true }
 uuid = { workspace = true }
+# E6.3 分派环路取证：真 AppCore + 真 SQLite 引擎（与 Go 侧 tui 测试同构，
+# 只在前端**测试**里引核心 crate，产品代码路径仍然只有 transport）
+polydb-app-core = { workspace = true }
+polydb-storage = { workspace = true }
+# 测试里驱动真引擎的 block_on（产品路径的异步在 IoBridge/transport 里）
+smol = { workspace = true }

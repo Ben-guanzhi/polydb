@@ -442,6 +442,10 @@ mod tests {
         let s = "中文ab"; // 中/文 各 3 字节，a/b 各 1
         assert_eq!(char_floor(s, 4), 3);
         assert_eq!(char_ceil(s, 4), 6);
+        // char_floor 落在边界上时**原地不动** ⇒ 退格必须先把下标退一格，否则删不掉字符。
+        assert_eq!(char_floor("hello", 5), 5);
+        assert_eq!(char_floor(s, 5), 3); // 光标在 6（文之后）⇒ 退到 3，删掉整个"文"
+        assert_eq!(char_floor(s, 7), 7); // 光标在 8（末尾）⇒ 前一格已是边界，删掉 'b'
         let t = "ab\r\ncd";
         let (ls, le) = line_bounds(t, 2);
         assert_eq!((ls, le), (0, 3)); // \r 留在行内（end 只排除 \n）
