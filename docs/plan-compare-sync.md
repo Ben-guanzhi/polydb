@@ -197,8 +197,9 @@ E3 收口时 `check` 与 TS 重生成均零漂移（`web/src/api/index.ts` +37 �
   这条真实调用路径仍未跑到**：E4 的 Web 向导已经实现了这条分派（附录 A.13），但 SQLite 两端能力位恒为
   `true`，所以浏览器里验证的是"PRAGMA 事务外 + 主体单事务"那一支；另一支（逐条 `/query`）只有纯函数
   单测覆盖，**契约层仍未对两种分派各加一条断言**。
-- 视图（`CREATE VIEW`）对重建表的依赖行为**仍未测**（E3.0 遗留）：SQLite 视图按名字解析，
-  预期不破，但没证据就不写进规则。
+- ~~视图（`CREATE VIEW`）对重建表的依赖行为**仍未测**（E3.0 遗留）~~ **E6.0 已测完并证伪了原假设**
+  （附录 A.15）：SQLite 的 `ALTER TABLE … RENAME` 会重解析依赖该名字的视图，所以视图不是"预期不破"，
+  而是**让整表重建在 RENAME 那一步直接失败**；真正静默留下破视图的是 `drop_table`。
 - 只有 SQLite 能端到端真跑（**两个文件 / 两个连接**；E2.0 实测确认驱动不支持 schema 寻址，
   "同库两 schema"需先拍板 §8-6）——所以 v1 的验收以 SQLite 为主，
   其余方言的正确性依赖单测 + 后续在有实例的环境补测。
@@ -234,6 +235,13 @@ E3 收口时 `check` 与 TS 重生成均零漂移（`web/src/api/index.ts` +37 �
 7. ~~**其余 4 个方言的 `on_update`/`on_delete` 与 `generic_type` 何时填**~~ **已定（2026-09-25）：随 E3 / 有实例环境一起补**。
    理由：本轮只补了 SQLite，因为 SQLite 有 bundled 真引擎可实测；PG/MySQL/MSSQL/Oracle 现在补只能凭文档盲填、
    契约测试全 soft-skip，等于"数字上已实现、实际未验证"。与 §8-3 的 `generic_type` 命名表定案绑定推进。
+8. **快照要不要让生成器"看见"视图？**（**E6.0 取证后新开，待拍板，记在 E6.5**）A.15 的 G13/G16/G17
+   是同一条盲区的三个面：重建被依赖视图挡住、删表静默留下破视图、临时名撞上同名视图。
+   最小改法已经量化好——只去掉采集层那一行过滤（G17 之 ①），DTO / 线路 / diff 规则零变更，
+   然后给生成器加两条：重建前若有依赖视图 ⇒ 挂警告（或直接转 `NOT_SUPPORTED`），
+   临时名去重集纳入视图名。**代价**：快照体积与采集口径变（behavior.md §14.1「视图整体跳过」要改写），
+   且三端呈现层要跟着多一类警告文案。也可以完全不碰生成器，维持 §14.3「不猜语义、执行期报错兜底」，
+   只把 A.15 的四条事实写进文档。**这一取舍是产品决策，不由取证自动得出。**
 
 ---
 
@@ -516,7 +524,7 @@ E3 的语句生成器只覆盖 SQLite（§8 已定），所以先把 SQLite 的 
    漏勾的同表变更会被静默应用（数据语义层面等于凭空改掉）。
 
 **E3.0 当时未验证、现由 E3.7 契约关闭**：G2/G5 原本只在 Go 侧引擎上复现过，rusqlite 侧
-已在契约里同结论跑通（G10–G12）。**视图对重建表的依赖行为仍未测**（§7 最后一条）。
+已在契约里同结论跑通（G10–G12）。**视图对重建表的依赖**当时留给 §7，现由 **A.15（G13–G17）** 关闭。
 
 ### A.12 E3 落地实况（2026-09-25，协议 + 双端端点 + 契约真跑）
 
@@ -579,7 +587,8 @@ Go `go build ./...` / `go vet ./...` / `go test -count=1 ./...` 全绿（`pkg/sc
 （契约层 soft-skip，只有纯函数语料 d16–d21 恒跑）；② 「`pragmas_outside_tx=false` 的脚本整份包进
 `/api/transactions` 执行」这条真实调用路径无人跑过（契约是逐条 `/query`）。
 **E4 后订正**：向导已实现三种分派并在浏览器跑过"PRAGMA 事务外 + 主体单事务"那一支，但 SQLite 两端
-能力位恒为 `true`/`true`，另两支在本机仍没有真库可跑，详见 A.13；③ 视图对重建表的依赖未测；
+能力位恒为 `true`/`true`，另两支在本机仍没有真库可跑，详见 A.13；③ ~~视图对重建表的依赖未测~~
+**已由 A.15（E6.0）实测关闭**，且结论与原假设相反；
 ④ Go 侧 `golangci-lint` 本机缺失；⑤ Web/GUI/TUI 三端渲染完全不涉及
 （本批只有服务端 + 生成的 TS 类型）。
 
@@ -714,3 +723,42 @@ E5 在 `app.rs` 新增的 926 行按键分派与在 `view.rs` 新增的 714 行�
 `ddl_in_tx=false` 两支分派在 GUI/TUI 同样只有纯函数与 Go 侧 `TestApplyScriptSyncDispatch` 覆盖，
 真库（PG/MySQL）跑不到；⑤ TUI 远程模式（打 polydb-server）的向导链路未真跑，只在本机模式测过；
 ⑥ `golangci-lint` v2 本机仍未安装，Go lint 步骤恒跳过。
+
+### A.15 E6.0 SQLite 视图依赖取证（2026-09-26，关闭 §7 与 A.11 的遗留未测项）
+
+§7 与 A.11 一直挂着一条：**视图对重建表的依赖行为未测**，原假设是"SQLite 视图按名字解析 ⇒ 预期不破"。
+E6 选定的范围是「证据补齐 + 还债」，所以先把这条**测出来**再谈要不要改规则。
+探测手段升级为一等公民测试：真驱动 + 真快照 + 真 diff + 真生成器 + `:memory:` 引擎，
+两端各一份镜像（`go/pkg/dbsqlite/view_rebuild_probe_test.go`、
+`rust/crates/db-sqlite/tests/view_rebuild_probe.rs`，各 4 份），不再是一次性 CLI 手跑。
+
+取证场景：`orders(id INTEGER PRIMARY KEY, qty INTEGER NOT NULL DEFAULT 1)` 两行数据，
+外加一个依赖它的视图 `v_orders` 与一个触发器 `t_after_ins`；目标侧把 `qty` 换成 `TEXT` ⇒
+diff 出一条 `alter_column`，生成器按规则 2 走整表重建（6 条语句、能力位 `pragmas_outside_tx=true`
+`ddl_in_tx=true`，与 A.11 完全一致）。
+
+| # | 实测结论 | 证据 | 对生成器的约束 |
+|---|---|---|---|
+| G13 | **原假设是错的**：依赖视图不会"静默破掉"，而是**让重建直接失败**，失败点在 `RENAME` | `DROP TABLE "orders"` 返回 **OK**（SQLite 的 `DROP` 不做依赖检查），下一条 `ALTER TABLE "polydb_tmp_orders" RENAME TO "orders"` 才报错——Go `SQL logic error: error in view v_orders: no such table: main.orders (1)`、Rust `driver error: execute failed: error in view v_orders: no such table: main.orders`。`RENAME` 会重解析引用该名字的视图，而此时原表刚被 DROP。混淆项已排除：A.11 G4 单独放触发器时重建是**成功**的，且错误文案点名 `v_orders` ⇒ 挡路的是视图不是触发器 | 快照里没有视图 ⇒ 生成器**无从预判**这类失败；不能把"视图不参与比对"当成"视图不影响执行" |
+| G14 | **逐条分支（等价 `ddl_in_tx=false`）失败后的中间态是丢表** | 同一脚本按顺序跑完 6 条（探测刻意为之，不代表向导是否遇错即停）：`SELECT count(*) FROM orders` ⇒ `no such table`，`polydb_tmp_orders` ⇒ **2 行**（数据困在临时表），`sqlite_master WHERE type='trigger'` ⇒ **0**（随 `DROP` 一起没了），而尾部 `PRAGMA foreign_keys=ON` 仍 OK | SQLite 恒 `ddl_in_tx=true` ⇒ 本分支实际踩不到；但**任何 `ddl_in_tx=false` 的方言复用这套重建算法前，必须先补依赖检查**，否则一次失败就把用户表删了 |
+| G15 | **事务分支把这一切干净兜住**（SQLite 真实的那一分派经失败路径验证有效） | 跳过 phase 0/255 两条 PRAGMA（G6：它们本就在事务外）⇒ `BEGIN` → 主体在 `RENAME` 失败 → `ROLLBACK`：`orders` ⇒ 2 行、`v_orders` ⇒ 2 行（视图还能查）、`typeof(qty)` ⇒ `"integer"`（旧定义原封不动）、`polydb_tmp_orders` ⇒ `no such table`（无残留）。两端同结论 | 「首尾 PRAGMA 事务外 + 主体单事务」不只是成功路径上成立，**失败路径上同样成立** ⇒ §7 里"`/api/transactions` 那条支路没验证过"的担忧，在视图失败这一具体形状上已有证据 |
+| G16 | 真正**静默**留下破视图的是 `drop_table`，不是重建 | 目标侧去掉 `orders` ⇒ 只有一条 `DROP TABLE "orders";`，全程无错；`sqlite_master WHERE type='view'` 仍为 **1**（条目留着），一查 `SELECT * FROM v_orders` 才报 `no such table`；该语句的 `warnings` 实测为**空** | 与 G4「重建静默丢触发器」同一类：快照不含视图 ⇒ 无从预警。是否给 `drop_table` 补一条"可能留下依赖它的视图"警告属**产品决策**，本附录只钉事实 |
+| G17 | 临时名去重集**看不见视图** ⇒ 库里已有同名视图时脚本一开局就撞车，且是**良性失败** | 源侧预置 `CREATE VIEW polydb_tmp_orders AS SELECT 1 AS one`：生成器仍按 `orders` 算出临时名 `polydb_tmp_orders`，首条 `CREATE TABLE "polydb_tmp_orders"(…)` ⇒ Go `view "polydb_tmp_orders" already exists` / Rust `prepare failed: view "polydb_tmp_orders" already exists`。此时**什么都没被改动** | 结构性原因（三处，全部实测有效）：① 采集层过滤非表项 `crates/app-core/src/lib.rs:510` ⇄ `pkg/appcore/schema_diff.go:56`；② 去重集只从表快照播种 `crates/schema-diff/src/ddl.rs:677-679` ⇄ `pkg/schemadiff/ddl.go:607-612`；③ 即便放进快照，diff 层也会跳过视图 `schema-diff/src/lib.rs:273-288` ⇄ `pkg/schemadiff/schemadiff.go:217-236` ⇒ 想让生成器"看见"视图名，只需去掉 ①，**DTO 与线路零变更** |
+
+**本批没有改动的东西（刻意为之）**：零 spec 变更、零生成器规则变更、零文案变更。
+G13/G16/G17 各自暗示一种规则收紧（重建前依赖检查、`drop_table` 警告、临时名去重集纳入视图名），
+但那是"证据 → 产品行为"的一步，需先拍板 ⇒ 已立为 **§8-8**，落在 E6.5（`polydb_tmp_` 冲突与视图可见性的处置）。
+在此之前，`spec/behavior.md` §14.1「视图与物化视图整体跳过」与 §14.3「不猜语义，执行期由数据库报错兜底」
+继续按原文执行——A.15 提供的正是这两条口径**在真实引擎上的代价账单**。
+
+**门禁（本批）**：Go `go build ./... && go vet ./...` 干净、`go test ./...` 全量 **0 失败**
+（`pkg/dbsqlite` **18** 份顶层，含新 4 份）；Rust `cargo test -p polydb-db-sqlite` **21 绿**
+（lib 7 + `snapshot_diff` 10 + `view_rebuild_probe` 4）、
+`clippy -p polydb-db-sqlite --all-targets -- -D warnings` 退出 0、`cargo fmt --check` 干净；
+新 Go 文件剥 CR 后 `gofmt -l` 无输出。**本批未跑**：Rust workspace 全量、契约对拍、Web 检查
+（改动面只有两份测试 + 本文档，零接线变更），全量基线数字在 E6.6 收口时统一刷新。
+
+**A.15 未覆盖（如实披露）**：① 只测了 SQLite 两端 bundled 引擎（modernc 3.53.4 / rusqlite 3.46.0），
+PG/MySQL 等的 `RENAME`/依赖检查语义**仍无证据**；② 未测**视图链**（视图套视图）、物化视图
+（SQLite 无此对象）、以及视图跨 schema 的情形；③ 未测"目标侧也存在同名视图"时的行为（只测了源侧）；
+④ G14 是探测脚本按序跑完的结果，**向导实际的遇错即停策略**由 E6.1 的应用环路测试另行钉死。
