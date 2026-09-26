@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/polydb/polydb/pkg/changes"
+	"github.com/polydb/polydb/pkg/cmpsync"
 	"github.com/polydb/polydb/pkg/protocol"
 	"github.com/polydb/polydb/pkg/transport"
 )
@@ -112,6 +113,23 @@ type (
 	kvDBMsg struct {
 		index int
 		err   error
+	}
+	// schemaDiffMsg 承载一次结构比对计划；recheck=true 表示"执行后复查"，
+	// 只用来更新状态行，不得覆盖向导里正在勾选的那份计划。
+	schemaDiffMsg struct {
+		entries []protocol.SchemaDiffEntry
+		recheck bool
+		err     error
+	}
+	// schemaDdlMsg 承载服务端重算计划后生成的脚本（正向 + 回滚 + 两个能力位）。
+	schemaDdlMsg struct {
+		script *protocol.DdlScript
+		err    error
+	}
+	// syncApplyMsg 承载一次脚本执行的结果（正向与回滚共用同一条通道）。
+	syncApplyMsg struct {
+		outcome cmpsync.ApplyOutcome
+		run     string // forward / rollback
 	}
 	hbTickMsg struct{} // 30s 心跳定时：ping 当前连接
 )
@@ -386,4 +404,123 @@ func kvSelectDbCmd(a transport.Client, id string, index int) tea.Cmd {
 		err := a.SelectDB(context.Background(), id, index)
 		return kvDBMsg{index: index, err: err}
 	}
+}
+
+// ─── 结构比对与同步（E5.2）───────────────────────────────────
+
+// schemaDiffCmd 采集两侧快照并比对。recheck 只影响消息处理分支（执行后复查）。
+func schemaDiffCmd(a transport.Client, req *protocol.SchemaDiffRequest, recheck bool) tea.Cmd {
+	return func() tea.Msg {
+		plan, err := a.SchemaDiff(context.Background(), req)
+		if err != nil {
+			return schemaDiffMsg{recheck: recheck, err: err}
+		}
+		return schemaDiffMsg{entries: plan.Entries, recheck: recheck}
+	}
+}
+
+// schemaDdlCmd 请服务端按同一份选项**重算**计划后生成脚本（陈旧 id、重建组未整组
+// 勾选都会在服务端 400，呈现层的提前提示只是友好化，不替代判定）。
+func schemaDdlCmd(a transport.Client, req *protocol.SchemaDdlRequest) tea.Cmd {
+	return func() tea.Msg {
+		script, err := a.SchemaDDL(context.Background(), req)
+		return schemaDdlMsg{script: script, err: err}
+	}
+}
+
+// applyScriptCmd 在基准侧连接上执行一份脚本；run 取 forward / rollback，决定跑
+// statements 还是 rollback（两份脚本共用同一组能力位）。
+// 用 Background ctx：DDL 编排不像查询那样支持 F8 取消，避免中途被撕断留下半成品。
+func applyScriptCmd(a transport.Client, connID string, script *protocol.DdlScript, run string) tea.Cmd {
+	return func() tea.Msg {
+		return syncApplyMsg{outcome: applyScriptSync(a, connID, script, run), run: run}
+	}
+}
+
+// applyScriptSync 按能力位分派执行（behavior.md §15.4，与 Web 侧 applyScript 同编排）：
+//   - ddl_in_tx + pragmas_outside_tx ⇒ 首尾 PRAGMA 事务外跑，主体包一个事务；
+//   - ddl_in_tx=false                ⇒ 该方言 DDL 会隐式提交，全脚本逐条跑（失败留中间态）。
+//
+// 只记首个失败并跳过其余：主体在事务里时失败即整体回滚。
+func applyScriptSync(a transport.Client, connID string, script *protocol.DdlScript, run string) cmpsync.ApplyOutcome {
+	out := cmpsync.ApplyOutcome{}
+	sc := *script // 浅拷贝：只换 Statements，能力位两份共用
+	if run == cmpRunRollback {
+		sc.Statements = script.Rollback
+	}
+	plan := cmpsync.PlanExecution(&sc)
+	type step struct {
+		stmt protocol.DdlStatement
+		inTx bool
+	}
+	var steps []step
+	if plan.WrapInTx && script.PragmasOutsideTx {
+		if plan.PragmaHead != nil {
+			steps = append(steps, step{*plan.PragmaHead, false})
+		}
+		for _, s := range plan.Body {
+			steps = append(steps, step{s, true})
+		}
+		if plan.PragmaTail != nil {
+			steps = append(steps, step{*plan.PragmaTail, false})
+		}
+	} else {
+		for _, s := range sc.Statements {
+			steps = append(steps, step{s, plan.WrapInTx})
+		}
+	}
+	ctx := context.Background()
+	fail := func(index int, s protocol.DdlStatement, err error) {
+		out.Failed = append(out.Failed, cmpsync.FailedStatement{
+			Index:    index,
+			Phase:    s.Phase,
+			Table:    s.Table,
+			SQL:      s.SQL,
+			Reason:   err.Error(),
+			EntryIDs: s.EntryIDs,
+		})
+		out.Skipped = max(0, len(steps)-index-1)
+	}
+	var txID string
+	for i, st := range steps {
+		if st.inTx && txID == "" {
+			tx, err := a.BeginTransaction(ctx, connID)
+			if err != nil {
+				fail(i, st.stmt, err)
+				break
+			}
+			txID = tx.ID
+		}
+		// 主体跑完接着是事务外 PRAGMA：先提交，PRAGMA 进事务是 no-op。
+		if !st.inTx && txID != "" {
+			if _, err := a.CommitTransaction(ctx, txID); err != nil {
+				fail(i, st.stmt, err)
+				txID = ""
+				break
+			}
+			txID = ""
+		}
+		var err error
+		if st.inTx {
+			_, err = a.ExecuteInTx(ctx, txID, st.stmt.SQL)
+		} else {
+			_, err = a.Execute(ctx, connID, st.stmt.SQL)
+		}
+		if err != nil {
+			fail(i, st.stmt, err)
+			break
+		}
+		out.Ran++
+	}
+	if txID != "" {
+		if len(out.Failed) > 0 {
+			if _, err := a.RollbackTransaction(ctx, txID); err == nil {
+				out.RolledBack = true
+			}
+		} else if _, err := a.CommitTransaction(ctx, txID); err != nil {
+			last := steps[len(steps)-1]
+			fail(len(steps)-1, last.stmt, err)
+		}
+	}
+	return out
 }

@@ -162,6 +162,47 @@ func (m *model) viewHelp() []helpEntry {
 			{"Enter", "打开选中的表"},
 			{"Esc", "返回库表结构"},
 		}
+	case viewCompare:
+		switch m.cmpStage {
+		case cmpStagePick:
+			return []helpEntry{
+				{"↑/↓ · k/j", "选择期望侧连接"},
+				{"Enter", "比对两侧结构"},
+				{"Esc", "退出向导"},
+			}
+		case cmpStageDiff:
+			return []helpEntry{
+				{"↑/↓ · k/j", "选择变更条目"},
+				{"Space · Enter", "勾选 / 取消该条"},
+				{"a", "只勾非破坏性条目"},
+				{"A", "全选（含破坏性）"},
+				{"n", "切换「破坏性默认勾选」并重跑比对"},
+				{"f", "整表补齐重建组勾选"},
+				{"g", "按勾选生成同步脚本"},
+				{"r", "重新比对"},
+				{"Esc", "返回上一步 / 退出向导"},
+			}
+		default:
+			entries := []helpEntry{
+				{"↑/↓ · k/j", "滚动脚本"},
+				{"x", "执行正向脚本（基准侧被改成期望侧）"},
+				{"c", "复查：重跑比对看还剩什么"},
+				{"Esc", "返回勾选（脚本作废）"},
+			}
+			if m.cmpConfirmOn {
+				return []helpEntry{
+					{"输入", "逐字输入基准侧连接名"},
+					{"Enter", "确认代跑回滚脚本"},
+					{"Esc", "取消回滚"},
+				}
+			}
+			if m.cmpApplied {
+				entries = append(entries, helpEntry{"r", "代跑回滚（需手输基准侧连接名）"})
+			} else {
+				entries = append(entries, helpEntry{"r", "代跑回滚（仅正向脚本完整成功后可用）"})
+			}
+			return entries
+		}
 	}
 	return nil
 }

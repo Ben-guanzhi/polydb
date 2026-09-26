@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/google/uuid"
 	"github.com/polydb/polydb/pkg/changes"
+	"github.com/polydb/polydb/pkg/cmpsync"
 	"github.com/polydb/polydb/pkg/explain"
 	"github.com/polydb/polydb/pkg/protocol"
 	"github.com/polydb/polydb/pkg/transport"
@@ -30,6 +31,7 @@ const (
 	viewBrowse
 	viewQuickOpen
 	viewExplain
+	viewCompare
 )
 
 // 心跳：每 30s ping 当前连接；测试经 TestMain 置 heartbeatDisabled，
@@ -60,12 +62,16 @@ var viewTitles = map[view]string{
 	viewBrowse:    "数据浏览",
 	viewQuickOpen: "搜索表",
 	viewExplain:   "执行计划",
+	viewCompare:   "结构比对与同步",
 }
 
-// title 返回当前视图标题；表单视图按新建/编辑区分。
+// title 返回当前视图标题；表单视图按新建/编辑区分，比对向导按段区分。
 func (m *model) title() string {
 	if m.view == viewForm && m.form.editing {
 		return "编辑连接"
+	}
+	if m.view == viewCompare {
+		return viewTitles[m.view] + " · " + m.cmpStageLabel()
 	}
 	return viewTitles[m.view]
 }
@@ -195,6 +201,26 @@ type model struct {
 	// kvEdit 是 string 键的就地写回编辑子模式（T4.3；其余类型走 kvCmd 命令行）。
 	kvEdit    bool
 	kvEditBox textinput.Model
+
+	// 结构比对与同步向导（E5.2）：三段自走的会话态，纯逻辑在 pkg/cmpsync。
+	// 刻意不落盘：存下来的勾选集下一轮必然陈旧（behavior.md §15.5 第一条守卫）。
+	cmpStage       cmpStage
+	cmpPrev        view                       // Esc 退出后回到的视图
+	cmpBase        protocol.ConnectionInfo    // 基准侧（要被改成期望侧的样子，也是执行侧）
+	cmpCandidates  []protocol.ConnectionInfo  // 期望侧候选
+	cmpPickCur     int                        // ① 段候选光标
+	cmpDestructOpt bool                       // select_destructive：重跑比对让服务端默认勾选破坏性条目
+	cmpEntries     []protocol.SchemaDiffEntry // ② 段计划（服务端原序）
+	cmpSel         []string                   // 勾选集
+	cmpCur         int                        // ② 段条目光标
+	cmpGaps        []cmpsync.GroupGap         // 重建组漏勾提示
+	cmpScript      *protocol.DdlScript        // ③ 段脚本
+	cmpScroll      int                        // ③ 段脚本滚动
+	cmpRun         string                     // "" / forward / rollback：本轮结果来自哪份脚本
+	cmpOutcome     *cmpsync.ApplyOutcome      // 最近一次执行结果
+	cmpApplied     bool                       // 正向脚本已完整跑成功 ⇒ 才允许代跑回滚
+	cmpConfirmOn   bool                       // 回滚强确认输入态
+	cmpConfirm     textinput.Model            // 手输基准侧连接名的输入框
 }
 
 func New(app transport.Client) *model {
@@ -218,6 +244,9 @@ func New(app transport.Client) *model {
 	qo.Placeholder = "输入表名过滤（schema.table 模糊匹配）…"
 	bv := textinput.New()
 	bv.Placeholder = "值（数字/字符串/true-false；in 用逗号分隔）"
+	cf := textinput.New()
+	cf.Prompt = "> "
+	cf.Placeholder = "逐字输入基准侧连接名以确认代跑回滚"
 	m := &model{
 		app:        app,
 		view:       viewConns,
@@ -228,6 +257,7 @@ func New(app transport.Client) *model {
 		kvEditBox:  kve,
 		qoInput:    qo,
 		brVal:      bv,
+		cmpConfirm: cf,
 		brLogic:    protocol.FilterLogicAnd,
 		brQueue:    changes.New(),
 	}
@@ -587,6 +617,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.kvReply = nil
 		m.busy = "扫描键 …"
 		return m, scanCmd(m.app, m.selectedID, m.kvPattern, 0, true)
+	case schemaDiffMsg:
+		return m.onSchemaDiff(msg)
+	case schemaDdlMsg:
+		return m.onSchemaDdl(msg)
+	case syncApplyMsg:
+		return m.onSyncApply(msg)
 	}
 	return m, nil
 }
@@ -639,6 +675,8 @@ func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.quickOpenKey(msg)
 	case viewExplain:
 		return m.explainKey(msg)
+	case viewCompare:
+		return m.compareKey(msg)
 	}
 	return m, nil
 }
@@ -806,6 +844,8 @@ func (m *model) tablesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "q":
 			return m.gotoQuery("")
+		case "c":
+			return m.openCompare()
 		}
 	}
 	return m, nil
@@ -2169,6 +2209,8 @@ func (m *model) View() string {
 		body = m.quickOpenView()
 	case viewExplain:
 		body = m.explainView()
+	case viewCompare:
+		body = m.compareView()
 	}
 	return m.frame(body)
 }
@@ -2253,6 +2295,8 @@ func (m *model) footer() string {
 		return "↑/↓ 选择 · Enter 打开 · Esc 返回"
 	case viewExplain:
 		return "↑/↓ · j/k 滚动 · Esc / q 返回查询"
+	case viewCompare:
+		return m.cmpFooter()
 	}
 	return ""
 }
