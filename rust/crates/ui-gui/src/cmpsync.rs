@@ -286,6 +286,28 @@ pub(crate) fn confirm_matches(typed: &str, base_name: &str) -> bool {
     typed.trim() == base_name
 }
 
+/// 列表窗口：返回 `[start, end)`，让光标大致居中（与 TUI `listWindow` 同语义）。
+/// 弹层里行为定高单行，靠窗口裁剪而不是真滚动条，三端「↑ 上方还有 N 行」文案才一致。
+pub(crate) fn list_window(total: usize, cursor: usize, avail: usize) -> (usize, usize) {
+    if total == 0 || avail == 0 || total <= avail {
+        return (0, total);
+    }
+    let start = cursor.saturating_sub(avail / 2);
+    let start = start.min(total - avail);
+    (start, start + avail)
+}
+
+/// 两个能力位 → 人话，让操作者知道会不会包事务（与 TUI `cmpExecMode` 逐字一致）。
+pub(crate) fn exec_mode(script: &DdlScript) -> &'static str {
+    if script.ddl_in_tx && script.pragmas_outside_tx {
+        "首尾 PRAGMA 事务外 · 主体单事务（失败整体回滚）"
+    } else if script.ddl_in_tx {
+        "全部语句包进单事务（失败整体回滚）"
+    } else {
+        "该方言 DDL 会隐式提交 ⇒ 逐条执行（失败留下中间态）"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,5 +515,49 @@ mod tests {
         assert!(confirm_matches("  基准库  ", "基准库"));
         assert!(!confirm_matches("基准", "基准库"));
         assert!(!confirm_matches("基准库 副本", "基准库"));
+    }
+
+    #[test]
+    fn list_window_keeps_the_cursor_visible() {
+        assert_eq!(list_window(0, 0, 8), (0, 0));
+        // 装得下就整份显示，不掐头去尾
+        assert_eq!(list_window(5, 4, 8), (0, 5));
+        assert_eq!(list_window(30, 0, 10), (0, 10));
+        assert_eq!(list_window(30, 29, 10), (20, 30));
+        assert_eq!(list_window(30, 15, 10), (10, 20));
+        // avail 为 0（弹层还没量到高度）时退化成整份，交由渲染层裁
+        assert_eq!(list_window(12, 3, 0), (0, 12));
+    }
+
+    #[test]
+    fn exec_mode_reads_both_capability_bits() {
+        let mk = |pragmas_outside_tx, ddl_in_tx| DdlScript {
+            statements: vec![],
+            rollback: vec![],
+            pragmas_outside_tx,
+            ddl_in_tx,
+        };
+        assert_eq!(
+            exec_mode(&mk(true, true)),
+            "首尾 PRAGMA 事务外 · 主体单事务（失败整体回滚）"
+        );
+        assert_eq!(
+            exec_mode(&mk(false, true)),
+            "全部语句包进单事务（失败整体回滚）"
+        );
+        assert_eq!(
+            exec_mode(&mk(true, false)),
+            "该方言 DDL 会隐式提交 ⇒ 逐条执行（失败留下中间态）"
+        );
+    }
+
+    /// 步骤名与 Web `STEP_LABEL` 逐字一致：三端同一份文案，不各写各的。
+    #[test]
+    fn wizard_step_labels_match_the_web_wizard() {
+        use crate::app::CmpStep;
+        assert_eq!(CmpStep::Source.label(), "选基准侧");
+        assert_eq!(CmpStep::Target.label(), "选期望侧");
+        assert_eq!(CmpStep::Review.label(), "差异与勾选");
+        assert_eq!(CmpStep::Apply.label(), "脚本与应用");
     }
 }

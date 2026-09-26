@@ -5046,6 +5046,7 @@ dependencies = [
 name = "polydb-ui-gui"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "gpui",
  "polydb-core",
  "polydb-protocol",
@@ -5053,6 +5054,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
