@@ -5,7 +5,11 @@
 > spec 7 个 DTO + `POST /api/schema/diff` 双端端点 + 契约 SQLite 两文件真跑，见附录 A.10）**；
 > **E3.0 SQLite DDL 取证已落地（2026-09-25，附录 A.11 G1–G9）**；**E3 生成器与 `/api/schema/ddl` 双端已落地
 > （2026-09-25，附录 A.12）**；**E4 Web 向导已落地（2026-09-26，纯前端零 spec 变更，附录 A.13）**；
-> **E5 GUI + TUI 向导与文档已落地（2026-09-26，同样零 spec 变更，附录 A.14）**。
+> **E5 GUI + TUI 向导与文档已落地（2026-09-26，同样零 spec 变更，附录 A.14）**；
+> **E6「证据补齐 + 还债」已收口（2026-09-26，附录 A.15–A.21）**：视图依赖取证 → 执行分派应用环路 →
+> TUI 远程端到端 → 采集扇出量化 → GUI 状态机抽纯层（抓到"从不回滚"的双实现分歧）→ 视图可见性按 A 档落地；
+> **E6 顺带产出的规则变更只有一处**（§8-8 A 档：视图名进快照 + 两条粗粒度警告），其余全是证据与测试，
+> **零 spec 变更**（`check-protocol` 仍 64 个类型双向一致）。
 > 从 `docs/plan-ui-tablepro-phase3.md` §阶段 D「仍不排期」四件中提出单列。
 > 许可红线不变：TablePro / TableProGo 均为 AGPLv3，**只借鉴交互语义，不移植任何代码**。
 > 架构红线不变：前端不 import driver；core/protocol 无 IO；driver 无 UI 假设；数据面 msgpack；
@@ -32,9 +36,9 @@ MySQL 的 `app_dev` vs `app_prod`），列出表/列/索引/外键四类对象�
 | 元数据读面 | `SqlDriver` 六方法（schemas/tables/columns/indexes/foreign_keys/create_table_sql），5 个 SQL 驱动 × Rust/Go 两端**全部实现**（`rust/crates/db-core/src/driver.rs:29-35`、`go/pkg/dbcore/dbcore.go:25-30`）；DTO 在 `spec/schemas/metadata.json:6-111` | **方法齐 ≠ 字段填对**：E2.0 真快照复核抓到 SQLite 侧 3 个缺陷（外键合成名不确定、`IndexInfo.primary` 恒 false、`on_update/on_delete` 从未填），已两端修掉并固化测试；其余四方言同类字段**未复核**（见附录 A.9） |
 | 跨库类型归一 | `ColumnInfo.generic_type` 在 spec 里**已声明**，注释写着"cross-database comparison"，但**没有任何驱动填值**（`db-postgres/src/lib.rs:425`、`db-oracle:517`、`db-mssql:550` 一律 `None`/省略） | ★ 必须落地或在 diff 层自建映射表 |
 | DDL 生成 | **只有 Web 一处**：`web/src/lib/alterSql.ts`（quoteIdent/addColumn/dropColumn/renameColumn/addIndex/dropIndex/addFK/dropFK + `UnsupportedAlterError`）。GUI、TUI **零 DDL 生成**（`ALTER TABLE` 只出现在两端自用 storage 里） | ★ 缺 ALTER COLUMN（类型/可空/默认）、缺 CREATE/DROP TABLE → **E3 已补**：服务端生成器（Rust `schema-diff/src/ddl.rs` + Go `pkg/schemadiff/ddl.go`）**只覆盖 SQLite**，其余方言显式 `NOT_SUPPORTED`（附录 A.12） |
-| 原子应用 | 事务四方法两端齐备（`app-core/src/lib.rs:502-579`、`pkg/appcore/appcore.go:338-435`），finalize 只成功一次；`POST /query/batch` 是**逐条循环、不在事务内**（`crates/server/src/lib.rs:663-681`、`go/pkg/server/server.go:441-473`） | "原子应用一批 DDL"只能客户端 begin → N×execute → commit（已有成熟范式：`ui-gui/src/app.rs:2133-2179`、`TableStructureEditor.tsx:115-135`） |
+| 原子应用 | 事务四方法两端齐备（`app-core/src/lib.rs:502-579`、`pkg/appcore/appcore.go:338-435`），finalize 只成功一次；`POST /query/batch` 是**逐条循环、不在事务内**（`crates/server/src/lib.rs:663-681`、`go/pkg/server/server.go:441-473`） | "原子应用一批 DDL"只能客户端 begin → N×execute → commit（已有成熟范式：`ui-gui/src/app.rs` 的 `commit_changes`、`TableStructureEditor.tsx:115-135`） |
 | DDL 事务能力位 | **全仓库没有任何一处**处理"某方言 DDL 不能在事务里"（MySQL/Oracle 的 DDL 隐式提交） | ★ 需新增能力位 + 显式报错，禁止静默降级（矩阵见 `spec/behavior.md:334-345`）→ **E3 只对 SQLite 立了两位**（`ddl_in_tx=true` 实测、`pragmas_outside_tx` 由脚本自带），其余方言的取值仍空白 |
-| 快照结构可复用件 | `web/src/lib/erDiagram.ts:74 buildERModel()` 已是"表→列→FK"的纯结构；GUI `app.rs:2625-2650` 有整 schema FK 扫描（**上限 200 表**，仅"关系"轨道）、TUI `commands.go:211 allTablesCmd` 跨 schema 枚举 | ~~表数上限与逐表 fan-out 往返要处理~~ E6.4 已量化：那 200 上限不在比对路径上，比对路径是每表 3 次串行查询、无上限（附录 A.18） |
+| 快照结构可复用件 | `web/src/lib/erDiagram.ts:74 buildERModel()` 已是"表→列→FK"的纯结构；GUI `ui-gui/src/app.rs` 的 `load_incoming` 有整 schema FK 扫描（**上限 200 表**，仅"关系"轨道）、TUI `internal/tui/commands.go` 的 `allTablesCmd` 跨 schema 枚举 | ~~表数上限与逐表 fan-out 往返要处理~~ E6.4 已量化：那 200 上限不在比对路径上，比对路径是每表 3 次串行查询、无上限（附录 A.18） |
 | Rust 侧远程传输 | **不存在 HttpTransport**（只有 `LocalTransport`，`transport/src/lib.rs:103`）。Go 侧 Local + Remote 都有 | ★ 决定 GUI 形态（见 §4 决策 D3） |
 
 **结论**：读面齐、归一缺、生成半齐（只在 Web）、应用通道齐但能力位空白、跨进程比较在 GUI 侧结构性受限。
@@ -182,12 +186,23 @@ E3 收口时 `check` 与 TS 重生成均零漂移（`web/src/api/index.ts` +37 �
      连接名强确认**（与 Web 对齐），正向只要求"显式生成 + 显式执行"，执行通道按
      `pragmas_outside_tx` / `ddl_in_tx` 分派。入口：GUI 顶栏「⇄ 结构同步」+ `Ctrl+4`、TUI 库表视图 `c`。
   `docs/frontends.md` 新增「结构比对与同步（三端一致，E5）」一节 + TUI 键位表三段行。落地实况见附录 A.14。
+- **E6 证据补齐 + 还债** ✅（2026-09-26，六个子任务，附录 A.15–A.21）：范围经 AskUserQuestion 定为
+  「取证 + 还债」，**不含**同步预设持久化 / PG+MySQL 方言扩展 / 数据行比对同步。六批各带独立门禁与独立中文提交：
+  **E6.0** 视图依赖真引擎取证（A.15，**证伪**了"视图按名字解析所以不破"的旧假设）→
+  **E6.1** 执行分派的应用环路（A.16，Go/Web 调用序列断言 + Web 编排抽成 `lib/compareSync.ts` 的 `runScript`；
+  顺带订正 `pragmas_outside_tx` **不是恒 true**，口径是"任一脚本含重建"）→
+  **E6.2** TUI 远程模式端到端（A.17，同一套按键脚本换 `Remote` 客户端 + `httptest` 真服务端，零生产代码改动）→
+  **E6.4** 采集扇出量化（A.18，"200 表上限"问错了对象；真实代价是 `2×(1+3n)` 次查询、线性无悬崖 ⇒ 不改代码）→
+  **E6.3** GUI 向导状态机抽纯层（A.19，抓到**双实现分歧**：GUI 事务分支从不发 ROLLBACK；另修好三处退格失效）→
+  **E6.5** 视图可见性按 **A 档**落地（A.20，本阶段唯一一处规则变更）→ **E6.6** 文档收口 + 全端门禁基线刷新（A.21）。
+  证据等级刻意分三档并逐处标明：**真引擎 + 录音装饰器**（Rust/Go）> **假台账**（Web，浏览器里没有引擎）；
+  两端"看不见彼此"的 Rust app-core 无私有注驱动门，这类不对称在 A.18/A.21 里明说而不是抹平。
 
 ## 7. 本机不可验证清单（先把话说在前面）
 
 - 本机**无 Docker、无监听中的** 5432/3306/6379/1433/1521 ⇒ PG/MySQL/MSSQL/Oracle/Redis 相关
-  分支只能 soft-skip（E3 收口时契约 **23 个顶层测试 / 66 个子测试全绿**，其中方言/Redis 分支只是
-  "未打崩"而非"真跑"；上一基线记的「51 绿」是同一含子测试口径，E3 新增 3 个顶层测试后为 66）。
+  分支只能 soft-skip（E6.6 刷新基线：契约 **23 个顶层测试 / 89 个 PASS 含子测试、0 FAIL、0 SKIP 标记**，
+  方言与 Redis 分支只是"未打崩"而非"真跑"；E3 收口时同一口径记的是 66，差值是 E6 期间新增的子测试）。
   **跨库 diff 的正确性、各方言 DDL 语法、`ddl_in_tx` 真值都无法在本机实测**。
 - E3 因此**只交付 SQLite**：4 种方言 + Redis 的 `NOT_SUPPORTED` 拒绝路径由语料 d16–d19/d20/d21
   （纯函数层，恒可跑）与两端错误码映射（`NOT_SUPPORTED → 501`）双重锁定，
@@ -196,7 +211,9 @@ E3 收口时 `check` 与 TS 重生成均零漂移（`web/src/api/index.ts` +37 �
   要求首尾两条 PRAGMA 留在事务外（G6）。
   ~~**「把 `pragmas_outside_tx=false` 的脚本整份包进一个事务」这条真实调用路径仍未跑到**~~
   **E6.1 已跑到并订正了一处事实错误**：能力位是 `pragmas_outside_tx = 任一脚本含重建`
-  （`pkg/schemadiff/ddl.go:793`），所以 SQLite 的**不含重建**脚本（纯 `add_column` / `drop_index`）
+  （Go `pkg/schemadiff/ddl.go` 的 `PragmasOutsideTx: len(rebuilt) > 0 || len(rebuiltRev) > 0`，
+  Rust 同形 `pragmas_outside_tx: !rebuilt.is_empty() || !rebuilt_rev.is_empty()`），
+  所以 SQLite 的**不含重建**脚本（纯 `add_column` / `drop_index`）
   本来就是 `false` ⇒ "整份脚本包一个事务"不是罕见支路，而是 SQLite 上最常见的那一支。
   旧文本"SQLite 两端能力位恒为 `true`"只在以重建为中心的契约场景里成立，是错的。
   现在两端各有一组带**调用序列**断言的应用环路测试（附录 A.16）；
@@ -211,9 +228,12 @@ E3 收口时 `check` 与 TS 重生成均零漂移（`web/src/api/index.ts` +37 �
   "同库两 schema"需先拍板 §8-6）——所以 v1 的验收以 SQLite 为主，
   其余方言的正确性依赖单测 + 后续在有实例的环境补测。
 - `golangci-lint` v2 本机未安装（Go lint 步骤恒跳过）；GUI(GPUI) 渲染无法无头肉眼验证。
-- **E5 之后仍缺的两类证据**（2026-09-26 收口时明确）：① GUI 向导的**状态机 + 渲染没有测试**——
+- **E5 之后仍缺的两类证据**（2026-09-26 收口时明确）：① ~~GUI 向导的**状态机 + 渲染没有测试**——
   Rust 侧只有 `cmpsync.rs` 纯函数单测与 `transport/tests`，`app.rs` 的按键分派与 `view.rs` 的浮层
-  没有 GUI 端测试（本项目无 GPUI 测试基建），只能靠 TUI 侧同构的 keystroke 测试背书；
+  没有 GUI 端测试（本项目无 GPUI 测试基建），只能靠 TUI 侧同构的 keystroke 测试背书~~
+  **E6.3 已补到"纯状态机 + 真引擎分派"两级**（附录 A.19）：向导态与全部转移、键位表 `key_action`、
+  分派环路 `run_script` 全搬进零 gpui 类型的纯层，用真 `:memory:` SQLite + 真 `LocalTransport` 套录音
+  装饰器断言调用序列与库内终态（证据等级与 Go 对齐）；**只剩"把按键灌进真窗口"那一级仍缺**（GPUI 无测试基建）；
   ② ~~TUI 向导只在**本机模式**（进程内 app-core）真跑过，远程模式（打 polydb-server 的 HTTP 路径）
   的 UI 链路未验证~~ **E6.2 已补**（附录 A.17）：同一套按键脚本换一个 `Remote` 客户端跑通，
   比对/生成/事务执行/代跑回滚都经 `httptest` 真服务端，并带请求计数证明流量真的经过 HTTP；
@@ -221,6 +241,16 @@ E3 收口时 `check` 与 TS 重生成均零漂移（`web/src/api/index.ts` +37 �
   Web 侧 E4 已在真实 Chromium 实例里把向导全流程走通（附录 A.13「浏览器真跑」），但该实例视口固定在
   ~565×482 且没有可用的改窗口工具，所以**布局只做了数值核对**（行宽/标签宽用 `evaluate_script` 量），
   宽屏下的视觉排版仍未肉眼确认。
+- **E6 收口后仍然缺的证据**（2026-09-26 收敛后的清单，逐条都是**结构性**缺、不是"还没写"）：
+  ① **契约层对两种执行分派的 HTTP 级断言**——单事务一支已由 A.17 经 `httptest` 真服务端跑到，
+  `ddl_in_tx=false` 一支 SQLite **结构上产不出**（引擎 DDL 可在事务里，能力位恒 `true`），
+  只能等有真实 PG/MySQL/MSSQL/Oracle 实例时补；② GUI"按键灌进真窗口"的端到端（GPUI 无测试基建）；
+  ③ **B 档的依赖可见**：警告只能说"本库有这些视图、可能有破的"，判不出具体哪一个（§8-8 已明确不做，
+  要做就得解析 SQL 猜——SQLite 无依赖目录）；④ 4 种方言 + Redis 的真跑，含**契约层的 501 从未打出**；
+  ⑤ 触发器仍在盲区（A.11 G4：重建静默丢触发器，快照不含触发器，E6.5 A 档范围外）；
+  ⑥ E6.5 两条新视图警告的**渲染未肉眼验证**（文案近 90 字，窄面板下换行靠通读）；
+  ⑦ `golangci-lint` v2 本机未安装 ⇒ Go lint 步骤恒跳过（E6.6 复核：确实仍不在 PATH）。
+  以上任何一条被补上时，请回来划掉本条并刷新附录 A.21 的基线表，不要在别处另立口径。
 
 ## 8. 未决问题（开工前需要拍板）
 
@@ -765,7 +795,7 @@ diff 出一条 `alter_column`，生成器按规则 2 走整表重建（6 条语�
 | G14 | **逐条分支（等价 `ddl_in_tx=false`）失败后的中间态是丢表** | 同一脚本按顺序跑完 6 条（探测刻意为之，不代表向导是否遇错即停）：`SELECT count(*) FROM orders` ⇒ `no such table`，`polydb_tmp_orders` ⇒ **2 行**（数据困在临时表），`sqlite_master WHERE type='trigger'` ⇒ **0**（随 `DROP` 一起没了），而尾部 `PRAGMA foreign_keys=ON` 仍 OK | SQLite 恒 `ddl_in_tx=true` ⇒ 本分支实际踩不到；但**任何 `ddl_in_tx=false` 的方言复用这套重建算法前，必须先补依赖检查**，否则一次失败就把用户表删了 |
 | G15 | **事务分支把这一切干净兜住**（SQLite 真实的那一分派经失败路径验证有效） | 跳过 phase 0/255 两条 PRAGMA（G6：它们本就在事务外）⇒ `BEGIN` → 主体在 `RENAME` 失败 → `ROLLBACK`：`orders` ⇒ 2 行、`v_orders` ⇒ 2 行（视图还能查）、`typeof(qty)` ⇒ `"integer"`（旧定义原封不动）、`polydb_tmp_orders` ⇒ `no such table`（无残留）。两端同结论 | 「首尾 PRAGMA 事务外 + 主体单事务」不只是成功路径上成立，**失败路径上同样成立** ⇒ §7 里"`/api/transactions` 那条支路没验证过"的担忧，在视图失败这一具体形状上已有证据 |
 | G16 | 真正**静默**留下破视图的是 `drop_table`，不是重建 | 目标侧去掉 `orders` ⇒ 只有一条 `DROP TABLE "orders";`，全程无错；`sqlite_master WHERE type='view'` 仍为 **1**（条目留着），一查 `SELECT * FROM v_orders` 才报 `no such table`；该语句的 `warnings` 实测为**空** | 与 G4「重建静默丢触发器」同一类：快照不含视图 ⇒ 无从预警。是否给 `drop_table` 补一条"可能留下依赖它的视图"警告属**产品决策**，本附录只钉事实 |
-| G17 | 临时名去重集**看不见视图** ⇒ 库里已有同名视图时脚本一开局就撞车，且是**良性失败** | 源侧预置 `CREATE VIEW polydb_tmp_orders AS SELECT 1 AS one`：生成器仍按 `orders` 算出临时名 `polydb_tmp_orders`，首条 `CREATE TABLE "polydb_tmp_orders"(…)` ⇒ Go `view "polydb_tmp_orders" already exists` / Rust `prepare failed: view "polydb_tmp_orders" already exists`。此时**什么都没被改动** | 结构性原因（三处，全部实测有效）：① 采集层过滤非表项 `crates/app-core/src/lib.rs:510` ⇄ `pkg/appcore/schema_diff.go:56`；② 去重集只从表快照播种 `crates/schema-diff/src/ddl.rs:677-679` ⇄ `pkg/schemadiff/ddl.go:607-612`；③ 即便放进快照，diff 层也会跳过视图 `schema-diff/src/lib.rs:273-288` ⇄ `pkg/schemadiff/schemadiff.go:217-236` ⇒ 想让生成器"看见"视图名，只需去掉 ①，**DTO 与线路零变更** |
+| G17 | 临时名去重集**看不见视图** ⇒ 库里已有同名视图时脚本一开局就撞车，且是**良性失败** | 源侧预置 `CREATE VIEW polydb_tmp_orders AS SELECT 1 AS one`：生成器仍按 `orders` 算出临时名 `polydb_tmp_orders`，首条 `CREATE TABLE "polydb_tmp_orders"(…)` ⇒ Go `view "polydb_tmp_orders" already exists` / Rust `prepare failed: view "polydb_tmp_orders" already exists`。此时**什么都没被改动** | 结构性原因（三处，全部实测有效；本表按 E6.0 当时的代码状态记录，故只给**符号名**不给行号，以免随手腐烂）：① 采集层过滤非表项 `app-core` 的 `collect_snapshot` / `pkg/appcore` 的 `collectSnapshot`；② 去重集只从表快照播种（`schema-diff/src/ddl.rs` 与 `pkg/schemadiff/ddl.go` 的 `emit_script` 里 `taken` 只吃 `table_map` 的键）；③ 即便放进快照，diff 层也会跳过视图（`diff()` 只遍历 `table_map`）⇒ 当时判断"只需去掉 ①，DTO 与线路零变更"。**E6.5 已按 A 档落地并订正该判断：去掉 ① 不够**——`table_map` 本身就按用途把非表项跳掉了，`taken` 从它播种 ⇒ 必须再写一次 `view_names()` 单独取名播种（附录 A.20） |
 
 **本批没有改动的东西（刻意为之）**：零 spec 变更、零生成器规则变更、零文案变更。
 G13/G16/G17 各自暗示一种规则收紧（重建前依赖检查、`drop_table` 警告、临时名去重集纳入视图名），
@@ -773,12 +803,22 @@ G13/G16/G17 各自暗示一种规则收紧（重建前依赖检查、`drop_table
 在此之前，`spec/behavior.md` §14.1「视图与物化视图整体跳过」与 §14.3「不猜语义，执行期由数据库报错兜底」
 继续按原文执行——A.15 提供的正是这两条口径**在真实引擎上的代价账单**。
 
+> **后续状态（E6.6 收口时回填，避免本附录被读成"至今未改"）**：§8-8 已拍板 **A 档**并由 E6.5 落地
+> （附录 A.20）——G17 由"`taken` 纳入视图名"消除，G16/G13 由两条粗粒度视图警告开口，
+> §14.1 口径同步改写为"视图名进快照、不参与比对、不发元数据查询"。
+> **B 档（依赖可见）仍不做**，故本表 G13/G16 那句"生成器**无从预判**"在"判不出具体哪一个"这个意义上依然成立。
+> G14 那句"探测刻意为之，不代表向导是否遇错即停"由 E6.1 的应用环路断言接管（附录 A.16），
+> 且能力位口径同时被订正为 `pragmas_outside_tx = 任一脚本含重建`（不是恒真）。
+
 **门禁（本批）**：Go `go build ./... && go vet ./...` 干净、`go test ./...` 全量 **0 失败**
 （`pkg/dbsqlite` **18** 份顶层，含新 4 份）；Rust `cargo test -p polydb-db-sqlite` **21 绿**
 （lib 7 + `snapshot_diff` 10 + `view_rebuild_probe` 4）、
 `clippy -p polydb-db-sqlite --all-targets -- -D warnings` 退出 0、`cargo fmt --check` 干净；
 新 Go 文件剥 CR 后 `gofmt -l` 无输出。**本批未跑**：Rust workspace 全量、契约对拍、Web 检查
 （改动面只有两份测试 + 本文档，零接线变更），全量基线数字在 E6.6 收口时统一刷新。
+> 上面是 E6.0 **当时**的门禁口径，原样保留作证据链；两处后续：探测随后由 E6.5 扩到 **5** 份
+> （`view_rebuild_probe` 4 → 5、`polydb-db-sqlite` 21 → 22 绿、Go `pkg/dbsqlite` 18 → 19），
+> 全量基线已在 E6.6 刷新 ⇒ 附录 A.21。
 
 **A.15 未覆盖（如实披露）**：① 只测了 SQLite 两端 bundled 引擎（modernc 3.53.4 / rusqlite 3.46.0），
 PG/MySQL 等的 `RENAME`/依赖检查语义**仍无证据**；② 未测**视图链**（视图套视图）、物化视图
@@ -801,7 +841,7 @@ A.15 的 G14 留下一句话没人接：`ddl_in_tx=false` 那一支失败后"数
 |---|---|---|
 | Go | 零生产代码改动（`applyScriptSync` 原样） | `internal/tui/apply_dispatch_test.go` **4 份**：真 `:memory:` SQLite + 真实 Local 客户端外套一层**调用录音**（`recorder` 包装 `transport.Client`，只记序列、其余透传，不 mock 数据库） |
 | Web | `CompareSyncWizard.tsx` 的 `applyScript` 里那段分派+环路（85 行）**下沉**为 `lib/compareSync.ts` 的 `runScript(sc, connId, deps)`，组件只留接线（`setProgress` / `cancelRef` / `txIdRef` ↔ `ApplyDeps` 七个注入点） | `compareSync.test.ts` 新增 `describe('runScript')` **5 份**：假引擎带一本"账"（事务内语句先进 `pending`，`commit` 才落 `db`，`rollback` 丢掉 `pending`）⇒ 落地与否可断言，不是只看 `ran` |
-| Rust | 未动（环路仍在 `app.rs:3335` 的 `self.io` 闭包里，是同一逻辑的第三份拷贝） | —— 留给 E6.3 抽层，届时按同一本账补断言 |
+| Rust | 本批未动（环路仍在 `ui-gui/src/app.rs` 的 `self.io` 异步闭包里，是同一逻辑的第三份拷贝） | —— E6.3 已抽层并按同一本账补断言（附录 A.19） |
 
 **四类断言（Go 与 Web 逐条同构，只有"库"是真的还是假的区别）**：
 
@@ -956,7 +996,7 @@ SQLite 服务端不会这么给，两端同此局限（A.16 已记）。
 **门禁（本批）**：`cargo test -p polydb-ui-gui` **65 绿**（+6）、
 `cargo clippy -p polydb-ui-gui --all-targets -- -D warnings` 与 `cargo clippy --workspace --all-targets -- -D warnings` 均零警告、
 `cargo fmt --all -- --check` 干净（写模式仍按项目约定手改）、`cargo check --workspace` 干净。
-Go / Web 零改动，故未重跑（E6.6 统一刷新基线）。
+Go / Web 零改动，故未重跑（E6.6 统一刷新基线 ⇒ 已刷新，见附录 A.21）。
 
 **A.19 未覆盖（如实披露）**：① `on_cmp_key` 里 gpui 事件 → `key_action` 之间那一小段（`key_char` 取字、
 ctrl/platform + `4` 关窗）仍无测试，纯层与实体之间的接缝靠通读；② GUI 向导没有"把按键灌进真窗口跑一遍"的端到端
@@ -1012,3 +1052,59 @@ PG/MySQL/MSSQL/Oracle/Redis 按 `connected:false` 软跳过（本机无服务，
 `RENAME` 依赖语义、视图目录可见性**仍无证据**（A.15 未覆盖 ① 原样继承）；③ 视图套视图（依赖链）、物化视图、
 跨 schema 视图未测；④ 前端三端**没有肉眼验证**过新警告的换行/截断渲染（文案变长到近 90 字，窄面板下靠通读）；
 ⑤ 触发器仍在盲区里（G4 静默丢触发器未纳入 A 档范围，快照不含触发器）。
+
+### A.21 E6.6 收口：文档订正 + 全端门禁基线刷新（2026-09-26，**零代码改动**）
+
+E6 的最后一批不做新功能，只做两件**容易被跳过、跳过就会烂**的事：把前面五批留下的
+"待 E6.6 刷新"全部兑现，并把文档里已经**指向不到**的行号引用清掉。
+
+**文档订正落点（这一批唯一的"改动"）**：
+
+| 处 | 内容 |
+|---|---|
+| 文档头部状态行 | 补 E6 已收口，并点明**整个 E6 只有一处规则变更**（§8-8 A 档 ⇒ A.20），其余是证据与测试，零 spec 变更 |
+| §6 分批交付 | 补 E6 条目：六批的顺序、各自附录号、以及"证据等级分三档并逐处标明"的口径 |
+| §7 清单 | 契约数字刷新（23 顶层 / 89 含子测试 / 0 FAIL / 0 SKIP 标记，并说明与旧记「66」的差值来源）；① GUI 那一条改为"E6.3 已补两级、只剩真窗口一级"；**新增一条收敛后的缺口清单**（7 条，逐条都是结构性缺，不是"还没写"），并规定以后补上要回来划掉、不要在别处另立口径 |
+| A.15 | G17 的"三处结构性原因"去掉 6 个行号引用、改为符号名，并**回填后续状态**（§8-8 已拍 A 档、G14 由 A.16 接管、能力位口径被 A.16 订正）；门禁段保留 E6.0 当时的口径原样，另注明探测 4 → 5 份 |
+| A.16 | 表里 "Rust 未动、环路仍在 `app.rs:3335`" → 符号名 + 指向 A.19 |
+| §2 现状盘点 | 三处 E6 之后已移位的行号（`ui-gui/src/app.rs` 两处、`internal/tui/commands.go` 一处）改为**函数名** |
+| A.19 | "E6.6 统一刷新基线" → 已刷新，指向本附录 |
+| `docs/frontends.md` | 「三端一致」节新增一条**语句警告只有一份真相**（三端各自如何渲染同一个 `warnings` 数组，故 E6.5 两条动态警告零前端改动）；「已知未验证项」里 E5 那句"GUI 向导状态机与渲染没有 GUI 端测试"划掉并改为 E6.3 后的实况（只剩真窗口端到端一级缺），另加一条"E6.5 两条视图警告未肉眼验证" |
+
+**为什么把行号换成符号名**：E6 期间 `ui-gui/src/app.rs` 因抽层掉了 400 余行、`pkg/schemadiff/ddl.go`
+因视图那批长了 40 余行。逐条核对正文里的 **12 处行号引用**（各取其首行看内容）：
+**9 处已完全指向不到原意**——`app.rs:3335`（A.16 指的"`self.io` 闭包"）现在是一行**空行**、
+`app.rs:2625`（§2 指的整 schema FK 扫描）是一句 `return;`、`pkg/schemadiff/ddl.go:793`
+（§7 与 A.16 各指过一次的能力位赋值）是一个 `}`、`internal/tui/commands.go:211` 落到别的函数里、
+A.15 G17 那六个引用里 ①② 四处（采集层过滤那行**已被 E6.5 删掉**、`taken` 播种两处都偏）；
+1 处区间仍大致覆盖（`app.rs:2133-2179` 恰好还包得住 `commit_changes`）；
+2 处偏到相邻符号（③ 的"diff 层跳过视图"落在 `is_view` / `isView` 上，差 7 行）。
+这不是排版问题：文档是本模块的**取证台账**，指向错行等于伪造证据。
+故按 `06906c2` 已立的约定处理——正文不给行号，只给 `文件 + 符号名`；确需区间时写"约"。
+今天仍准确的行号引用只剩契约测试那几处（`e2_schema_diff_test.go:227,271`、`e3_schema_ddl_test.go:327`，本批已复核对得上）。
+
+**全端门禁基线（2026-09-26 本机实跑，E6 收口口径）**：
+
+| 端 | 命令 | 结果 |
+|---|---|---|
+| Rust 全量 | `cargo test --workspace` | **179 passed / 0 failed**（40 个 result 行，其中 **15 个套件非零**，余下 25 个是 0 份的 Doc-tests / 空壳；非零全表：`ui-gui` 65、`schema-diff` lib 40、`server` 20、`db-core` 11、`snapshot_diff` 10、`db-sqlite` lib 7、`view_rebuild_probe` 5、`redis_msgpack_test` 4、`app_core_integration` 4、`storage` 3、`local_transport` 3、`vectors` 2、`snapshot_fanout` 2、`ddl_vectors` 2、`app-core` lib 1） |
+| Rust 静态 | `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` | 均 **exit 0**（fmt 写模式仍按项目约定手改，不用 `cargo fmt --all`） |
+| Go 全量 | `go build ./... && go vet ./...` / `go test ./...` | 编译与 vet 干净；**13 个包全 ok、0 FAIL**（`pkg/schemadiff` 39 顶层、`pkg/dbsqlite` 19、`internal/tui` 与 `pkg/server` 是最慢的两个包） |
+| Go 格式 | 剥 CR 后 `gofmt -l` | 无输出（本批零 Go 代码改动，沿用 E6.5 结论） |
+| Web | `npm run test -- --run` / `npm run lint` / `npm run build` | **16 文件 / 163 测试全过**；eslint 无输出；vite build 成功（1m11s） |
+| 协议漂移 | `tools/genprotocol` 的 `go run . check` / `go run . ts --check` | **`protocol check OK: 64 spec types vs rust + go`**、`TS types up to date` ⇒ E6 全程未改 spec（快照 DTO 是内部件，不进契约） |
+| 契约对拍 | `cargo build -p polydb-server` 后 `cd test/contract && go test -v ./...` | **23 个顶层测试 / 89 个 PASS（含子测试）/ 0 FAIL / 0 SKIP 标记**；网络库与 Redis 在用例内部按 `connected:false` 软跳过（28 处记录，本机确实无 PG/MySQL/MSSQL/Oracle/Redis 实例） |
+| 共享语料 | `go test -run DDLVector ./pkg/schemadiff/` + `cargo test -p polydb-schema-diff --test ddl_vectors` | **26 份**（18 脚本 + 8 错误）双端各自全绿；diff 语料 16 份同样双端绿 |
+
+**E6 阶段的净账**（`1567bbd..HEAD`，即 E6.0–E6.5 的 **7 个提交**，**不含本批 E6.6**）：
+**+4057 / −713、30 个文件**。
+其中**非 `docs/` 部分 +3744 / −698（29 文件**，含 `spec/behavior.md` 与两份语料目录），
+`docs/plan-compare-sync.md` 自身 +313 / −15。计数变化全部可归因：
+`schema-diff` lib 36 → 40（A.20 的 4 份视图口径断言）、`ui-gui` 59 → 65（A.19 的 6 份状态机/环路断言）、
+`view_rebuild_probe` 4 → 5（两端各 +1，A.20 的 `drop_column` 引擎拦截）、
+DDL 语料 23 → 26（A.20 的撞名/警告/截断）。
+**规则层的变更只有一处**（A.20 A 档），其余全是"把已经存在的行为变成断言"。
+
+**E6 之后的下一步（不在本里程碑内，需要另行拍板）**：① §8-8 的 B 档（依赖可见，要解析 SQL 猜）；
+② 方言扩展（PG/MySQL 的 `ddl_in_tx` 真值 + 依赖目录，顺带才能补契约层两种分派断言）；
+③ v1.1 的"同库多 schema"（§8-6 待办）；④ 数据行比对同步（§1 非目标，体量另一级）。

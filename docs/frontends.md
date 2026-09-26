@@ -189,12 +189,20 @@ polydb 有多个前端，均遵守 AGENTS.md 铁律：**只经 `app-core`（进�
   app-core 的那份连接清单（跨服务器请用 Web/TUI）。
 - 列表窗口化：三端都把长列表/长脚本按可视行数裁窗，并在首尾打「↑ 上方还有 N 行 / ↓ 下方还有 N 项」，
   保证高亮项恒在视野内；GUI 在比对/执行在途时点遮罩**不关闭**向导，避免丢掉半途失败详情。
+- **语句警告只有一份真相**：`statement.warnings` 是服务端给的字符串数组，三端**原样渲染**、不自造文案
+  （Web ⚠ 徽标 + tooltip 全量、TUI 每条缩进一行 `! 文案`、GUI 语句行内用 ` | ` 拼接再配汇总计数）。所以 E6.5 新加的**两条动态视图警告**
+  （`DROP TABLE` 会留下失效视图 / 重建经 `RENAME` 会被依赖视图挡住，名单点名到具体视图、最多 5 个）
+  **零前端改动**就三端同时生效——这条是"警告数组是数据、不是 UI 文案"这一设计的直接兑现。
+  口径要点：警告按**被执行那一侧**的快照出，所以回滚脚本描述的是回滚真正要动的库（见 `spec/behavior.md` §15.8）。
 
 ## 已知未验证项
 
 - 阶段 A–D 收口时的契约对拍（2026-09-25）为 `51 RUN / 51 PASS / 0 SKIP / 0 FAIL`，但其中
   **10 处驱动流程按既有 soft-skip 静默跳过**：PG / MySQL / MSSQL / Oracle / Redis × Go/Rust 两端，
   本机这些服务不可达。完整门禁基线见 `docs/plan-ui-tablepro-phase3.md`「阶段 A–D 收口」。
+  **Compare & Sync E6 收口时全端基线已再刷新一次**（Rust 179 绿 / Go 13 包 ok / Web 163 绿 /
+  契约 23 顶层 89 PASS / `check-protocol` 64 类型双向一致）⇒ 见 `docs/plan-compare-sync.md` 附录 A.21；
+  上面那组数字保留作阶段 A–D 当时的记录，不要拿来当现状。
 - 三端 Redis 写回**未端到端跑过**：链路需要真实 Redis 实例，本机没有常驻服务。离线门禁只保证
   纯函数层（Web `redisWrite.test.ts`、GUI `util::tests::redis_write_block_gates`）；`PUT /kv/keys`
   两端的 set/get 对拍在 `test/contract/contract_test.go` 的 `set *` / `get *` 步骤里，Redis
@@ -203,7 +211,13 @@ polydb 有多个前端，均遵守 AGENTS.md 铁律：**只经 `app-core`（进�
 - GUI 编辑框（GPUI 单行输入 + `▏` 光标）与 Web `textarea` 的渲染效果未做肉眼验证。
 - E5 的 GUI 向导浮层与 TUI 三段视图**均未肉眼验证**：GPUI 无法无头渲染，TUI 只在按键测试里断言
   字符串产物（`compareView()` 文本），没有真实终端里看过排版。四步/三段的**行为**由按键驱动测试覆盖
-  （Go `internal/tui/compare_test.go` 真 app-core + `:memory:` SQLite 全链路；Rust 只有纯函数层
-  `cmpsync.rs` 单测，向导状态机与渲染**没有 GUI 端测试**——这是 E5 最大的验证缺口，如实披露）。
+  （Go `internal/tui/compare_test.go` 真 app-core + `:memory:` SQLite 全链路）。
+  ~~Rust 只有纯函数层 `cmpsync.rs` 单测，向导状态机与渲染没有 GUI 端测试——这是 E5 最大的验证缺口~~
+  **E6.3 已把这一级补上**：向导四步状态机、键位表与执行分派全搬进零 gpui 类型的 `cmpsync.rs` 纯层，
+  用真 `:memory:` SQLite + 真 `LocalTransport` 套录音装饰器断言调用序列与库内终态（顺带抓到并修掉
+  "GUI 事务分支从不发 ROLLBACK"这一双实现分歧，见 `docs/plan-compare-sync.md` 附录 A.19）。
+  **仍缺的是最后一级**："把按键灌进真窗口"的端到端（GPUI 无测试基建），所以渲染排版依旧只能肉眼确认。
+- E6.5 新增的**两条视图警告未做肉眼验证**：文案近 90 字（比原有静态告警长一倍），三端各自的重排/截断
+  （尤其 GUI 的 ` | ` 拼接与 Web 的 tooltip）只在窄面板下通读推断，没在真实窗口/终端里看过。
 - 非 SQLite 方言在三端只能得到服务端 501：`is_comparable_kind` 只挡 Redis，PG/MySQL/MSSQL/Oracle
   放进请求由 `/api/schema/ddl` 拒绝，但**该 501 响应本机从未真正打出过**（契约层同分支 soft-skip）。
