@@ -78,6 +78,7 @@ func (m *model) openCompare() (tea.Model, tea.Cmd) {
 	m.cmpCandidates = cmpsync.CandidateConnections(m.conns, base)
 	m.cmpPickCur = 0
 	m.cmpDestructOpt = false
+	m.cmpIgnoreOpt = false
 	m.cmpEntries = nil
 	m.cmpSel = nil
 	m.cmpCur = 0
@@ -101,6 +102,7 @@ func (m *model) cmpDiffRequest(target string) *protocol.SchemaDiffRequest {
 		Source: protocol.SchemaDiffTarget{ConnectionID: protocol.ConnectionID(m.cmpBase.ID)},
 		Target: protocol.SchemaDiffTarget{ConnectionID: protocol.ConnectionID(target)},
 		Options: &protocol.SchemaDiffOptions{
+			IgnoreDefaults:    m.cmpIgnoreOpt,
 			SelectDestructive: m.cmpDestructOpt,
 		},
 	}
@@ -136,9 +138,12 @@ func (m *model) generateScript() (tea.Model, tea.Cmd) {
 	}
 	m.busy = "生成脚本 …"
 	return m, schemaDdlCmd(m.app, &protocol.SchemaDdlRequest{
-		Source:   protocol.SchemaDiffTarget{ConnectionID: protocol.ConnectionID(m.cmpBase.ID)},
-		Target:   protocol.SchemaDiffTarget{ConnectionID: protocol.ConnectionID(m.cmpTargetID())},
-		Options:  &protocol.SchemaDiffOptions{SelectDestructive: m.cmpDestructOpt},
+		Source: protocol.SchemaDiffTarget{ConnectionID: protocol.ConnectionID(m.cmpBase.ID)},
+		Target: protocol.SchemaDiffTarget{ConnectionID: protocol.ConnectionID(m.cmpTargetID())},
+		Options: &protocol.SchemaDiffOptions{
+			IgnoreDefaults:    m.cmpIgnoreOpt,
+			SelectDestructive: m.cmpDestructOpt,
+		},
 		Selected: picked,
 	})
 }
@@ -242,7 +247,31 @@ func (m *model) cmpPickKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// cmpToggleOption 切换两个**服务端**口径选项（i 忽略默认值 / n 破坏性默认勾选）。
+// 两者都改变比对结果，所以必须重跑比对：勾选集由服务端按选项重算，客户端不缓存。
+func (m *model) cmpToggleOption(key string) (tea.Model, tea.Cmd) {
+	name := "破坏性默认勾选"
+	on := false
+	if key == "i" {
+		name = "忽略默认值"
+		m.cmpIgnoreOpt = !m.cmpIgnoreOpt
+		on = m.cmpIgnoreOpt
+	} else {
+		m.cmpDestructOpt = !m.cmpDestructOpt
+		on = m.cmpDestructOpt
+	}
+	m.status = name + " = " + onOff(on)
+	return m.runCmpDiff(false)
+}
+
 func (m *model) cmpDiffKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// 比对为空时也要能改选项：否则「两侧结构一致」会把 i/n 一起锁死，
+	// 用户没法关掉刚误开的忽略默认值再重跑。
+	if msg.Type == tea.KeyRunes {
+		if k := string(msg.Runes); k == "i" || k == "n" {
+			return m.cmpToggleOption(k)
+		}
+	}
 	if len(m.cmpEntries) == 0 {
 		return m, nil
 	}
@@ -278,10 +307,6 @@ func (m *model) cmpDiffKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cmpSel = cmpsync.AllIDs(m.cmpEntries)
 			m.cmpRecalcGaps()
 			m.status = "已全选（含破坏性条目）"
-		case "n":
-			// select_destructive 是**服务端**默认勾选口径，改了必须重跑比对。
-			m.cmpDestructOpt = !m.cmpDestructOpt
-			return m.runCmpDiff(false)
 		case "f":
 			if len(m.cmpGaps) == 0 {
 				m.status = "没有需要补齐的重建组"
@@ -470,7 +495,7 @@ func (m *model) cmpFooter() string {
 	case cmpStagePick:
 		return "↑/↓ · k/j 选择 · Enter 比对 · Esc 退出向导"
 	case cmpStageDiff:
-		return "↑/↓ · k/j 条目 · Space 勾选 · a 只勾非破坏 · A 全选 · n 破坏性默认勾选 · f 补齐重建组 · g 生成脚本 · r 重比对 · Esc 返回"
+		return "↑/↓ · k/j 条目 · Space 勾选 · a 只勾非破坏 · A 全选 · i 忽略默认值 · n 破坏性默认勾选 · f 补齐重建组 · g 生成脚本 · r 重比对 · Esc 返回"
 	}
 	return "↑/↓ · k/j 滚动 · x 执行正向 · r 代跑回滚 · c 复查差异 · Esc 返回勾选"
 }
@@ -520,8 +545,8 @@ func (m *model) cmpPickView() string {
 
 func (m *model) cmpDiffListView() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "基准 %s → 期望 %s · 破坏性默认勾选=%s\n",
-		m.cmpBase.Name, m.connName(m.cmpTargetID()), onOff(m.cmpDestructOpt))
+	fmt.Fprintf(&b, "基准 %s → 期望 %s · 忽略默认值=%s · 破坏性默认勾选=%s\n",
+		m.cmpBase.Name, m.connName(m.cmpTargetID()), onOff(m.cmpIgnoreOpt), onOff(m.cmpDestructOpt))
 	if len(m.cmpEntries) == 0 {
 		b.WriteString("两侧结构一致，无需同步。\n")
 		return b.String()

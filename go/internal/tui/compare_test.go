@@ -322,6 +322,20 @@ func TestCompareWizardHelpAndFooter(t *testing.T) {
 		t.Fatalf("confirm help=%+v", md(m).viewHelp())
 	}
 	md(m).cmpConfirmOn = false
+	// i/n 两个服务端口径选项都要出现在页脚与键位表里（与 GUI/Web 的可选项对齐）
+	md(m).cmpStage = cmpStageDiff
+	if !strings.Contains(md(m).footer(), "i 忽略默认值") {
+		t.Fatalf("diff footer=%q", md(m).footer())
+	}
+	var hasI bool
+	for _, e := range md(m).viewHelp() {
+		if e.key == "i" {
+			hasI = true
+		}
+	}
+	if !hasI {
+		t.Fatalf("diff help missing i: %+v", md(m).viewHelp())
+	}
 	if !strings.Contains(md(m).helpView(), "结构比对与同步") {
 		t.Fatalf("help panel missing view name:\n%s", md(m).helpView())
 	}
@@ -424,5 +438,59 @@ func TestCompareScriptViewScrollWindow(t *testing.T) {
 	}
 	if !strings.Contains(v, "上方还有") {
 		t.Fatalf("missing head hint after scroll:\n%s", v)
+	}
+}
+
+// TestCompareWizardOptionKeys i/n 是两个**服务端**口径选项：按下去要翻状态并立刻
+// 重跑比对（勾选集由服务端按选项重算），且比对结果为空时也改得动——否则误开
+// 「忽略默认值」后发现两侧一致，就被空计划的早退锁死关不掉了。
+func TestCompareWizardOptionKeys(t *testing.T) {
+	app, _ := setupApp(t)
+	addSQLiteConn(t, app, "期望库", `CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT)`)
+	m := openTables(t, app)
+	m = enterCompare(t, m)
+	m, cmd := m.Update(runeKey('j'))
+	if cmd != nil {
+		t.Fatalf("j should be synchronous")
+	}
+	m, cmd = m.Update(key(tea.KeyEnter))
+	m = drive(t, m, cmd)
+	if md(m).cmpStage != cmpStageDiff {
+		t.Fatalf("stage=%v want diff", md(m).cmpStage)
+	}
+	if len(md(m).cmpEntries) == 0 {
+		t.Fatalf("setup: 无可勾条目，选项键无从验证")
+	}
+
+	m, cmd = m.Update(runeKey('i'))
+	if cmd == nil {
+		t.Fatalf("i 必须重跑比对：选项在服务端生效")
+	}
+	if !md(m).cmpIgnoreOpt {
+		t.Fatalf("i 未切换 ignore_defaults")
+	}
+	if !strings.Contains(md(m).status, "忽略默认值 = 开") {
+		t.Fatalf("status=%q", md(m).status)
+	}
+	if opt := md(m).cmpDiffRequest(md(m).cmpTargetID()).Options; !opt.IgnoreDefaults || opt.SelectDestructive {
+		t.Fatalf("比对请求选项=%+v want ignore_defaults only", opt)
+	}
+	// 比对在途时 busy 门禁会吞键，必须先让这一轮落地再按 n
+	m = drive(t, m, cmd)
+
+	m, cmd = m.Update(runeKey('n'))
+	if cmd == nil {
+		t.Fatalf("n 必须重跑比对")
+	}
+	if opt := md(m).cmpDiffRequest(md(m).cmpTargetID()).Options; !opt.IgnoreDefaults || !opt.SelectDestructive {
+		t.Fatalf("n 之后选项=%+v want both on（别把 i 顶掉）", opt)
+	}
+	m = drive(t, m, cmd)
+
+	// 空计划（两侧一致）时 i 仍要能关回
+	md(m).cmpEntries = nil
+	m, _ = m.Update(runeKey('i'))
+	if md(m).cmpIgnoreOpt {
+		t.Fatalf("空计划下 i 被锁死，关不掉 ignore_defaults")
 	}
 }

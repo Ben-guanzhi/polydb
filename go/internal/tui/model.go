@@ -210,6 +210,7 @@ type model struct {
 	cmpCandidates  []protocol.ConnectionInfo  // 期望侧候选
 	cmpPickCur     int                        // ① 段候选光标
 	cmpDestructOpt bool                       // select_destructive：重跑比对让服务端默认勾选破坏性条目
+	cmpIgnoreOpt   bool                       // ignore_defaults：忽略两侧默认值差异（跨环境的序列/时间戳噪声）
 	cmpEntries     []protocol.SchemaDiffEntry // ② 段计划（服务端原序）
 	cmpSel         []string                   // 勾选集
 	cmpCur         int                        // ② 段条目光标
