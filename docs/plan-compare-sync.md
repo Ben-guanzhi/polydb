@@ -1014,7 +1014,7 @@ A.15 只钉事实、不改行为，把三处盲区留给决策；§8-8 拍板为
 
 | 位置 | 内容 |
 |---|---|
-| `app-core/src/lib.rs:513` ⇄ `pkg/appcore/schema_diff.go:59`（采集层） | 不再丢弃视图/物化视图：条目进快照，只带 `name` + `table_type`，列/索引/外键一律为空。**关键是仍不发元数据查询** ⇒ A.18 的每表 3 次、总 `1+3n` 扇出口径分毫未动（`snapshot_fanout_test.go` 把这条钉住了） |
+| `app-core/src/lib.rs` ⇄ `pkg/appcore/schema_diff.go` 的 `collect_snapshot` / `collectSnapshot`（采集层） | 不再丢弃视图/物化视图：条目进快照，只带 `name` + `table_type`，列/索引/外键一律为空。**关键是仍不发元数据查询** ⇒ A.18 的每表 3 次、总 `1+3n` 扇出口径分毫未动（`pkg/appcore/snapshot_fanout_test.go` ⇄ `crates/app-core/tests/snapshot_fanout.rs` 把这条钉住了） |
 | `schema-diff/src/lib.rs` ⇄ `pkg/schemadiff/schemadiff.go` | 新增 `view_names()` / `viewNames()`：按**小写键**升序、大小写不敏感去重（首个胜出，与 `table_map` 的 `or_insert` 同口径）。diff 规则本身仍跳过非表项 ⇒ 计划零变化 |
 | `schema-diff/src/ddl.rs` ⇄ `pkg/schemadiff/ddl.go` | `emit_script` 里 `taken` 除了两侧表名还播种**两侧视图名**（G17）；`view_scope()`（≤5 点名、超出「等」收尾）+ `w_view_drop()` / `w_view_rebuild()`；警告只取**被执行那一侧**的视图 ⇒ 回滚脚本按回滚真正要动的库出话 |
 | 参数收口（**双端同形**） | `rebuild_statements` / `rebuildStatements` 的 `taken + views` 合成一个 `Seen` / `seen` 结构体传：两者同源于同一对快照，且顺手把 clippy 的 `too_many_arguments`（8 参）摘掉 |
@@ -1092,11 +1092,41 @@ A.15 G17 那六个引用里 ①② 四处（采集层过滤那行**已被 E6.5 �
 | Rust 全量 | `cargo test --workspace` | **179 passed / 0 failed**（40 个 result 行，其中 **15 个套件非零**，余下 25 个是 0 份的 Doc-tests / 空壳；非零全表：`ui-gui` 65、`schema-diff` lib 40、`server` 20、`db-core` 11、`snapshot_diff` 10、`db-sqlite` lib 7、`view_rebuild_probe` 5、`redis_msgpack_test` 4、`app_core_integration` 4、`storage` 3、`local_transport` 3、`vectors` 2、`snapshot_fanout` 2、`ddl_vectors` 2、`app-core` lib 1） |
 | Rust 静态 | `cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` | 均 **exit 0**（fmt 写模式仍按项目约定手改，不用 `cargo fmt --all`） |
 | Go 全量 | `go build ./... && go vet ./...` / `go test ./...` | 编译与 vet 干净；**13 个包全 ok、0 FAIL**（`pkg/schemadiff` 39 顶层、`pkg/dbsqlite` 19、`internal/tui` 与 `pkg/server` 是最慢的两个包） |
-| Go 格式 | 剥 CR 后 `gofmt -l` | 无输出（本批零 Go 代码改动，沿用 E6.5 结论） |
+| Go 格式 | 剥 CR 后 `gofmt -l` | **本模块涉及的 8 个 Go 文件无输出**；全仓 117 个 .go 另有 1 处存量未格式化（见本节末披露①） |
 | Web | `npm run test -- --run` / `npm run lint` / `npm run build` | **16 文件 / 163 测试全过**；eslint 无输出；vite build 成功（1m11s） |
 | 协议漂移 | `tools/genprotocol` 的 `go run . check` / `go run . ts --check` | **`protocol check OK: 64 spec types vs rust + go`**、`TS types up to date` ⇒ E6 全程未改 spec（快照 DTO 是内部件，不进契约） |
 | 契约对拍 | `cargo build -p polydb-server` 后 `cd test/contract && go test -v ./...` | **23 个顶层测试 / 89 个 PASS（含子测试）/ 0 FAIL / 0 SKIP 标记**；网络库与 Redis 在用例内部按 `connected:false` 软跳过（28 处记录，本机确实无 PG/MySQL/MSSQL/Oracle/Redis 实例） |
 | 共享语料 | `go test -run DDLVector ./pkg/schemadiff/` + `cargo test -p polydb-schema-diff --test ddl_vectors` | **26 份**（18 脚本 + 8 错误）双端各自全绿；diff 语料 16 份同样双端绿 |
+
+**这套数字怎么复核**（照抄可跑，Git Bash；不用从正文反推命令）：
+
+```bash
+# Rust：静态 + 全量。套件名在 `Running …(<bin>-<16hex>.exe)` 行、passed 数在紧随的 `test result: ok. N passed`
+cd rust && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all -- --check
+cargo test --workspace 2>&1 | tee /tmp/rust.log | grep -c '^test result'      # 40 个 result 行
+awk '/^ *(Running|Doc-tests) /{n=$NF; gsub(/[()]/,"",n); sub(/-[0-9a-f]+\.exe$/,"",n)}
+     /^test result: ok\./{if($4+0>0) printf "%-34s %s\n", n, $4; t+=$4} END{print "TOTAL", t}' /tmp/rust.log
+# Go：必须 -count=1，否则全 cached、看不到数字
+cd ../go && go build ./... && go vet ./... && go test -count=1 ./...
+# 格式：工作树是 CRLF，直接 gofmt -l 会全量误报 ⇒ 剥 CR 到临时文件再判（禁 gofmt -w）
+cd .. && for f in $(find go test tools -name '*.go'); do tr -d '\r' < "$f" > /tmp/g.go; gofmt -l /tmp/g.go; done
+# Web / 协议
+cd web && npm run test -- --run && npm run lint && npm run build
+cd ../tools/genprotocol && go run . check && go run . ts --check
+# 契约：先建 Rust 二进制，-v 才看得见子测试
+cd ../rust && cargo build -p polydb-server && cd ../test/contract && go test -count=1 -v ./... > /tmp/c.log
+grep -cE '^--- PASS' /tmp/c.log                    # 23 顶层
+grep -cE '^[[:space:]]*--- PASS' /tmp/c.log         # 89 含子测试（必须允许行首空白）
+grep -cE '^[[:space:]]*--- (FAIL|SKIP)' /tmp/c.log  # 0
+```
+
+**复核实测（在 `e477019` 的工作树上把上表全端重跑一遍）**：逐项与表中数字一致（Rust 179 / 0、Go 13 包全 ok、
+Web 16 文件 163 测试、协议 64 类型、契约 23 / 89 / 0 / 0、语料 26 + 16 双端绿）。
+两点如实披露：① **全仓 `gofmt -l`（剥 CR 后，117 个 .go）有 1 处存量未格式化** =
+`test/contract/rows_test.go`（D1.7 `2fe6836` 遗留的结构体字段对齐 + 行尾注释空格），
+与本里程碑无关 ⇒ 上表"Go 格式无输出"的准确范围是**本模块涉及的文件**，不是全仓；
+本批刻意不顺手改它（改格式要重跑契约对拍，属另一条债）。② vite build 的**耗时**随缓存波动
+（记为 1m11s，复跑 39.5s），只有"成功/失败"是门禁属性，耗时不是。
 
 **E6 阶段的净账**（`1567bbd..6c08689`，即 E6.0–E6.5 的 **7 个提交**，**不含本批 E6.6**）：
 **+4057 / −713、30 个文件**。
@@ -1112,7 +1142,8 @@ DDL 语料 23 → 26（A.20 的撞名/警告/截断）。
 上表的全端门禁基线**在 T1 的工作树上实测**（当时工作树干净）；**`T1..HEAD` 没碰过 `docs/` 以外任何文件**
 （`git diff --numstat 9643b6f -- . ':(exclude)docs'` 空输出，本批每笔都复核过）⇒ 表中数字对收口后的 HEAD 仍成立。
 E6.6 净账因此**拆两条**：`T0..T1` = **+123 / −13（2 文件）**，`T1..T2` = **+2 / −1（1 文件）**；
-本段声明自身所在提交记为 **T3**，其读数看 `git show --numstat T3 -- docs/`（补账只动本附录，不引入新口径）。
+本段声明自身及其后的每一笔补账，用 `git log --oneline T1..HEAD` 列出、`git show --numstat <hash>` 逐笔复原
+（正文不逐笔自指——写进来就会改变自己要写的数）。补账只动本附录，不引入新口径。
 **口径声明**：净账一律取 `git diff --numstat` 的**求和**（新增行 / 删除行），不引入"修改行"这一类——
 git 的 diff 只回答"哪些行进、哪些行出"，一行改写会**同时**计 1 增 1 删，所以"改 N 行"这种写法在 git 口径下没有唯一含义。
 顺带作废两个此前在会话里报过的数：E6.6 主体曾报"本批 +123/−13、E6.5 那批 +163/0（改 8）"，
