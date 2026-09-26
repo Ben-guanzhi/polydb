@@ -696,12 +696,13 @@ testing-library 渲染测试（沿用本项目惯例：纯函数层单测 + 浏�
 **门禁数字（2026-09-26 本机实测，E5 收口基线）**：协议漂移 `go run . check` OK（**64** 个 spec 类型对
 Rust/Go 双向核对，E5 零 spec 变更）、`… ts --check` 无漂移；Rust `cargo check` / `clippy --workspace
 --all-targets -- -D warnings` / `fmt --all -- --check` 全干净，`cargo test --workspace` **162 绿**
-（`polydb_ui_gui` **59** = G 系基线 48 + `cmpsync` 11；`polydb_schema_diff` 36、`snapshot_diff` 10）；
+（`polydb_ui_gui` **59** = 阶段 G 原基线 48 + `cmpsync` 11；`polydb_schema_diff` 36、`snapshot_diff` 10）；
 Go `go build` / `go vet` 干净，`go test ./...` **189 顶层 + 14 子测试全绿、0 失败**（`internal/tui` 50、
 `pkg/cmpsync` 16）；Web `tsc --noEmit` 干净、vitest **158 绿**；契约对拍 **23 顶层 / 66 子测试 PASS，
 0 FAIL**（网络方言与 Redis 仍在用例内部 soft-skip：`e2_schema_diff_test.go:227,271`、
 `e3_schema_ddl_test.go:327`）。两处环境事实需记录：本机 **无 `make`**（Git Bash 未装），所有门禁按展开后的
 直接命令跑；`golangci-lint` v2 仍缺，Go lint 步骤恒跳过。
+
 **E5 未验证项（如实披露）**：① GUI 与 TUI 的**渲染均未肉眼验证**（GPUI 无法无头，TUI 只在测试里断言
 字符串产物）；② GUI 向导的**状态机与渲染没有测试**——`cmpsync.rs` 的 11 份纯函数单测覆盖的是可测逻辑，
 E5 在 `app.rs` 新增的 926 行按键分派与在 `view.rs` 新增的 714 行浮层只能靠 TUI 侧的同构测试间接背书，
