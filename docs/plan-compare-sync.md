@@ -1057,6 +1057,7 @@ PG/MySQL/MSSQL/Oracle/Redis 按 `connected:false` 软跳过（本机无服务，
 
 E6 的最后一批不做新功能，只做两件**容易被跳过、跳过就会烂**的事：把前面五批留下的
 "待 E6.6 刷新"全部兑现，并把文档里已经**指向不到**的行号引用清掉。
+本批净账：**2 个文件（`docs/plan-compare-sync.md` + `docs/frontends.md`）、+123 / −13、零代码改动**。
 
 **文档订正落点（这一批唯一的"改动"）**：
 
@@ -1096,7 +1097,7 @@ A.15 G17 那六个引用里 ①② 四处（采集层过滤那行**已被 E6.5 �
 | 契约对拍 | `cargo build -p polydb-server` 后 `cd test/contract && go test -v ./...` | **23 个顶层测试 / 89 个 PASS（含子测试）/ 0 FAIL / 0 SKIP 标记**；网络库与 Redis 在用例内部按 `connected:false` 软跳过（28 处记录，本机确实无 PG/MySQL/MSSQL/Oracle/Redis 实例） |
 | 共享语料 | `go test -run DDLVector ./pkg/schemadiff/` + `cargo test -p polydb-schema-diff --test ddl_vectors` | **26 份**（18 脚本 + 8 错误）双端各自全绿；diff 语料 16 份同样双端绿 |
 
-**E6 阶段的净账**（`1567bbd..HEAD`，即 E6.0–E6.5 的 **7 个提交**，**不含本批 E6.6**）：
+**E6 阶段的净账**（`1567bbd..6c08689`，即 E6.0–E6.5 的 **7 个提交**，**不含本批 E6.6**）：
 **+4057 / −713、30 个文件**。
 其中**非 `docs/` 部分 +3744 / −698（29 文件**，含 `spec/behavior.md` 与两份语料目录），
 `docs/plan-compare-sync.md` 自身 +313 / −15。计数变化全部可归因：
