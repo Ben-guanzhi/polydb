@@ -34,7 +34,7 @@ MySQL 的 `app_dev` vs `app_prod`），列出表/列/索引/外键四类对象�
 | DDL 生成 | **只有 Web 一处**：`web/src/lib/alterSql.ts`（quoteIdent/addColumn/dropColumn/renameColumn/addIndex/dropIndex/addFK/dropFK + `UnsupportedAlterError`）。GUI、TUI **零 DDL 生成**（`ALTER TABLE` 只出现在两端自用 storage 里） | ★ 缺 ALTER COLUMN（类型/可空/默认）、缺 CREATE/DROP TABLE → **E3 已补**：服务端生成器（Rust `schema-diff/src/ddl.rs` + Go `pkg/schemadiff/ddl.go`）**只覆盖 SQLite**，其余方言显式 `NOT_SUPPORTED`（附录 A.12） |
 | 原子应用 | 事务四方法两端齐备（`app-core/src/lib.rs:502-579`、`pkg/appcore/appcore.go:338-435`），finalize 只成功一次；`POST /query/batch` 是**逐条循环、不在事务内**（`crates/server/src/lib.rs:663-681`、`go/pkg/server/server.go:441-473`） | "原子应用一批 DDL"只能客户端 begin → N×execute → commit（已有成熟范式：`ui-gui/src/app.rs:2133-2179`、`TableStructureEditor.tsx:115-135`） |
 | DDL 事务能力位 | **全仓库没有任何一处**处理"某方言 DDL 不能在事务里"（MySQL/Oracle 的 DDL 隐式提交） | ★ 需新增能力位 + 显式报错，禁止静默降级（矩阵见 `spec/behavior.md:334-345`）→ **E3 只对 SQLite 立了两位**（`ddl_in_tx=true` 实测、`pragmas_outside_tx` 由脚本自带），其余方言的取值仍空白 |
-| 快照结构可复用件 | `web/src/lib/erDiagram.ts:74 buildERModel()` 已是"表→列→FK"的纯结构；GUI `app.rs:2505-2529` 有整 schema FK 扫描（**上限 200 表**）、TUI `commands.go:211 allTablesCmd` 跨 schema 枚举 | 表数上限与逐表 fan-out 往返要处理 |
+| 快照结构可复用件 | `web/src/lib/erDiagram.ts:74 buildERModel()` 已是"表→列→FK"的纯结构；GUI `app.rs:2625-2650` 有整 schema FK 扫描（**上限 200 表**，仅"关系"轨道）、TUI `commands.go:211 allTablesCmd` 跨 schema 枚举 | ~~表数上限与逐表 fan-out 往返要处理~~ E6.4 已量化：那 200 上限不在比对路径上，比对路径是每表 3 次串行查询、无上限（附录 A.18） |
 | Rust 侧远程传输 | **不存在 HttpTransport**（只有 `LocalTransport`，`transport/src/lib.rs:103`）。Go 侧 Local + Remote 都有 | ★ 决定 GUI 形态（见 §4 决策 D3） |
 
 **结论**：读面齐、归一缺、生成半齐（只在 Web）、应用通道齐但能力位空白、跨进程比较在 GUI 侧结构性受限。
@@ -233,7 +233,13 @@ E3 收口时 `check` 与 TS 重生成均零漂移（`web/src/api/index.ts` +37 �
 4. ~~差异条目里"仅目标库存在"要不要包含**数据不可逆**提示~~ **已定（2026-09-26，E4 落地即此）**：
    `destructive` 条目红标 + 默认不勾选，勾选初值直接采用服务端回值（前端不自造规则）；
    另有「破坏性动作默认勾选」开关供显式放开。见附录 A.13。
-5. 表数上限：GUI 现有整 schema 外键扫描硬上限 200 表（`ui-gui/src/app.rs:2505-2529`），diff 场景动辄上千表，要不要在 E2 一并放宽/分页？
+5. ~~表数上限：GUI 现有整 schema 外键扫描硬上限 200 表，diff 场景动辄上千表，要不要在 E2 一并放宽/分页？~~
+   **E6.4 已订正：这个问题问错了对象**（附录 A.18）。`.take(200)` 在
+   `rust/crates/ui-gui/src/app.rs:2635` 的 `load_incoming`（表页「关系」轨道列**入向外键**时逐表扫
+   `list_foreign_keys`），**与结构比对无关**；比对路径（两端 `collect_snapshot`）本来就**没有任何表数上限**。
+   真正剩下的不是"上限要不要放宽"，而是"每表 3 次串行元数据查询"的扇出代价——已实测：
+   SQLite 内嵌引擎上 1000 表 ≈ 25 ms（Go 单侧快照）/ 两侧比对 ≈ 137 ms（Rust，dev 构建），
+   线性、无悬崖。⇒ **不放宽、不分页、不改代码**；只有换成网络数据库（每查询一次网络往返）时这条才会变成问题。
 6. ~~**SQLite 的比对形态**~~ **已定（2026-09-25）：只做"两个连接 / 两个文件"**，SQLite 的 `schema` 参数固定 `main`。
    依据：驱动层 `list_tables` 忽略 `schema` 入参、`PRAGMA table_info` 不支持 schema 前缀（E2.0 实测，附录 A.9 F6）；
    而 ATTACH 只在单连接上有效，与现有连接池语义冲突。**"同库多 schema"记为 v1.1 待办**，spec 里 `schema` 保持可选。
@@ -845,3 +851,45 @@ A.15 的 G14 留下一句话没人接：`ddl_in_tx=false` 那一支失败后"数
 在 SQLite 上结构上不会出现，因此"经 HTTP 的逐条分派"仍无端到端证据（同 A.16 ①）；
 ③ 只测了 SQLite 同种类候选；PG/MySQL 的远程向导仍只有契约层 soft-skip；
 ④ 取消（F8）在远程向导路径上未测——DDL 编排用的是 `context.Background()`，本就不走取消注册。
+
+### A.18 E6.4 快照采集扇出量化 + 「200 表上限」事实订正（2026-09-26，**零生产代码改动**）
+
+§8-5 与 §2 都写着"GUI 外键扫描上限 200 表，diff 动辄上千表，要不要放宽/分页"。
+本批把它拆开验证，结论是**问题问错了对象**：
+
+| 说法 | 实测 |
+|---|---|
+| "比对路径有 200 表上限" | **错**。`.take(200)` 只在 `rust/crates/ui-gui/src/app.rs:2635` 的 `load_incoming`（表页"关系"轨道列入向外键扫描），比对路径两端 `collect_snapshot` 都没有任何截断 |
+| "diff 需要放宽/分页" | **不需要**（SQLite 内嵌引擎上，见下面数字）；改代码前先把量级测清楚，本批的产出就是这几个数字 |
+| 真实代价 | 每表 **3 次串行元数据查询**（`list_columns` / `list_indexes` / `list_foreign_keys`）+ 每次采集 1 次 `list_tables` ⇒ 单次 `schema_diff` 是 **2×(1+3n)** 次查询 |
+
+**Go 侧精确计数**（`go/pkg/appcore/snapshot_fanout_test.go`，包内测试 ⇒ 把已打开连接的驱动换成
+计数装饰器 `dbcore.NewConnection(fanCounter)`，不 mock 数据库）：
+n=12 表 + 5 张视图 ⇒ `ListTables` **1 次**、`ListColumns`/`ListIndexes`/`ListForeignKeys` **各 12 次**，
+总计 `1+3n = 37`，**视图贡献 0 次**（§14.1 "快照看不见视图"在调用次数上的形状）。
+n=1000 ⇒ 快照 `len(Tables)==1000`，无截断。
+
+**耗时（本机 i7-8750H，`go test -bench -benchtime 50x`）**：
+
+| n 表 | 单侧快照 | 元数据查询 | 每表 |
+|---|---|---|---|
+| 50 | 1.20 ms | 151 | 24 µs |
+| 200 | 5.92 ms | 601 | 30 µs |
+| 1000 | 25.3 ms | 3001 | 25 µs |
+
+**Rust 侧**（`rust/crates/app-core/tests/snapshot_fanout.rs`，dev 构建 ⇒ 数字偏大）：
+两侧各 1000 表的一次 `schema_diff`（= 6002 次元数据查询）**138–144 ms**（两次跑动各有出入，
+同一量级），n=50/200/1000 三档每表约 **149–201 / 149–174 / 132–149 µs** ⇒ 线性、无悬崖。
+"没上限"这一侧用**末号表可见性**证明：两侧各建 1000 表后在期望侧 `DROP TABLE t999`，
+差异必须**恰好 1 条**且是 `t999/drop_table`——若快照被 200 截断，第 1000 号表两边都看不见，diff 会是空的。
+
+**两端不对称（如实披露）**：Go 在包内能注入驱动，"每表恰好 3 次"是**精确断言**；
+Rust 的 `connections` 私有、没有注入驱动的门 ⇒ 那一侧只有**耗时 + 末号表可见性**两种证据，
+调用次数靠读代码同形（同一串行 `for` 循环 + `.await`）。
+
+**结论落点**：不改代码。若日后接网络数据库（PG/MySQL 经 WLAN），这 3 次/表会变成 3 次网络往返，
+届时该做的是**驱动层批量元数据查询**（一次 `information_schema` 查全部表）而不是"提高 200 上限"。
+本批数字只覆盖 SQLite 内嵌引擎，网络方言未测（本机无实例）。
+
+**门禁（本批）**：Go `go build ./... && go vet ./...` 干净、`go test ./pkg/appcore/` 绿（新增 2 份 + 1 组三档基准）；
+Rust `cargo test -p polydb-app-core --test snapshot_fanout` **2 绿**。
