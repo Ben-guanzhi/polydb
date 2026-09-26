@@ -211,9 +211,10 @@ E3 收口时 `check` 与 TS 重生成均零漂移（`web/src/api/index.ts` +37 �
 - **E5 之后仍缺的两类证据**（2026-09-26 收口时明确）：① GUI 向导的**状态机 + 渲染没有测试**——
   Rust 侧只有 `cmpsync.rs` 纯函数单测与 `transport/tests`，`app.rs` 的按键分派与 `view.rs` 的浮层
   没有 GUI 端测试（本项目无 GPUI 测试基建），只能靠 TUI 侧同构的 keystroke 测试背书；
-  ② TUI 向导只在**本机模式**（进程内 app-core）真跑过，远程模式（打 polydb-server 的 HTTP 路径）
-  的 UI 链路未验证——该 HTTP 路径本身由 E2/E3 契约对拍锁定，但"向导点下去走的是 Remote transport"
-  这件事没有端到端证据。
+  ② ~~TUI 向导只在**本机模式**（进程内 app-core）真跑过，远程模式（打 polydb-server 的 HTTP 路径）
+  的 UI 链路未验证~~ **E6.2 已补**（附录 A.17）：同一套按键脚本换一个 `Remote` 客户端跑通，
+  比对/生成/事务执行/代跑回滚都经 `httptest` 真服务端，并带请求计数证明流量真的经过 HTTP；
+  该 HTTP 路径本身另由 E2/E3 契约对拍锁定。
   Web 侧 E4 已在真实 Chromium 实例里把向导全流程走通（附录 A.13「浏览器真跑」），但该实例视口固定在
   ~565×482 且没有可用的改窗口工具，所以**布局只做了数值核对**（行宽/标签宽用 `evaluate_script` 量），
   宽屏下的视觉排版仍未肉眼确认。
@@ -725,7 +726,8 @@ E5 在 `app.rs` 新增的 926 行按键分派与在 `view.rs` 新增的 714 行�
 这是 E5 最大的缺口；
 ③ 非 SQLite 方言三端只能拿到服务端 501，而**该 501 本机从未真正打出过**；④ `pragmas_outside_tx=false` /
 `ddl_in_tx=false` 两支分派在 GUI/TUI 同样只有纯函数与 Go 侧 `TestApplyScriptSyncDispatch` 覆盖，
-真库（PG/MySQL）跑不到；⑤ TUI 远程模式（打 polydb-server）的向导链路未真跑，只在本机模式测过；
+真库（PG/MySQL）跑不到；⑤ ~~TUI 远程模式（打 polydb-server）的向导链路未真跑，只在本机模式测过~~
+**已由 E6.2 关闭**（附录 A.17）；
 ⑥ `golangci-lint` v2 本机仍未安装，Go lint 步骤恒跳过。
 
 ### A.15 E6.0 SQLite 视图依赖取证（2026-09-26，关闭 §7 与 A.11 的遗留未测项）
@@ -802,8 +804,44 @@ A.15 的 G14 留下一句话没人接：`ddl_in_tx=false` 那一支失败后"数
 `TestApplyScriptSync*` 共 5 份同跑）；Web `tsc --noEmit` 干净、vitest **163 绿**（158 → +5）、
 `eslint` 改动三文件无输出。Rust 侧零改动故未重跑。
 
-**A.16 未覆盖（如实披露）**：① **契约层**（走 HTTP `/api/transactions` 的两种分派各一条断言）仍未加——
-本批的两端证据分别是 Local transport 直连与前端假引擎，Remote 通路上这两种分派尚无端到端断言；
-② Web 的 `runScript` 只验过编排，**没有真发过 HTTP**（真线路由 E5.0 的双后端传输测试背书）；
+**A.16 未覆盖（如实披露）**：① **契约层**（走 HTTP `/api/transactions` 的两种分派各一条断言）
+—— **E6.2 已关闭一半**：单事务那一支现在有端到端证据（A.17）；`ddl_in_tx=false` 那一支 SQLite 恒不出现，
+在 SQLite 上**结构上不可能**经 HTTP 跑到，只能等非 SQLite 方言；② Web 的 `runScript` 只验过编排，**没有真发过 HTTP**（真线路由 E5.0 的双后端传输测试背书）；
 ③ 提交阶段本身失败（`commit` 抛错 ⇒ 记失败但不回滚）这条分支两端都还没测；
 ④ Rust GUI 的第三份拷贝仍无测试（E6.3）。
+
+### A.17 E6.2 TUI 远程模式向导端到端真跑（2026-09-26，**零生产代码改动**）
+
+§7 的"E5 之后仍缺的两类证据"第 ② 条（TUI 向导只在本机模式跑过）到此关闭。
+本批**没有改任何生产代码**——只是把 E5.2 那套按键脚本原封不动地换一个客户端跑：
+
+| 位置 | 内容 |
+|---|---|
+| `go/internal/tui/compare_remote_test.go` | 2 份测试。服务端 = `httptest.NewServer(server.NewWithToken(app, token).Handler())`（与契约测试同一套装配），客户端 = `transport.NewRemote(srv.URL)` + `SetToken`；TUI 侧仍是 `New(rem)` 按键驱动，`openTablesRemote` 与本机版 `openTables` **只差客户端** |
+| 请求计数器 | `countingHandler` 包一层，记录 `METHOD + URL.Path`，用来**证明流量真的经过服务端**，而不是测试自己走进程内直调 |
+
+**打到的路径**（每一步都有对应的端点计数断言）：
+连接列表/打开连接 → `POST /api/schema/diff` → 勾选/补缺口 → `POST /api/schema/ddl`
+→ `x` 执行 ⇒ `POST /api/transactions` + `…/{txnId}/execute`（≥3 次）+ `commit`
+→ `r` 代跑回滚（确认词经输入框逐字敲进去）⇒ 同一组事务端点。
+两侧结构状态用 `remoteDiff` / `tableExistsRemote`（都走 HTTP）回读，不用本地对象。
+
+**三条顺带钉住的口径**：
+1. **鉴权前置断言**：不带 token 的客户端必须先被 `POLYDB_ERR_UNAUTHORIZED` 挡下——否则后面所有
+   "经过服务端"的断言都是空的，所以这一条放在最前面，失败即整测失败。
+2. **能力位穿过 msgpack 不丢**：`ddl_in_tx` / `pragmas_outside_tx` 在反序列化后仍为真。
+3. **未整组勾选由服务端拒**：绕开界面提示直接 `rem.SchemaDDL(单条)` 必须报错——
+   呈现层挡一次不算数，判定在服务端。
+
+**顺带纠正一处我自己的误判**：一开始断言"同步后 `u` 该被删掉"，跑出来是红的——
+因为破坏性条目默认不勾选，`u//drop_table` 本来就该留在差异里。改成断言 **`u` 必须还在**，
+这条反而变成了"默认勾选口径一路穿过 HTTP 到服务端重算都没走样"的证据。
+
+**门禁（本批）**：`go build ./... && go vet ./...` 干净；`go test ./internal/tui/` 绿
+（新增 2 份，含 E6.1 的 4 份派发探针）；新文件剥 CR 后 `gofmt -l` 无输出。
+
+**A.17 未覆盖（如实披露）**：① 服务端是 **Go**（httptest 里的 `pkg/server`），Rust `polydb-server`
+的 HTTP 路径由 E2/E3 契约对拍锁定，本批没有把 TUI 打到 Rust 服务端上；② `ddl_in_tx=false` 那一支
+在 SQLite 上结构上不会出现，因此"经 HTTP 的逐条分派"仍无端到端证据（同 A.16 ①）；
+③ 只测了 SQLite 同种类候选；PG/MySQL 的远程向导仍只有契约层 soft-skip；
+④ 取消（F8）在远程向导路径上未测——DDL 编排用的是 `context.Background()`，本就不走取消注册。
