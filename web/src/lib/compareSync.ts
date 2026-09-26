@@ -198,6 +198,100 @@ export function emptyOutcome(): ApplyOutcome {
   return { ran: 0, failed: [], rolledBack: false, skipped: 0 };
 }
 
+/** runScript 需要的最小执行面：由调用方注入（组件里接 api.ts，测试里接内存假实现）。 */
+export interface ApplyDeps {
+  execute(connId: string, sql: string): Promise<void>;
+  /** 开事务；返回 tx id */
+  begin(connId: string): Promise<string>;
+  executeInTx(txId: string, sql: string): Promise<void>;
+  commit(txId: string): Promise<void>;
+  rollback(txId: string): Promise<void>;
+  /** 每成功跑完一条回调一次（done 从 1 起） */
+  onProgress?(done: number, total: number): void;
+  /** 每条语句之前检查一次：置真即以"已取消"记失败并停住 */
+  cancelled?(): boolean;
+  /** 失败原因怎么变成人话（组件沿用 ImportModalParts 的 toMsg） */
+  errText?(e: unknown): string;
+}
+
+/**
+ * 执行一份脚本（正向与回滚共用：调用方把要跑的那一份放进 statements）。
+ *
+ * 分派（behavior.md §15.4）：
+ *   - ddl_in_tx + pragmas_outside_tx ⇒ 首尾 PRAGMA 事务外跑，主体包**一个**事务；
+ *   - pragmas_outside_tx=false       ⇒ 整份脚本（含任何 PRAGMA）包进同一个事务；
+ *   - ddl_in_tx=false                ⇒ 该方言 DDL 会隐式提交，全脚本逐条跑（失败留中间态）。
+ * 只记首个失败并停住；主体在事务里时失败即整体回滚，回滚本身失败则把 tx 留给调用方兜。
+ * `ran` 计的是"执行过没报错"，不代表落地——事务分支回滚后库里什么都不会留下。
+ */
+export async function runScript(sc: DdlScript, connId: string, deps: ApplyDeps): Promise<ApplyOutcome> {
+  const out = emptyOutcome();
+  const plan = planExecution(sc);
+  const text = deps.errText ?? ((e: unknown) => (e instanceof Error ? e.message : String(e)));
+
+  const steps: { stmt: DdlStatement; inTx: boolean }[] = [];
+  if (plan.wrapInTx && sc.pragmas_outside_tx) {
+    if (plan.pragmaHead) steps.push({ stmt: plan.pragmaHead, inTx: false });
+    for (const s of plan.body) steps.push({ stmt: s, inTx: true });
+    if (plan.pragmaTail) steps.push({ stmt: plan.pragmaTail, inTx: false });
+  } else {
+    for (const s of sc.statements) steps.push({ stmt: s, inTx: plan.wrapInTx });
+  }
+
+  const fail = (index: number, s: DdlStatement, e: unknown): void => {
+    out.failed.push({
+      index,
+      sql: s.sql,
+      phase: s.phase,
+      table: s.table,
+      reason: text(e),
+      entry_ids: s.entry_ids,
+    });
+    out.skipped = Math.max(0, steps.length - index - 1);
+  };
+
+  let tx: string | null = null;
+  for (let i = 0; i < steps.length; i++) {
+    const { stmt, inTx } = steps[i];
+    if (deps.cancelled?.()) {
+      fail(i, stmt, new Error('已取消：本条及剩余语句未执行'));
+      break;
+    }
+    try {
+      if (inTx && !tx) tx = await deps.begin(connId);
+      // 主体跑完接着是事务外 PRAGMA：先提交，PRAGMA 进事务是 no-op。
+      if (!inTx && tx) {
+        await deps.commit(tx);
+        tx = null;
+      }
+      if (inTx && tx) await deps.executeInTx(tx, stmt.sql);
+      else await deps.execute(connId, stmt.sql);
+      out.ran++;
+      deps.onProgress?.(out.ran, steps.length);
+    } catch (e) {
+      fail(i, stmt, e);
+      break;
+    }
+  }
+
+  if (tx) {
+    if (out.failed.length) {
+      try {
+        await deps.rollback(tx);
+        out.rolledBack = true;
+      } catch { /* 回滚失败：tx id 仍在 out 之外由调用方记住，收尾时再兜一次 */ }
+    } else {
+      try {
+        await deps.commit(tx);
+      } catch (e) {
+        fail(steps.length - 1, steps[steps.length - 1].stmt, e);
+      }
+      tx = null;
+    }
+  }
+  return out;
+}
+
 /** 目标侧候选：Redis 无模式（服务端 501），跨种类服务端同样拒绝 ⇒ 只允许同 kind。 */
 export function candidateConnections(all: ConnectionInfo[], source: ConnectionInfo | null): ConnectionInfo[] {
   if (!source) return [];

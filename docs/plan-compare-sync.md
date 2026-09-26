@@ -193,10 +193,14 @@ E3 收口时 `check` 与 TS 重生成均零漂移（`web/src/api/index.ts` +37 �
   （纯函数层，恒可跑）与两端错误码映射（`NOT_SUPPORTED → 501`）双重锁定，
   但**契约层的 501 响应本机从未真正打出过**（`/api/schema/ddl` 的方言分支同样 soft-skip）。
 - 契约里的"应用脚本"是**逐条 `/query` 顺序执行**，没有走 `/api/transactions`——因为含重建的脚本
-  要求首尾两条 PRAGMA 留在事务外（G6）。**「把 `pragmas_outside_tx=false` 的脚本整份包进一个事务」
-  这条真实调用路径仍未跑到**：E4 的 Web 向导已经实现了这条分派（附录 A.13），但 SQLite 两端能力位恒为
-  `true`，所以浏览器里验证的是"PRAGMA 事务外 + 主体单事务"那一支；另一支（逐条 `/query`）只有纯函数
-  单测覆盖，**契约层仍未对两种分派各加一条断言**。
+  要求首尾两条 PRAGMA 留在事务外（G6）。
+  ~~**「把 `pragmas_outside_tx=false` 的脚本整份包进一个事务」这条真实调用路径仍未跑到**~~
+  **E6.1 已跑到并订正了一处事实错误**：能力位是 `pragmas_outside_tx = 任一脚本含重建`
+  （`pkg/schemadiff/ddl.go:793`），所以 SQLite 的**不含重建**脚本（纯 `add_column` / `drop_index`）
+  本来就是 `false` ⇒ "整份脚本包一个事务"不是罕见支路，而是 SQLite 上最常见的那一支。
+  旧文本"SQLite 两端能力位恒为 `true`"只在以重建为中心的契约场景里成立，是错的。
+  现在两端各有一组带**调用序列**断言的应用环路测试（附录 A.16）；
+  仍未跑到的只剩**契约层**（HTTP `/api/transactions` 走一遍两种分派各一条断言）。
 - ~~视图（`CREATE VIEW`）对重建表的依赖行为**仍未测**（E3.0 遗留）~~ **E6.0 已测完并证伪了原假设**
   （附录 A.15）：SQLite 的 `ALTER TABLE … RENAME` 会重解析依赖该名字的视图，所以视图不是"预期不破"，
   而是**让整表重建在 RENAME 那一步直接失败**；真正静默留下破视图的是 `drop_table`。
@@ -762,3 +766,44 @@ G13/G16/G17 各自暗示一种规则收紧（重建前依赖检查、`drop_table
 PG/MySQL 等的 `RENAME`/依赖检查语义**仍无证据**；② 未测**视图链**（视图套视图）、物化视图
 （SQLite 无此对象）、以及视图跨 schema 的情形；③ 未测"目标侧也存在同名视图"时的行为（只测了源侧）；
 ④ G14 是探测脚本按序跑完的结果，**向导实际的遇错即停策略**由 E6.1 的应用环路测试另行钉死。
+
+### A.16 E6.1 执行分派的应用环路（2026-09-26，Web 编排抽层 + 两端调用序列断言）
+
+A.15 的 G14 留下一句话没人接：`ddl_in_tx=false` 那一支失败后"数据困在临时表"是**探测脚本**跑出来的，
+向导真跑时到底停在哪、事务到底包住了什么，此前只被"计数对得上"级别的断言覆盖。本批把它补齐。
+
+**先订正一处事实错误（§7 原话）**：`pragmas_outside_tx` 是**「任一脚本含重建」**
+（`go/pkg/schemadiff/ddl.go:793`），不是恒真——SQLite 上不含重建的脚本（纯 `add_column`、`drop_index`）
+该位就是 `false` ⇒ **"整份脚本包进一个事务"是 SQLite 最常见的那一支**，
+旧文本"SQLite 两端能力位恒为 `true`，所以另一支验证不到"在以重建为中心的契约场景里成立、在一般脚本上不成立。
+
+**落点**：
+
+| 端 | 改动 | 新增证据 |
+|---|---|---|
+| Go | 零生产代码改动（`applyScriptSync` 原样） | `internal/tui/apply_dispatch_test.go` **4 份**：真 `:memory:` SQLite + 真实 Local 客户端外套一层**调用录音**（`recorder` 包装 `transport.Client`，只记序列、其余透传，不 mock 数据库） |
+| Web | `CompareSyncWizard.tsx` 的 `applyScript` 里那段分派+环路（85 行）**下沉**为 `lib/compareSync.ts` 的 `runScript(sc, connId, deps)`，组件只留接线（`setProgress` / `cancelRef` / `txIdRef` ↔ `ApplyDeps` 七个注入点） | `compareSync.test.ts` 新增 `describe('runScript')` **5 份**：假引擎带一本"账"（事务内语句先进 `pending`，`commit` 才落 `db`，`rollback` 丢掉 `pending`）⇒ 落地与否可断言，不是只看 `ran` |
+| Rust | 未动（环路仍在 `app.rs:3335` 的 `self.io` 闭包里，是同一逻辑的第三份拷贝） | —— 留给 E6.3 抽层，届时按同一本账补断言 |
+
+**四类断言（Go 与 Web 逐条同构，只有"库"是真的还是假的区别）**：
+
+| 分派 | 调用序列 | 落地状态 |
+|---|---|---|
+| `ddl_in_tx=true` + `pragmas_outside_tx=false`，第 2 条炸 | `begin \| tx:1 \| tx:2 \| rollback` | `ran=1` 但 `sqlite_master` 里**一条都没有**（撤销了已执行语句） |
+| `ddl_in_tx=false`，第 2 条炸 | `exec:1 \| exec:2`，**一次 `begin` 都没有** | 第 1 条**必须还在库里**（G14 的中间态形状） |
+| `ddl_in_tx=true` + `pragmas_outside_tx=true` | `exec:PRAGMA OFF \| begin \| tx:… \| commit \| exec:PRAGMA ON`，`begin` 恰好 1 次 | 四条全落地 |
+| 取消 / 回滚方向 | 取消：停在该条之前并整体 `rollback`；回滚方向跑的是 `statements ← rollback` 那份，`CREATE` 一条不得再出现 | 账上不留半成品 / 表真被删掉 |
+
+**唯一一处有意的行为差异**（Web 重构时不是纯搬运）：提交失败时**保留** `txIdRef`，
+让 `finishAndClose` 关窗前再兜一次回滚——原实现无条件清空，等于提交报错后放任服务端事务挂到超时。
+方向是更严，不是等价；记在这里以免日后被当成等价搬运。
+
+**门禁（本批）**：Go `go build` / `go vet` 干净、`go test ./internal/tui/` 绿（新增 4 份，
+`TestApplyScriptSync*` 共 5 份同跑）；Web `tsc --noEmit` 干净、vitest **163 绿**（158 → +5）、
+`eslint` 改动三文件无输出。Rust 侧零改动故未重跑。
+
+**A.16 未覆盖（如实披露）**：① **契约层**（走 HTTP `/api/transactions` 的两种分派各一条断言）仍未加——
+本批的两端证据分别是 Local transport 直连与前端假引擎，Remote 通路上这两种分派尚无端到端断言；
+② Web 的 `runScript` 只验过编排，**没有真发过 HTTP**（真线路由 E5.0 的双后端传输测试背书）；
+③ 提交阶段本身失败（`commit` 抛错 ⇒ 记失败但不回滚）这条分支两端都还没测；
+④ Rust GUI 的第三份拷贝仍无测试（E6.3）。

@@ -9,10 +9,12 @@ import {
   loadSyncState,
   planExecution,
   rebuildLikelyTables,
+  runScript,
   saveSyncState,
   selectedIds,
   summarizeScript,
   toggleEntry,
+  type ApplyDeps,
 } from './compareSync';
 
 const entry = (over: Partial<SchemaDiffEntry> & { id: string; op: SchemaDiffEntry['op']; phase: number }): SchemaDiffEntry => ({
@@ -183,5 +185,177 @@ describe('polydb.compareSync.v1', () => {
   it('勾选集不参与持久化', () => {
     saveSyncState({ ...loadSyncState(), sourceId: 'a' });
     expect(localStorage.getItem('polydb.compareSync.v1')).not.toContain('selected');
+  });
+});
+
+// ─── runScript：执行分派的应用环路（E6.1）───────────────────────
+// 假引擎带一本"账"：事务内的语句先进 pending，commit 才落 db，rollback 把 pending 丢掉。
+// 于是"已落地的语句到底会不会被事务撤销"成为可断言的事实，而不是只看 ran/failed 计数。
+function makeEngine(failOn: (sql: string) => boolean = () => false, cancelAfter: number | null = null) {
+  const calls: string[] = [];
+  const db: string[] = [];
+  let pending: string[] = [];
+  let attempted = 0;
+  const deps: ApplyDeps = {
+    execute: async (_id, sql) => {
+      calls.push(`exec:${sql}`);
+      if (failOn(sql)) throw new Error(`boom: ${sql}`);
+      db.push(sql);
+    },
+    begin: async () => {
+      calls.push('begin');
+      pending = [];
+      return 'tx-1';
+    },
+    executeInTx: async (_tx, sql) => {
+      calls.push(`tx:${sql}`);
+      if (failOn(sql)) throw new Error(`boom: ${sql}`);
+      pending.push(sql);
+    },
+    commit: async () => {
+      calls.push('commit');
+      db.push(...pending);
+      pending = [];
+    },
+    rollback: async () => {
+      calls.push('rollback');
+      pending = [];
+    },
+    cancelled: () => {
+      attempted++;
+      return cancelAfter !== null && attempted > cancelAfter;
+    },
+  };
+  return { deps, calls, db, landed: () => db.slice() };
+}
+
+const ddlScript = (over: Partial<DdlScript>): DdlScript => ({
+  statements: [],
+  rollback: [],
+  pragmas_outside_tx: false,
+  ddl_in_tx: true,
+  ...over,
+});
+
+describe('runScript', () => {
+  it('pragmas_outside_tx=false ⇒ 整份脚本一个事务，中途失败把已落地的语句一起撤销', async () => {
+    const e = makeEngine((sql) => sql.includes('e6_tx(b'));
+    const out = await runScript(ddlScript({
+      ddl_in_tx: true,
+      pragmas_outside_tx: false,
+      statements: [
+        stmt({ sql: 'CREATE TABLE e6_tx(a INTEGER);', phase: 50, table: 'e6_tx' }),
+        stmt({ sql: 'CREATE TABLE e6_tx(b INTEGER);', phase: 50, table: 'e6_tx' }),
+        stmt({ sql: 'CREATE TABLE e6_after(a INTEGER);', phase: 50, table: 'e6_after' }),
+      ],
+    }), 'c1', e.deps);
+
+    expect(e.calls).toEqual([
+      'begin',
+      'tx:CREATE TABLE e6_tx(a INTEGER);',
+      'tx:CREATE TABLE e6_tx(b INTEGER);',
+      'rollback',
+    ]);
+    expect(out).toMatchObject({ ran: 1, rolledBack: true, skipped: 1 });
+    expect(out.failed[0]).toMatchObject({ index: 1, table: 'e6_tx' });
+    // 关键：ran=1 不等于落地——事务回滚后账上必须一条都没有。
+    expect(e.landed()).toEqual([]);
+  });
+
+  it('ddl_in_tx=false ⇒ 一条事务都不开，失败留下中间态（与上一份断言互斥）', async () => {
+    const e = makeEngine((sql) => sql.includes('e6_seq(b'));
+    const out = await runScript(ddlScript({
+      ddl_in_tx: false,
+      statements: [
+        stmt({ sql: 'CREATE TABLE e6_seq(a INTEGER);', phase: 50, table: 'e6_seq' }),
+        stmt({ sql: 'CREATE TABLE e6_seq(b INTEGER);', phase: 50, table: 'e6_seq' }),
+        stmt({ sql: 'CREATE TABLE e6_seq2(a INTEGER);', phase: 50, table: 'e6_seq2' }),
+      ],
+    }), 'c1', e.deps);
+
+    expect(e.calls).toEqual([
+      'exec:CREATE TABLE e6_seq(a INTEGER);',
+      'exec:CREATE TABLE e6_seq(b INTEGER);',
+    ]);
+    expect(out).toMatchObject({ ran: 1, rolledBack: false, skipped: 1 });
+    expect(e.landed()).toEqual(['CREATE TABLE e6_seq(a INTEGER);']);
+  });
+
+  it('pragmas_outside_tx=true ⇒ 首尾 PRAGMA 在事务外，主体共享同一个事务', async () => {
+    const e = makeEngine();
+    const out = await runScript(ddlScript({
+      ddl_in_tx: true,
+      pragmas_outside_tx: true,
+      statements: [
+        stmt({ sql: 'PRAGMA foreign_keys=OFF;', phase: 0, table: '', entry_ids: [] }),
+        stmt({ sql: 'CREATE TABLE e6_w(a INTEGER);', phase: 50, table: 'e6_w' }),
+        stmt({ sql: 'CREATE INDEX ix_e6_w ON e6_w(a);', phase: 80, table: 'e6_w' }),
+        stmt({ sql: 'PRAGMA foreign_keys=ON;', phase: 255, table: '', entry_ids: [] }),
+      ],
+    }), 'c1', e.deps);
+
+    expect(e.calls).toEqual([
+      'exec:PRAGMA foreign_keys=OFF;',
+      'begin',
+      'tx:CREATE TABLE e6_w(a INTEGER);',
+      'tx:CREATE INDEX ix_e6_w ON e6_w(a);',
+      'commit',
+      'exec:PRAGMA foreign_keys=ON;',
+    ]);
+    expect(out).toMatchObject({ ran: 4, rolledBack: false, skipped: 0 });
+    expect(e.landed()).toEqual([
+      'PRAGMA foreign_keys=OFF;',
+      'CREATE TABLE e6_w(a INTEGER);',
+      'CREATE INDEX ix_e6_w ON e6_w(a);',
+      'PRAGMA foreign_keys=ON;',
+    ]);
+  });
+
+  it('取消 ⇒ 停在该条之前；主体在事务里时整体回滚，账上不留半成品', async () => {
+    const e = makeEngine(() => false, 1);
+    const out = await runScript(ddlScript({
+      ddl_in_tx: true,
+      pragmas_outside_tx: false,
+      statements: [
+        stmt({ sql: 'CREATE TABLE e6_c1(a INTEGER);', phase: 50, table: 'e6_c1' }),
+        stmt({ sql: 'CREATE TABLE e6_c2(a INTEGER);', phase: 50, table: 'e6_c2' }),
+        stmt({ sql: 'CREATE TABLE e6_c3(a INTEGER);', phase: 50, table: 'e6_c3' }),
+      ],
+    }), 'c1', e.deps);
+
+    expect(e.calls).toEqual(['begin', 'tx:CREATE TABLE e6_c1(a INTEGER);', 'rollback']);
+    expect(out.ran).toBe(1);
+    expect(out.rolledBack).toBe(true);
+    expect(out.failed[0].reason).toContain('已取消');
+    expect(e.landed()).toEqual([]);
+  });
+
+  it('回滚方向复用同一分派（组件传的是 { ...script, statements: script.rollback }）', async () => {
+    const sc = ddlScript({
+      pragmas_outside_tx: true,
+      statements: [
+        stmt({ sql: 'PRAGMA foreign_keys=OFF;', phase: 0, table: '', entry_ids: [] }),
+        stmt({ sql: 'CREATE TABLE e6_w(a INTEGER);', phase: 70, table: 'e6_w' }),
+        stmt({ sql: 'PRAGMA foreign_keys=ON;', phase: 255, table: '', entry_ids: [] }),
+      ],
+      rollback: [
+        stmt({ sql: 'PRAGMA foreign_keys=OFF;', phase: 0, table: '', entry_ids: [] }),
+        stmt({ sql: 'DROP TABLE e6_w;', phase: 70, table: 'e6_w' }),
+        stmt({ sql: 'PRAGMA foreign_keys=ON;', phase: 255, table: '', entry_ids: [] }),
+      ],
+    });
+    const e = makeEngine();
+    const out = await runScript({ ...sc, statements: sc.rollback }, 'c1', e.deps);
+
+    expect(e.calls).toEqual([
+      'exec:PRAGMA foreign_keys=OFF;',
+      'begin',
+      'tx:DROP TABLE e6_w;',
+      'commit',
+      'exec:PRAGMA foreign_keys=ON;',
+    ]);
+    expect(out.ran).toBe(3);
+    // 正向语句一条都没跑：回滚方向不得把 CREATE TABLE 再补一遍。
+    expect(e.calls.some((c) => c.includes('CREATE TABLE'))).toBe(false);
   });
 });

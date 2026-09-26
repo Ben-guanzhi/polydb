@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ConnectionInfo, DdlScript, DdlStatement, SchemaDiffEntry, SchemaDiffRequest } from '../api';
+import type { ConnectionInfo, DdlScript, SchemaDiffEntry, SchemaDiffRequest } from '../api';
 import * as api from '../lib/api';
 import {
   STEP_LABEL,
@@ -13,8 +13,8 @@ import {
   isComparableKind,
   loadSyncState,
   OP_LABEL,
-  planExecution,
   rebuildLikelyTables,
+  runScript,
   saveSyncState,
   selectedIds,
   summarizeScript,
@@ -190,91 +190,29 @@ export default function CompareSyncWizard({ open, onClose, connections, prefill 
   }, [diffReq, entries, gaps.length, patch, sel]);
 
   // ─── 执行编排（正向与回滚共用）────────────────────────────
-  const runStatement = useCallback(async (connId: string, s: DdlStatement, txId: string | null) => {
-    if (txId) await api.executeInTx(txId, { sql: s.sql, connection_id: connId });
-    else await api.executeQuery(connId, { sql: s.sql });
-  }, []);
-
   // 执行一份脚本：正向与回滚走同一条通道，调用方传哪份就跑哪份。
+  // 分派与失败语义都在 lib 的 runScript 里（可测），组件只负责接线与三个 ref 的状态。
   const applyScript = useCallback(async (sc: DdlScript): Promise<ApplyOutcome> => {
-    const out = emptyOutcome();
-    if (!source) return out;
+    if (!source) return emptyOutcome();
     const connId = source.id;
-    const plan = planExecution(sc);
     setProgress({ done: 0, total: sc.statements.length });
     cancelRef.current = false;
-
-    // 分派（behavior.md §15.4）：
-    //   ddl_in_tx + pragmas_outside_tx ⇒ 首尾 PRAGMA 事务外跑，主体包一个事务；
-    //   ddl_in_tx=false                ⇒ 该方言 DDL 会隐式提交，全脚本逐条跑（失败留中间态）。
-    const steps: { stmt: DdlStatement; inTx: boolean }[] = [];
-    if (plan.wrapInTx && sc.pragmas_outside_tx) {
-      if (plan.pragmaHead) steps.push({ stmt: plan.pragmaHead, inTx: false });
-      for (const s of plan.body) steps.push({ stmt: s, inTx: true });
-      if (plan.pragmaTail) steps.push({ stmt: plan.pragmaTail, inTx: false });
-    } else {
-      for (const s of sc.statements) steps.push({ stmt: s, inTx: plan.wrapInTx });
-    }
-
-    const fail = (index: number, s: DdlStatement, e: unknown): void => {
-      out.failed.push({
-        index,
-        sql: s.sql,
-        phase: s.phase,
-        table: s.table,
-        reason: toMsg(e),
-        entry_ids: s.entry_ids,
-      });
-      out.skipped = Math.max(0, steps.length - index - 1);
-    };
-
-    let tx: string | null = null;
-    for (let i = 0; i < steps.length; i++) {
-      const { stmt, inTx } = steps[i];
-      if (cancelRef.current) {
-        fail(i, stmt, new Error('已取消：本条及剩余语句未执行'));
-        break;
-      }
-      try {
-        if (inTx && !tx) {
-          const begun = await api.beginTransaction(connId);
-          tx = begun.id;
-          txIdRef.current = begun.id;
-        }
-        // 主体跑完接着是事务外 PRAGMA：先提交，PRAGMA 不能进事务
-        if (!inTx && tx) {
-          await api.commitTransaction(tx);
-          txIdRef.current = null;
-          tx = null;
-        }
-        await runStatement(connId, stmt, inTx ? tx : null);
-        out.ran++;
-        setProgress({ done: out.ran, total: steps.length });
-      } catch (e) {
-        fail(i, stmt, e);
-        break;
-      }
-    }
-
-    if (tx) {
-      if (out.failed.length) {
-        try {
-          await api.rollbackTransaction(tx);
-          out.rolledBack = true;
-          txIdRef.current = null;
-        } catch { /* 回滚本身失败：留着 tx id 让 finishAndClose 再兜一次 */ }
-      } else {
-        try {
-          await api.commitTransaction(tx);
-        } catch (e) {
-          const last = steps[steps.length - 1];
-          fail(steps.length - 1, last.stmt, e);
-        }
-        txIdRef.current = null;
-      }
-    }
-    return out;
-  }, [runStatement, source]);
+    return runScript(sc, connId, {
+      execute: async (id, sql) => { await api.executeQuery(id, { sql }); },
+      begin: async (id) => {
+        const begun = await api.beginTransaction(id);
+        txIdRef.current = begun.id;
+        return begun.id;
+      },
+      executeInTx: async (txId, sql) => { await api.executeInTx(txId, { sql, connection_id: connId }); },
+      commit: async (txId) => { await api.commitTransaction(txId); txIdRef.current = null; },
+      // 回滚失败时不清 txIdRef：留给 finishAndClose 再兜一次。
+      rollback: async (txId) => { await api.rollbackTransaction(txId); txIdRef.current = null; },
+      onProgress: (done, total) => setProgress({ done, total }),
+      cancelled: () => cancelRef.current,
+      errText: toMsg,
+    });
+  }, [source]);
 
   const forwardSummary = useMemo(() => (script ? summarizeScript(script.statements) : null), [script]);
   const rollbackSummary = useMemo(() => (script ? summarizeScript(script.rollback) : null), [script]);
