@@ -866,8 +866,13 @@ func SelectEntries(source, target *Snapshot, plan []Entry, selected []string) ([
 		want[id] = true
 	}
 	inPlan := map[string]bool{}
-	for _, e := range plan {
+	// 两个索引一次建好：id ⇒ 是否在计划里，表键 ⇒ 该表全部条目 id（按计划顺序入桶）。
+	idsByTable := map[string][]string{}
+	for i := range plan {
+		e := &plan[i]
 		inPlan[e.ID] = true
+		k := lowerASCII(e.Table)
+		idsByTable[k] = append(idsByTable[k], e.ID)
 	}
 	var stale []string
 	seenStale := map[string]bool{}
@@ -906,9 +911,9 @@ func SelectEntries(source, target *Snapshot, plan []Entry, selected []string) ([
 		}
 		seen[k] = true
 		var missing []string
-		for j := range plan {
-			if lowerASCII(plan[j].Table) == k && !want[plan[j].ID] {
-				missing = append(missing, plan[j].ID)
+		for _, id := range idsByTable[k] {
+			if !want[id] {
+				missing = append(missing, id)
 			}
 		}
 		if len(missing) > 0 {

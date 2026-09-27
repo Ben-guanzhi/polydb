@@ -763,6 +763,14 @@ func TestSelectEntriesRejectsStaleIDs(t *testing.T) {
 	eq(t, msg,
 		"勾选的条目不在当前比对计划里：t/nope/drop_column、t/ghost/add_index（请重新比对后再执行）",
 		"过期勾选")
+	// 同一个过期 id 重复出现只在文案里出现一次（与 Rust select_entries_rejects_stale_ids 同断言）。
+	_, err = SelectEntries(src, tgt, plan,
+		[]string{"t/ghost/add_index", "t/ghost/add_index", "t/nope/drop_column"})
+	code, msg = protoErr(t, err)
+	eq(t, code, protocol.ErrInvalidParam, "错误码")
+	eq(t, msg,
+		"勾选的条目不在当前比对计划里：t/ghost/add_index、t/nope/drop_column（请重新比对后再执行）",
+		"过期勾选去重")
 }
 
 func TestSelectEntriesRequiresWholeGroupForRebuiltTables(t *testing.T) {
