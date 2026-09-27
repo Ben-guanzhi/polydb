@@ -1532,11 +1532,13 @@ Go 侧 `select_vectors_test.go` 在包内，直接调 `needsRebuild`。
 复核用的 `grep -E "^test result"` 计数 = **41 行、sum 181、failed sum 0**，与 A.22 的 179 差 2 恰好是本批新增两份，
 故上表采用 181；③ 三端 UI 零改动 ⇒ GUI/TUI/Web 向导未肉眼验证。
 
-**净账**：`git diff --numstat` = 存量代码只有 **`go/pkg/schemadiff/ddl_vectors_test.go` +10 / −4（1 文件，纯测试）**；
-新增 `go/pkg/schemadiff/select_vectors_test.go` 417 行、`rust/crates/schema-diff/tests/select_vectors.rs` 268 行、
-`test/schema-select-vectors/` 18 份 949 行。**规则层（`ddl.go` / `ddl.rs`）与 `spec/` 零字节改动**——
-这批没碰任何生产代码，全部是断言与数据。
-区间端点：**父提交 `3ed3be0`（A.23 Go 查桶）→ 本批（本行所在提交）**；
+**净账**（`git show --numstat 6e2348f`，本批主体提交）：22 个文件 **+1,809 / −4**，逐笔对得上——
+`test/schema-select-vectors/` 18 份 **+949**、`go/pkg/schemadiff/select_vectors_test.go` **+417**、
+`rust/crates/schema-diff/tests/select_vectors.rs` **+268**、本附录 **+165**，
+存量代码只有 **`go/pkg/schemadiff/ddl_vectors_test.go` +10 / −4（1 文件，纯测试）**——
+把只认 `expected` 的定点替换器泛化成 `replaceJSONValue`，原函数退化成一行包装。
+**规则层（`ddl.go` / `ddl.rs`）与 `spec/` 零字节改动**：这批没碰任何生产代码，全部是断言与数据。
+区间端点：**父提交 `3ed3be0`（A.23 Go 查桶）→ `6e2348f`（本批主体）**；
 本批之后的补账只动本附录，用 `git log --oneline 3ed3be0..HEAD` 列出、`git show --numstat <hash>` 逐笔复原。
 
 **遗留（下一批再说，本批没动）**：`test/schema-ddl-vectors/d22_stale_selected_id.json` 与
