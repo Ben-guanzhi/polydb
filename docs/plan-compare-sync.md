@@ -1544,9 +1544,97 @@ Go 侧 `select_vectors_test.go` 在包内，直接调 `needsRebuild`。
 **遗留（下一批再说，本批没动）**：`test/schema-ddl-vectors/d22_stale_selected_id.json` 与
 `d23_rebuild_group_must_be_selected_whole.json` 的 `name` 字段都写成了 `d14_rebuild_group_absorbs_same_table`
 （E3.3 时期的复制粘贴，两份语料的 name 重复且与文件名不符）。它只进测试失败消息、不进断言，
-但会误导读语料的人；改它要同时重跑两端 DDL 语料，属于独立一笔账。
+但会误导读语料的人；改它要同时重跑两端 DDL 语料，属于独立一笔账。**→ 已由 A.25 还清。**
 
 **至此 O1 系列三条债清完**：A.22（Rust 两处 Θ(n²)/Θ(R×P) 归约）→ A.23（Go 同形病灶查桶）→
 A.24（勾选校验的跨语言共享语料）。规则层现在的状态是：
 **算法同形 + 渐进同阶 + 行为有 18 份共享数据钉住**，同形项里剩下的都在方言扩展之后
 （MySQL/PG/MSSQL/Oracle 四套 DDL 生成器尚无语料，勾选层只有 SQLite 口径）。
+
+---
+
+### A.25 O1.2 补账：三套语料的 `name` 与文件名一致性（2026-09-27，**零规则代码 / 零 spec 变更：2 份语料的元数据 + 六处加载器各一条断言**）
+
+A.24 的遗留只点了 d22/d23 两份。开工第一件事不是改那两行，而是**先量化范围**——
+"两份写错"这个说法本身可能就是错的，也许是一批、也许三套都有。
+
+**量化（60 份语料全查，2026-09-27 实测）**
+
+| 语料目录 | 份数 | `name` ≠ 文件名（去 `.json`） | 目录内重复 `name` |
+|---|---|---|---|
+| `test/schema-diff-vectors` | 16 | 0 | 无 |
+| `test/schema-ddl-vectors` | 26 | **2**（d22、d23） | **1 组**：`d14_rebuild_group_absorbs_same_table` 出现 3 次 |
+| `test/schema-select-vectors` | 18 | 0 | 无 |
+| 合计 | **60** | **2** | 58/60 本就一致 |
+
+所以 A.24 那句话是准的：病灶确实只在 DDL 那两份。但**只有查过才敢说它准**。
+
+顺手把同一套口径扩到语料里另一个纯人读字段 `note`（同一批复制粘贴最可能一起带过来的东西）：
+
+| 语料目录 | 份数 | 去重后 note 组数 | note 与他份逐字相同 |
+|---|---|---|---|
+| `test/schema-diff-vectors` | 16 | 16 | 无 |
+| `test/schema-ddl-vectors` | 26 | 24 | **1 组 = d14、d22、d23 三份共用同一段** |
+| `test/schema-select-vectors` | 18 | 18 | 无 |
+
+命中的还是那三份文件——同一次复制粘贴同时留了 `name` 和 `note` 两处漂移。
+d22/d23 的 `note` 描述的是 **d14 的 golden 输出**（"整组语句输出在第一个条目位置、entry_ids 吸收四条…"），
+而这两份**根本不出脚本**（都在勾选层报错、`expected` 为空）⇒ 读者按 note 去找断言会完全找错方向。
+`note` 比 `name` 更"没人管"：Go 侧结构体有 `Note` 字段但从不用，Rust 侧 `Vector` 连这个字段都没声明（serde 直接忽略）
+⇒ 它连进失败消息都不会，纯靠人读。
+
+**为什么它能活这么久**：`name` 在六处加载器里只用来拼失败消息，**不进任何断言**
+⇒ 写错永远不会让测试红。反过来，也正因为它不进断言，改它对行为**零影响**（这是本批"行为等价"的根据）。
+语料生产器（Go 两个 writer、Rust `regen_expected.rs`）只回写 `expected`，`name` 由人手写 ⇒
+漂移没有自动出口，只能补在**读取侧**。
+
+**处置（四件事）**
+
+1. 两行语料改回与文件名一致：`d22_stale_selected_id.json`、`d23_rebuild_group_must_be_selected_whole.json`；
+   同时把这两份的 `note` 重写成各自真正钉的东西（d22 = stale **优先于**整组校验、d23 = 缺组文案按**计划序**列举），
+   d14 的 note 原样保留（那才是它描述的输出）。
+2. 六处加载器各挂一条自检：Go `checkVectorName`（写在 `vectors_test.go`，同包三处共用一份），
+   Rust 三份集成测试各一份 `check_name`（Rust 的 `tests/*.rs` 每份是独立 crate，helper 无法共享 ⇒
+   宁可重复 9 行，也不把测试工具塞进生产 crate 扩大 API 面）。
+3. **一度写进两端的"目录内 name 查重"断言，当场删掉**。理由是它恒不可达：
+   文件名在目录内本就唯一，而 `name == 去 .json 的文件名` 对每份都成立 ⇒ name 必然唯一。
+   实测印证（见下面反证第二组）：让两份语料顶同一个名字，两端红的仍然是「与文件名不符」这条，
+   且只报那一份不合法的文件。**d22/d23 的"重复"从来只是"≠ 自己文件名"的副产物**，一条断言已经全收。
+4. `note` **刻意不加门禁**：它不参与任何断言、也没有"正确答案"可机检（措辞是人的事），
+   把重复 note 一律判红会误伤"同一规则的第二份用例本就同因"这种正当写法。这次只修数据、立字为据。
+
+**本批门禁**（2026-09-27，工作树 = 2 份语料的 `name`+`note` + 6 处加载器 + 本附录）：
+
+| 项 | 命令 | 结果 |
+|---|---|---|
+| Go 格式 | 三份改动文件与 `gofmt` 输出比对（本批三份本就是 LF，无需剥 CR） | 全部已格式化（仍禁 `gofmt -w`，见 A.21） |
+| Go 编译/静态 | `go build ./...`、`go vet ./pkg/schemadiff/` | 均 exit 0、无输出 |
+| Go 三套语料 | `go test -count=1 -run 'TestSharedVectors\|TestSharedDDLVectors\|TestSharedSelectVectors' ./pkg/schemadiff -v` | **6 PASS**（每套"匹配期望"+"覆盖度"各一份） |
+| Go 全量 | `go test -count=1 ./...` | **13 包全 ok、0 FAIL** ⇒ 与 A.21–A.24 基线同数 |
+| Rust 单 crate | `cargo test -p polydb-schema-diff` | **46 passed / 0 failed**（40 lib + 2 diff + 2 DDL + 2 勾选）⇒ 与 A.24 同数 |
+| Rust 全量 | `cargo test --workspace` | **181 passed / 0 failed**（41 个 result 行）⇒ **与 A.24 基线分毫不差**，本批不新增测试函数，只往既有加载器里加断言 |
+| Rust 格式/哨兵 | `cargo fmt --all --check`、`cargo clippy -p polydb-schema-diff --all-targets -- -D warnings` | 均 exit 0、零警告 |
+| 协议漂移 | `go run . ts --check` / `go run . check` | `TS types up to date` / `protocol check OK: 64 spec types vs rust + go` ⇒ 零 spec 变更 |
+| 契约对拍 | `cargo build -p polydb-server` 后 `cd test/contract && go test -count=1 ./...` | 整包 **ok / 261.7s / 0 FAIL**（A.24 那次 265.7s）⇒ 与基线一致 |
+
+**新护栏不是恒真？两组反证实测**（做完立刻按备份字节还原，md5 逐一比对前后一致）：
+
+| 反证 | 结果 |
+|---|---|
+| 三套语料各挑一份把 `name` 改成 `<stem>_bei_gai_huai`（`01_identical` / `d02_create_table` / `s01_all_selected_null`） | **六个方向全红**：Go 三份测试各 FAIL 且消息点名该文件、Rust 三套各 2 FAILED（匹配 + 覆盖度，因为它们共用同一个 `load_all`）。还原后双端绿 |
+| 让两份语料顶**同一个**名字（s02 的 `name` 写成 s03 的合法名） | 两端都只红在 s02，报的是「与文件名不符」⇒ 印证「查重」分支恒不可达，删得对 |
+| 反证涉及的文件 | `abaefa65` / `79e54c4e` / `ef368cb1` / `65af02dc` / `84858e7c` 五份 md5 改前改后逐一对齐 |
+
+**本批未取/未验证项（照例标出）**：① `golangci-lint` v2 本机仍不在 PATH（§7 第 ⑦ 条原样成立，
+仍是唯一一直没跑的门禁）；② 契约这轮**没加 `-v`** ⇒ 顶层/子测试的 PASS 行数（基线 23 / 66）本批未重数，
+只拿到整包 ok；③ Web 未跑（`web/` 零字节改动，A.24 基线 163 仍有效）；④ 三端 UI 零改动 ⇒ 向导未肉眼验证。
+
+**净账**（主体提交 `901879a`，`git show --numstat 901879a` 复原）：**8 个文件 +75 / −6**——语料 **2 份各 +2/−2**（`name` 与 `note` 各一行），
+Go 三份测试 **+16 / −0**（`vectors_test.go` +14 含 helper 与 `strings` import，另两份各 +1 处调用），
+Rust 三份测试 **+55 / −2**（每份一个 13 行 `check_name` + `load_all` 由裸 `.map()` 改成先解析再校验），
+外加本附录（含 A.24 遗留那句的指向）。`spec/`、规则层（`ddl.go`/`ddl.rs`/`schemadiff.go`）、三端前端**零字节改动**：
+一笔账从头到尾没碰过生产代码，改的是数据与断言。
+
+**读语料的人现在得到的保证**：任一目录下 `name` 与文件名不符 ⇒ 两端测试立刻红，并点名是哪一份文件。
+O1 系列的"证据侧"到此闭合；下一笔真正的增量仍在**方言扩展**（PG/MySQL 的 `ddl_in_tx` 真值 + 依赖目录），
+那需要另行拍板。
