@@ -907,11 +907,22 @@ pub fn select_entries(
     plan: &[Entry],
     selected: &[String],
 ) -> CoreResult<Vec<Entry>> {
-    let want: BTreeSet<String> = selected.iter().cloned().collect();
-    let mut stale: Vec<String> = Vec::new();
+    let want: BTreeSet<&str> = selected.iter().map(String::as_str).collect();
+    // 两个索引一次建好：id ⇒ 是否在计划里，表键 ⇒ 该表全部条目 id（按计划顺序入桶）。
+    let mut in_plan: BTreeSet<&str> = BTreeSet::new();
+    let mut ids_by_table: BTreeMap<String, Vec<&str>> = BTreeMap::new();
+    for e in plan {
+        in_plan.insert(e.id.as_str());
+        ids_by_table
+            .entry(lower_ascii(&e.table))
+            .or_default()
+            .push(e.id.as_str());
+    }
+    let mut stale: Vec<&str> = Vec::new();
+    let mut seen_stale: BTreeSet<&str> = BTreeSet::new();
     for id in selected {
-        if !plan.iter().any(|e| &e.id == id) && !stale.iter().any(|s| s == id) {
-            stale.push(id.clone());
+        if !in_plan.contains(id.as_str()) && seen_stale.insert(id.as_str()) {
+            stale.push(id.as_str());
         }
     }
     if !stale.is_empty() {
@@ -922,7 +933,10 @@ pub fn select_entries(
     }
     let src = table_map(source);
     let tgt = table_map(target);
-    let picked: Vec<&Entry> = plan.iter().filter(|e| want.contains(&e.id)).collect();
+    let picked: Vec<&Entry> = plan
+        .iter()
+        .filter(|e| want.contains(e.id.as_str()))
+        .collect();
     let mut rebuild: BTreeSet<String> = BTreeSet::new();
     for e in &picked {
         let k = lower_ascii(&e.table);
@@ -937,11 +951,10 @@ pub fn select_entries(
         if !rebuild.contains(&k) || !seen.insert(k.clone()) {
             continue;
         }
-        let missing: Vec<String> = plan
-            .iter()
-            .filter(|p| lower_ascii(&p.table) == k && !want.contains(&p.id))
-            .map(|p| p.id.clone())
-            .collect();
+        let mut missing: Vec<&str> = Vec::new();
+        if let Some(ids) = ids_by_table.get(&k) {
+            missing.extend(ids.iter().copied().filter(|id| !want.contains(id)));
+        }
         if !missing.is_empty() {
             return Err(invalid(format!(
                 "表 {} 需要整表重建，同表变更必须整组勾选：缺少 {}",
@@ -1872,6 +1885,19 @@ mod tests {
         assert_eq!(
             err.message,
             "勾选的条目不在当前比对计划里：t/nope/drop_column、t/ghost/add_index（请重新比对后再执行）"
+        );
+        // 同一失效 id 重复勾选：按首次出现去重，只点一次名
+        let dup = select_entries(
+            &src,
+            &tgt,
+            &plan,
+            &["t/ghost/add_index".into(), "t/ghost/add_index".into()],
+        )
+        .unwrap_err()
+        .to_protocol();
+        assert_eq!(
+            dup.message,
+            "勾选的条目不在当前比对计划里：t/ghost/add_index（请重新比对后再执行）"
         );
     }
 
