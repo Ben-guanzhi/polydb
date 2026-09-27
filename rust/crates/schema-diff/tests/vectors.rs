@@ -27,6 +27,21 @@ fn vectors_dir() -> PathBuf {
         .expect("向量目录缺失")
 }
 
+/// 语料自检：`name` 必须等于文件名（去 .json）。
+/// 与 Go 侧 `checkVectorName`、另两套 Rust 加载器同规则。
+fn check_name(path: &Path, name: &str) {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .expect("向量文件名异常");
+    assert_eq!(
+        name,
+        stem,
+        "{} 的 name 与文件名不符（实得 {name}）",
+        path.display()
+    );
+}
+
 fn load_all() -> Vec<(PathBuf, Vector)> {
     let dir = vectors_dir();
     let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
@@ -42,6 +57,7 @@ fn load_all() -> Vec<(PathBuf, Vector)> {
             let text = std::fs::read_to_string(&p).expect("读取向量文件失败");
             let v: Vector = serde_json::from_str(&text)
                 .unwrap_or_else(|e| panic!("{} 解析失败：{e}", p.display()));
+            check_name(&p, &v.name);
             (p, v)
         })
         .collect()

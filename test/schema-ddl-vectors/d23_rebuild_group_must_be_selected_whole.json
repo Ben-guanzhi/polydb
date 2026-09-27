@@ -1,6 +1,6 @@
 {
-  "name": "d14_rebuild_group_absorbs_same_table",
-  "note": "同一张表上四种动作混合：alter_column(类型) 触发重建，而 drop_index / add_column / add_index 单独都不必重建。整组语句输出在该表**第一个**条目的位置（相位 20，不是 alter 的 70），entry_ids 吸收该表全部四条；组内首条带重建告警，整数主键追加 AUTOINCREMENT 告警，新增非空无默认列追加 W_REBUILD_NEW_NOT_NULL；因 alter 带 type 维度，整组标 non_reversible",
+  "name": "d23_rebuild_group_must_be_selected_whole",
+  "note": "复用 d14 的同一对快照，只勾那组里的 `t/qty/alter_column` 一条 ⇒ 报「表 t 需要整表重建，同表变更必须整组勾选」。缺的三条按**计划序**列举（`t/idx_qty/drop_index` 相位 20 → `t/name/add_column` 相位 60 → `t/idx_name/add_index` 相位 80），不是勾选序。表名用显示大小写、id 用「、」连接。它钉缺组分支与这个列举顺序。",
   "options": { "ignore_defaults": false, "select_destructive": true },
   "source": {
     "kind": "sqlite",

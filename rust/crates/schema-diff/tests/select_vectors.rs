@@ -45,6 +45,21 @@ fn vectors_dir() -> PathBuf {
         .expect("勾选向量目录缺失")
 }
 
+/// 语料自检：`name` 必须等于文件名（去 .json）。
+/// 与 Go 侧 `checkVectorName`、`ddl_vectors.rs` 的 `check_name` 同规则。
+fn check_name(path: &Path, name: &str) {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .expect("向量文件名异常");
+    assert_eq!(
+        name,
+        stem,
+        "{} 的 name 与文件名不符（实得 {name}）",
+        path.display()
+    );
+}
+
 fn load_all() -> Vec<Vector> {
     let dir = vectors_dir();
     let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
@@ -58,7 +73,10 @@ fn load_all() -> Vec<Vector> {
         .into_iter()
         .map(|p| {
             let text = std::fs::read_to_string(&p).expect("读取勾选向量文件失败");
-            serde_json::from_str(&text).unwrap_or_else(|e| panic!("{} 解析失败：{e}", p.display()))
+            let v: Vector = serde_json::from_str(&text)
+                .unwrap_or_else(|e| panic!("{} 解析失败：{e}", p.display()));
+            check_name(&p, &v.name);
+            v
         })
         .collect()
 }

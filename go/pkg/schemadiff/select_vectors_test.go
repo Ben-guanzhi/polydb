@@ -67,6 +67,7 @@ func loadSelectVectors(t *testing.T) []selectVector {
 		if err := json.Unmarshal(raw, &v); err != nil {
 			t.Fatalf("解析 %s 失败：%v", p, err)
 		}
+		checkVectorName(t, p, v.Name)
 		out = append(out, v)
 	}
 	return out

@@ -1,6 +1,6 @@
 {
-  "name": "d14_rebuild_group_absorbs_same_table",
-  "note": "同一张表上四种动作混合：alter_column(类型) 触发重建，而 drop_index / add_column / add_index 单独都不必重建。整组语句输出在该表**第一个**条目的位置（相位 20，不是 alter 的 70），entry_ids 吸收该表全部四条；组内首条带重建告警，整数主键追加 AUTOINCREMENT 告警，新增非空无默认列追加 W_REBUILD_NEW_NOT_NULL；因 alter 带 type 维度，整组标 non_reversible",
+  "name": "d22_stale_selected_id",
+  "note": "复用 d14 的同一对快照（同表混合四种动作，`t/qty/alter_column` 改类型 ⇒ 整表重建），但勾选里塞了一个计划中不存在的 `t/ghost/drop_index` ⇒ 勾选校验先报「条目不在当前比对计划里」，generate 根本跑不到。它钉两件事：① stale 分支**优先于**整组校验（此处整组也确实没勾全，报的却是 stale）；② 失效 id 在文案里的列举口径。期望值是 error_code/error_message，`expected` 为空。",
   "options": { "ignore_defaults": false, "select_destructive": true },
   "source": {
     "kind": "sqlite",

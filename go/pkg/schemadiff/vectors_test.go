@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/polydb/polydb/pkg/protocol"
@@ -20,6 +21,18 @@ type vector struct {
 	Expected     []Entry  `json:"expected"`
 	ErrorCode    string   `json:"error_code"`
 	ErrorMessage string   `json:"error_message"`
+}
+
+// checkVectorName 钉住语料自检：`name` 必须等于文件名（去 .json）。
+// name 只进失败消息，写错**不会**让任何断言变红，只会把排查引到另一份文件上
+// ——d22/d23 曾长期顶着 d14 的 name，就是这条断言缺位留下的。
+// 文件名在目录内本就唯一，所以「等于自己文件名」已经蕴含「语料内 name 不重复」，无需另设查重。
+func checkVectorName(t *testing.T, fileName, name string) {
+	t.Helper()
+	file := filepath.Base(fileName)
+	if want := strings.TrimSuffix(file, ".json"); name != want {
+		t.Fatalf("%s 的 name 写成 %q，与文件名不符", file, name)
+	}
 }
 
 func loadVectors(t *testing.T) []vector {
@@ -42,6 +55,7 @@ func loadVectors(t *testing.T) []vector {
 		if err := json.Unmarshal(raw, &v); err != nil {
 			t.Fatalf("解析 %s 失败：%v", e.Name(), err)
 		}
+		checkVectorName(t, e.Name(), v.Name)
 		out = append(out, v)
 	}
 	if len(out) < 15 {
