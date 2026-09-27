@@ -249,7 +249,10 @@ E3 收口时 `check` 与 TS 重生成均零漂移（`web/src/api/index.ts` +37 �
   `ddl_in_tx=false` 一支 SQLite **结构上产不出**（引擎 DDL 可在事务里，能力位恒 `true`），
   只能等有真实 PG/MySQL/MSSQL/Oracle 实例时补；② GUI"按键灌进真窗口"的端到端（GPUI 无测试基建）；
   ③ **B 档的依赖可见**：警告只能说"本库有这些视图、可能有破的"，判不出具体哪一个（§8-8 已明确不做，
-  要做就得解析 SQL 猜——SQLite 无依赖目录）；④ 4 种方言 + Redis 的真跑，含**契约层的 501 从未打出**；
+  要做就得解析 SQL 猜——SQLite 无依赖目录）；④ 4 种方言 + Redis 的真跑，含**契约层的 501 从未打出**
+  （**PG 一支已由 F0.1/F0.2 从"取不到证据"变成"只差引擎"**：Go 12 点 + Rust 6 点探测已就位，
+  `POLYDB_TEST_PG` 一给就跑，见附录 A.26；剩下的结构性缺口是 MySQL/MSSQL/Oracle/Redis
+  连取证点清单都没有，记 F0.4）；
   ⑤ 触发器仍在盲区（A.11 G4：重建静默丢触发器，快照不含触发器，E6.5 A 档范围外）；
   ⑥ E6.5 两条新视图警告的**渲染未肉眼验证**（文案近 90 字，窄面板下换行靠通读）；
   ⑦ `golangci-lint` v2 本机未安装 ⇒ Go lint 步骤恒跳过（E6.6 复核：确实仍不在 PATH）。
@@ -266,6 +269,8 @@ E3 收口时 `check` 与 TS 重生成均零漂移（`web/src/api/index.ts` +37 �
 3. `generic_type` 的归一命名表由谁定：以 PG 命名为准、还是自创中立名（`int64`/`text`/`timestamp`…）？
    **E3 不需要答案**——本轮生成器只覆盖 SQLite，语句直接渲染驱动原 `data_type` 文本；
    该项与 §8-7 绑定，等有可实测的方言实例再定。
+   **→ F0.1/F0.2 已把"等"变成有抓手的等**（附录 A.26 P10）：PG 侧一份 14 种类型的 `format_type` 原始文本探测已就位，
+   引擎到位跑一次就拿到定名表的输入。**仍待定**，但不再需要现场设计。
 4. ~~差异条目里"仅目标库存在"要不要包含**数据不可逆**提示~~ **已定（2026-09-26，E4 落地即此）**：
    `destructive` 条目红标 + 默认不勾选，勾选初值直接采用服务端回值（前端不自造规则）；
    另有「破坏性动作默认勾选」开关供显式放开。见附录 A.13。
@@ -279,9 +284,17 @@ E3 收口时 `check` 与 TS 重生成均零漂移（`web/src/api/index.ts` +37 �
 6. ~~**SQLite 的比对形态**~~ **已定（2026-09-25）：只做"两个连接 / 两个文件"**，SQLite 的 `schema` 参数固定 `main`。
    依据：驱动层 `list_tables` 忽略 `schema` 入参、`PRAGMA table_info` 不支持 schema 前缀（E2.0 实测，附录 A.9 F6）；
    而 ATTACH 只在单连接上有效，与现有连接池语义冲突。**"同库多 schema"记为 v1.1 待办**，spec 里 `schema` 保持可选。
+   **→ F0.2 已备好 v1.1 的开工判据**（附录 A.26 P11，双端各一份探测）：PG 的 `list_tables` 读代码是
+   `WHERE n.nspname = $1`，但"同库多 schema 可行"要**两头**成立——探测 schema 里查得到 **且** `public` 里查不到。
+   本条从"没探"变成"跑一次就知道"。
 7. ~~**其余 4 个方言的 `on_update`/`on_delete` 与 `generic_type` 何时填**~~ **已定（2026-09-25）：随 E3 / 有实例环境一起补**。
    理由：本轮只补了 SQLite，因为 SQLite 有 bundled 真引擎可实测；PG/MySQL/MSSQL/Oracle 现在补只能凭文档盲填、
    契约测试全 soft-skip，等于"数字上已实现、实际未验证"。与 §8-3 的 `generic_type` 命名表定案绑定推进。
+   **F0 进展（2026-09-27，附录 A.26）**：本条的"缺口在哪一头"已经**由读代码确认**——
+   Go 的 `dbpostgres.ListForeignKeys` 连 `confupdtype` 都没查进 SELECT，Rust 的 `db-postgres` 直接 `on_update: None`
+   ⇒ **缺的是读侧，不是引擎**（PG 目录肯定给得出）。补读 SQL 是十分钟的事，但按本条定案**仍然不做盲填**，
+   等 P9 探测（双端各一份，已就位）在有引擎时确认回读形状，再一次性补两端 + 语料。
+   **MySQL/MSSQL/Oracle 三家的取证点清单仍未立**（本批只立了 PG；MySQL 的结构差异见 A.26 末尾"为什么不做 MySQL"）。
 8. ~~**快照要不要让生成器"看见"视图？**~~ **已定（2026-09-26，E6.5 落地 A 档：名字可见 + 粗粒度警告）**。
    A.15 的 G13/G16/G17 是同一条盲区的三个面：重建被依赖视图挡住、删表静默留下破视图、临时名撞上同名视图。
    落地的三件事：① 采集层不再丢弃视图（快照只带**名字与类型**、列/索引/外键留空，**不发元数据查询**
@@ -1637,4 +1650,125 @@ Rust 三份测试 **+55 / −2**（每份一个 13 行 `check_name` + `load_all`
 
 **读语料的人现在得到的保证**：任一目录下 `name` 与文件名不符 ⇒ 两端测试立刻红，并点名是哪一份文件。
 O1 系列的"证据侧"到此闭合；下一笔真正的增量仍在**方言扩展**（PG/MySQL 的 `ddl_in_tx` 真值 + 依赖目录），
-那需要另行拍板。
+那需要另行拍板。**→ 已拍板并开工：附录 A.26（F0 方言取证基建，PG 侧 12 + 6 点探测）。**
+
+### A.26 F0 方言取证基建（2026-09-27，**零规则代码 / 零 spec 变更：只加探测测试 + 一份取证清单**）
+
+A.25 收口时留下的下一笔增量是**方言扩展**。开工前量化：本机 5432/3306 **无监听**（`netstat` 无一行命中）、
+PATH 里没有 `docker` ⇒ 现在能交付的只有**取证基建**，真值要等引擎到位。经拍板：
+① 引擎由用户起一台本地 PG；② 本批范围＝**取证基建先行**。所以本批的产物是**一套会在 PG 到位时自己开口说话的探测**，
+不是任何规则改动。
+
+**取证点从哪来**：§8 里所有「等有可实测的方言实例再定」的欠账（§8-3 `generic_type` 命名表、§8-7 四方言
+`on_update`/`on_delete`、§8-6 同库多 schema），加上 A.15/A.20 关闭 SQLite 视图盲区时留下的三个"只在 SQLite 上验过"的
+外推假设——A.11/A.15 那 17 条 G 项事实**全部**是 SQLite 实测，PG 上一条都没对过，
+所以它们现在是**外推**而不是结论。
+
+**12 点清单**（P1–P12）：
+
+| 点 | 探什么 | 要钉进规则层的哪条口径 | 分档 | 回填去处 |
+|---|---|---|---|---|
+| P1 | DDL 进事务、整体回滚是否成立（事务内可见 / 回滚后连接池视角消失） | `Script.ddl_in_tx` 现在**硬编码 true**（`ddl.go:851`、`ddl.rs:892`），只被 SQLite 取证背书；PG 若为 false ⇒ 三端"逐条执行"分派才第一次真正用得上 | 驱动（+判据） | §8 新增能力位；A.16 的分派表；`spec/metadata.json` 的 `ddl_in_tx` 注释 |
+| P2 | `DROP TABLE` 被依赖视图挡住，还是静默留破视图 | 生成器删表前要不要先发依赖对象（A.20 B 档的前提）；对照 SQLite G16"静默留破视图" | 引擎 | A.20 的 B 档可行性结论 |
+| P3 | `ALTER TABLE … DROP COLUMN` 被视图依赖挡住吗 | `drop_column` 在 PG 上是否需要整组重建（SQLite 靠整表重建绕过） | 引擎 | §8 新增"哪些动作触发重建"的方言表 |
+| P4 | `RENAME` 是否重解析引用它的视图 | **整表重建四步（CREATE tmp → INSERT SELECT → DROP → RENAME）在 PG 上能不能走**——SQLite 上正是死在这一步（A.15 G13） | 引擎 | A.11/A.15 的重建规则是否可按方言放开 |
+| P5 | `ALTER COLUMN … TYPE` 是否需要 `USING`、视图是否挡路 | 类型变更条目走直改语句还是走重建；改完驱动能否读回新类型（否则 diff 以为"没变"） | 引擎 | §8-3；重建触发条件表 |
+| P6 | 非空表 `ADD COLUMN NOT NULL DEFAULT` 是否即时（判据用 `atthasmissing`，不量时间） | SQLite 的"NOT NULL 无默认 ⇒ 重建"在 PG 上是否需要；`add_column` 要不要拆两支 | 引擎 | §8-3；A.11 的 G 项对照表 |
+| P7 | identity / serial 的自增回读 | `is_auto_increment` 填得出吗（SQLite 侧恒 false 是 A.11 G3 实测的）；判不出自增 ⇒ 会误生成重建 | 驱动 | §8-3；PG 方言的重建触发条件 |
+| P8 | 主键/唯一约束的自动索引**名字形状** | diff 拿索引名当身份键（SQLite 是 `sqlite_autoindex_*`）；PG 的名字由约束名派生、含表名 ⇒ 同名不同表的索引在 PG 上天然不撞，规则层要不要据此放宽 | 驱动 | A.5 匹配规则的方言注 |
+| P9 | 外键 `on_update`/`on_delete` 回读 | **§8-7 的债本体**。已确认缺口在**读侧不在引擎**：Go 的 `ListForeignKeys` 连查都没查 `confupdtype`，Rust `db-postgres/src/lib.rs:571` 直接 `on_update: None`；本条要钉的是"目录给不给得出"这另一半 | 驱动 | §8-7 定案 → 补读 SQL + 双端 DTO 填充 |
+| P10 | `format_type` 的原始文本形状（14 种类型） | **§8-3 `generic_type` 归一命名表的输入**。那张表一直没落笔，等的就是可实测的方言实例 | 驱动 | §8-3 定案（含 `MaxLength/Precision/Scale` 该从文本里拆还是另查） |
+| P11 | `ListTables` 是否真的尊重 `schema` 入参 | **§8-6 同库多 schema（v1.1）**。SQLite 驱动忽略入参（A.9 F6），PG 读代码是 `WHERE n.nspname = $1`——两头都要实测才算"可行" | 驱动 | §8-6 v1.1 是否开工 |
+| P12 | `pg_depend` 能否枚举"哪些视图引用了这张表/这一列"（表级 + 列级两条查询） | **A.20 B 档的可行性**：B 档在 SQLite 上被判死（无依赖目录），若 PG 的 `refobjsubid` 能指到列，则"依赖可见"是**方言能力位**而非全库盲区 | 引擎 | §8-8 补注：B 档按方言分级 |
+
+**为什么这样分档**（引擎事实 vs 驱动事实）：P2–P6、P12 是 **PG 服务器自己的脾气**，与客户端用 Go 还是 Rust 无关——
+两端各探一遍只会造出"两个实现两个真值"的假象（本项目最贵的一类缺陷）。P1、P7–P11 是 **pgx 与 sqlx 各自把系统目录读成了什么**，
+必须两端各探，因为双实现漂移恰恰发生在这一层。⇒ Go 侧 12 点全探，Rust 侧只镜像 6 个驱动点。
+
+**落点与形态**：
+
+| 文件 | 内容 | 规模 |
+|---|---|---|
+| `go/pkg/dbpostgres/probe_test.go` | P1–P12 全 12 点，`package dbpostgres`（要读驱动私有形状，只能是包内测试） | 新文件 605 行 |
+| `rust/crates/db-postgres/tests/probe.rs` | P1、P7–P11 六个驱动点，`#[tokio::test]` | 新文件 405 行 |
+| `rust/crates/db-postgres/Cargo.toml` | 加 `[dev-dependencies] tokio`——**测试专用**，非生产依赖 | +5 行 |
+
+`db-postgres` 此前**没有 `tests/` 目录**，本批是 Rust 侧第一份活 PG 测试，所以软跳过口径要在那儿现建（见下面坑 ②）。
+探测现场统一：专用 schema `polydb_probe`，每个测试开头 `DROP SCHEMA IF EXISTS … CASCADE` + `CREATE SCHEMA`，
+`Cleanup` 再 CASCADE 一次——探测会在真库上建表建视图，绝不能落在 `public` 里污染使用者的数据。
+DSN 串与 `test/contract` 同一口径（`POLYDB_TEST_PG`，默认 `postgres://postgres@localhost:5432/postgres?sslmode=disable`）
+⇒ 契约与本探测要么都能连，要么都静默跳过，不会出现"一边真跑一边跳过"的假对拍。
+
+**断言只打三类东西**（这是本批的设计核心，不是偷懒）：
+
+1. **我们自身层的形状不变式**：列数、`ordinal_position` 与回读序一致、外键本体读得到、索引名非空且不重复、
+   `DROP … CASCADE` 之后对象计数归零。这些与 PG 的脾气无关，红了就是**我们读侧坏了**。
+2. **该点要钉的那条判据本身**：只有 P1（回滚后必须归零）、P11（探测 schema 查得到 + `public` 查不到）、
+   P12（`pg_depend` 必须枚举得出物化视图对 `qty` 的列级引用）三处下赌注——它们的红**正是**要拿到的证据，
+   且都是 PG 文档级行为，红了说明环境不对或口径变了。
+3. **纯两可的分支只记不赌**：P2 的"挡 / 不挡"、P3 的"能不能删无人引用的列"、P6 的"要不要 `USING`"——
+   两条分支各自决定一条不同的生成器规则，**预先押哪条都是猜**。
+
+所有观测以 `OBS[px]` 前缀打印，引擎到位后一条 grep 收齐真值：
+
+```bash
+export POLYDB_TEST_PG='postgres://user:pw@localhost:5432/postgres?sslmode=disable'   # 密码走环境变量，不落文件不落日志
+cd go   && go test -count=1 -v ./pkg/dbpostgres/ 2>&1 | grep -o 'OBS\[.*'            # 12 点
+cd rust && cargo test -p polydb-db-postgres -- --nocapture 2>&1 | grep -o 'OBS\[.*'  # 6 点驱动事实
+```
+
+**本批踩到 / 立此存照的三处坑**：
+
+① **Go 侧探测事务只能走 `Begin` + `ExecuteIn`**。`Conn::Execute` 与 `Begin` 都抢同一把 `c.mu`，
+而裸 `BEGIN` 经 `Execute` 会落到 pgx 连接池的某一条连接上、把那条连接留在事务态——后续探测被静默污染。
+（第一版探测里真写了 `BEGIN`/`COMMIT`，跑之前自查删掉了。）
+② **Rust 的软跳过在汇总里长得和"真跑通过"一模一样**：libtest 没有 SKIP 状态，
+6 个探测缺引擎时全是 `test result: ok. 6 passed`，只有 `--nocapture` 才看得见 `SKIP[…] connected:false` 那行。
+Go 侧有 `--- SKIP` 可见（本批实测 12 行）。⇒ 刷新 A.21 基线表时，Rust 侧的 passed 数**不能**当作"PG 探过了"的证据，
+必须回头 grep `SKIP[` 或 `OBS[`。
+③ **sqlx 的 PG 不能套 `smol::block_on`**（db-sqlite 那套测试的做法）：sqlx 编译在 `runtime-tokio` 上，
+包进 smol 会 panic「no reactor running」⇒ 本 crate 用 `#[tokio::test]`。
+另外 `PostgresConn::open` 是**懒连接**，池建不出来不代表连不上，所以"能不能探"的唯一真探是 `ping()`；
+缺引擎时每条探测各等 `acquire_timeout` 5 s，6 条并行共 5.01 s——将来若把 Rust 侧探测加多，这个常数要重估。
+
+**为什么本批不做 MySQL**（范围收缩，明示不隐藏）：拍板的引擎可得性只有 PG 一台。
+MySQL 的取证点**不能复用 PG 那 12 条**——至少四处结构上不同：MySQL 的 DDL **隐式提交**（P1 的判据方向相反）、
+无物化视图（P12 的清单形态不同）、无 `pg_depend`（依赖要改查 `information_schema`）、
+自增只有 `AUTO_INCREMENT` 一种（P7 的 identity/serial 分野不存在）。
+照抄一份 12 点 MySQL 探测就是本文件反复回避的"数字上已实现、实际未验证"。⇒ 记 **F0.4：MySQL 取证点清单另立**，
+等 MySQL 引擎到位（或用户明确要盲写）再拍板。
+
+**本批门禁**（2026-09-27，工作树 = 2 份新探测 + 1 份 dev-dependency + 本附录；规则层 / `spec/` / 三端前端零字节改动）：
+
+| 项 | 命令 | 结果 |
+|---|---|---|
+| Go 格式 | 新文件与 `gofmt` 输出比对（`gofmt -l` 空 = 已格式化；本批新文件本就是 LF，无需剥 CR） | 通过（仍禁 `gofmt -w`，见 A.21） |
+| Go 编译/静态 | `go build ./...`、`go vet ./...` | 均 exit 0、无输出 |
+| Go 探测 | `go test -count=1 -v ./pkg/dbpostgres/` | **12 份 `--- SKIP`、0 FAIL** ⇒ 12 点全部 `connected:false` 软跳过，**真值 0 条** |
+| Go 全量 | `go test -count=1 ./...` | **14 包全 ok、0 FAIL**（A.25 基线 13 包 ⇒ `pkg/dbpostgres` 首次有测试文件，多出的那一包就是它） |
+| Rust 单 crate | `cargo test -p polydb-db-postgres` | **6 passed / 0 failed**，42 result 行之本 crate 一支；耗时 5.01 s ＝ 6 条并行各等 5 s `acquire_timeout` |
+| Rust 软跳过可见性 | `cargo test -p polydb-db-postgres -- --nocapture` | **6 行 `SKIP[…] connected:false`**（不加 `--nocapture` 就只能看见 6 passed——见上面坑 ②） |
+| Rust 全量 | `cargo test --workspace` | **187 passed / 0 failed**（42 个 result 行）＝ A.25 基线 181 **+6**，那 6 条**全是软跳过** ⇒ 有效新增真跑断言 **0** |
+| Rust 格式/哨兵 | `cargo fmt --all --check`、`cargo clippy -p polydb-db-postgres --all-targets` | 均 exit 0、零警告（新文件用 `rustfmt --edition 2021` 单文件写模式格式化，绕开 `cargo fmt --all` 的写模式门禁） |
+| 协议漂移 | `go run . check` / `go run . ts --check` | `protocol check OK: 64 spec types vs rust + go` / `TS types up to date` ⇒ 零 spec 变更 |
+| 契约对拍 | `cargo build -p polydb-server` 后 `cd test/contract && go test -count=1 ./...` | 整包 **ok / 265.2s / 0 FAIL**（A.24 265.7s、A.25 261.7s）⇒ 与基线一致 |
+
+**本批未取/未验证项（照例标出）**：
+① **12 + 6 个取证点一条真值都没拿到**——本机 5432 无监听，这是本批的既定结果而不是意外；
+所有 `OBS[…]` 行尚未打印过一次，探测代码本身**只经过编译与 clippy 检验，没经过引擎检验**。
+换句直白的：PG 到位那一次跑，很可能第一遍就红在若干条上（SQL 串写错、regclass 大小写、`attnum=2` 这类位置假设），
+**那是本批设计好的第一次真跑**，不算回归；② MySQL/MSSQL/Oracle/Redis 连清单都没有（F0.4）；
+③ `golangci-lint` v2 本机仍不在 PATH（§7 第 ⑦ 条原样成立，仍是唯一一直没跑的门禁）；
+④ 契约这轮没加 `-v` ⇒ 顶层/子测试 PASS 行数未重数，只拿到整包 ok；⑤ Web/TUI/GUI 三端零改动，未跑未看。
+
+**净账**（主体提交 `af8553e`，`git show --numstat af8553e` 复原）：**4 个文件 +1016 / −0**——
+`go/pkg/dbpostgres/probe_test.go` 新 605 行、`rust/crates/db-postgres/tests/probe.rs` 新 405 行、
+`Cargo.toml` +5（dev-dependency）、`Cargo.lock` +1。规则层（`ddl.go`/`ddl.rs`/`schemadiff.go`/`diff.rs`）、
+`spec/`、三端前端**零字节改动**。
+
+**引擎到位后的回填流程（F0.3 → 记为下一批）**：
+① 上面那条 `grep OBS` 一次收 18 点真值；② 逐条把观测转成**固定断言**（删掉"只记不赌"的那一类，
+因为届时已知哪一支成立）；③ 回填本表"回填去处"那一列点到的条目——`§8-3` 定名表、`§8-7` 补读 SQL、
+`§8-6` v1.1 判据、`§8-8` B 档分级、A.11/A.15 的 G 项方言对照；④ 才轮到规则层动手：
+`ddl_in_tx` 从硬编码改成按方言取（P1）、重建触发条件加方言维度（P3–P6）、依赖目录进快照（P12）。
+顺序不能反：**先有真值，再改生成器**——反过来说就是 A.26 立这份清单的全部理由。
