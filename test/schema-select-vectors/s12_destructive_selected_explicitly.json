@@ -1,0 +1,52 @@
+{
+  "name": "s12_destructive_selected_explicitly",
+  "note": "options.select_destructive=false ⇒ drop_table 那条的 Entry.Selected 默认位是 false；但勾选层**只看显式传进来的 selected**，不看默认位（默认位归 UI 渲染管）。所以显式勾上 drop_table 仍进结果，顺序按计划序（drop_table(40) 在 add_column(60) 前）。",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "a", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      },
+      {
+        "name": "legacy",
+        "type": "table",
+        "columns": [
+          { "name": "x", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "a", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 },
+          { "name": "b", "data_type": "TEXT", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": ["t/b/add_column", "legacy//drop_table"],
+  "expected": [
+  "legacy//drop_table",
+  "t/b/add_column"
+],
+  "error_code": "",
+  "error_message": ""
+}

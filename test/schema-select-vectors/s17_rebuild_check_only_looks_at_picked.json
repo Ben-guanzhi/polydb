@@ -1,0 +1,70 @@
+{
+  "name": "s17_rebuild_check_only_looks_at_picked",
+  "note": "与 s16 同一对快照，反过来只勾 add_column、不勾同组的 add_foreign_key ⇒ **通过**。组校验只对「已勾选条目所在的表」判定是否需要整表重建：picked 里没有重建条目就不拦（新增列本身是直改）。这是刻意的不对称，也是 add_column 与 add_foreign_key 分开勾时脚本仍能生成的前提。",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_t_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      },
+      {
+        "name": "p",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_p_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "p_id", "data_type": "INTEGER", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_t_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] }
+        ],
+        "foreign_keys": [
+          { "name": "fk_t_p", "columns": [ "p_id" ], "referenced_schema": "main", "referenced_table": "p", "referenced_columns": [ "id" ] }
+        ]
+      },
+      {
+        "name": "p",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_p_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": ["t/p_id/add_column"],
+  "expected": [
+  "t/p_id/add_column"
+],
+  "error_code": "",
+  "error_message": ""
+}

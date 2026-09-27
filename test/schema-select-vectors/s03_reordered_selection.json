@@ -1,0 +1,58 @@
+{
+  "name": "s03_reordered_selection",
+  "note": "勾选数组**故意按计划序的逆序**给出（四个相位各一条：drop_index(20) / create_table(50) / add_column(60) / add_index(80)）。期望输出必须回到计划序 ⇒ 钉住「picked 只认计划序，不认 UI 点选次序」。这里全是直改动作（具名非唯一非主键索引），不触发整表重建。",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "a", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 }
+        ],
+        "indexes": [
+          { "name": "idx_a", "unique": false, "columns": [ { "name": "a", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "a", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 },
+          { "name": "b", "data_type": "TEXT", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "idx_b", "unique": false, "columns": [ { "name": "b", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      },
+      {
+        "name": "w",
+        "type": "table",
+        "columns": [
+          { "name": "x", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": ["t/idx_b/add_index", "t/b/add_column", "w//create_table", "t/idx_a/drop_index"],
+  "expected": [
+  "t/idx_a/drop_index",
+  "w//create_table",
+  "t/b/add_column",
+  "t/idx_b/add_index"
+],
+  "error_code": "",
+  "error_message": ""
+}

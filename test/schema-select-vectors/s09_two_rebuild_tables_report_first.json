@@ -1,0 +1,71 @@
+{
+  "name": "s09_two_rebuild_tables_report_first",
+  "note": "两张表（a、b）都要整表重建，且各缺一条：报错只报**计划里最先出现的那张表**（相位序里 a 的 add_column(60) 与 b 的 add_column(60) 在前，同相位按表名序 ⇒ 缺组检查按 picked 顺序遍历，先撞上 a）。双端必须报同一张表，否则用户按提示补勾仍会一直失败。",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "a",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "v", "data_type": "INTEGER", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_a_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      },
+      {
+        "name": "b",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "w", "data_type": "INTEGER", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_b_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "a",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "v", "data_type": "TEXT", "nullable": true, "ordinal_position": 2 },
+          { "name": "note", "data_type": "TEXT", "nullable": true, "ordinal_position": 3 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_a_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      },
+      {
+        "name": "b",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "w", "data_type": "TEXT", "nullable": true, "ordinal_position": 2 },
+          { "name": "memo", "data_type": "TEXT", "nullable": true, "ordinal_position": 3 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_b_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": ["b/w/alter_column", "a/v/alter_column"],
+  "expected": null,
+  "error_code": "POLYDB_ERR_INVALID_PARAM",
+  "error_message": "表 a 需要整表重建，同表变更必须整组勾选：缺少 a/note/add_column"
+}

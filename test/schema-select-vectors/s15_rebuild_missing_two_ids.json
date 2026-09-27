@@ -1,0 +1,47 @@
+{
+  "name": "s15_rebuild_missing_two_ids",
+  "note": "删主键列 ⇒ 整表重建，且连带一条主键自动索引的 drop_index：只勾 drop_column(30) ⇒ 缺 3 条，按计划序列为 drop_index(20)、add_column(60)、add_index(80) ⇒ 一次打到「桶内顺序 + 多项顿号拼接」。",
+  "options": { "ignore_defaults": false, "select_destructive": true },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "qty", "data_type": "INTEGER", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_t_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] },
+          { "name": "idx_qty", "unique": false, "columns": [ { "name": "qty", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "qty", "data_type": "INTEGER", "nullable": true, "ordinal_position": 1 },
+          { "name": "note", "data_type": "TEXT", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "idx_qty", "unique": false, "columns": [ { "name": "qty", "position": 1 } ] },
+          { "name": "idx_note", "unique": false, "columns": [ { "name": "note", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": ["t/id/drop_column"],
+  "expected": null,
+  "error_code": "POLYDB_ERR_INVALID_PARAM",
+  "error_message": "表 t 需要整表重建，同表变更必须整组勾选：缺少 t/sqlite_autoindex_t_1/drop_index、t/note/add_column、t/idx_note/add_index"
+}

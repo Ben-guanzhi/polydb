@@ -1,0 +1,40 @@
+{
+  "name": "s06_stale_ids_first_appearance_dedupe",
+  "note": "两个过期 id、其中一个重复出现两次：文案里每个过期 id **只点名一次**，顺序按其在勾选数组里的首次出现（t/ghost/drop_index 先于 u/x/drop_column），分隔符是全角顿号「、」。这是给用户的可执行信息，去重与顺序都不能由 map 遍历序决定。",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "a", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "a", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 },
+          { "name": "b", "data_type": "TEXT", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": ["t/ghost/drop_index", "u/x/drop_column", "t/ghost/drop_index"],
+  "expected": null,
+  "error_code": "POLYDB_ERR_INVALID_PARAM",
+  "error_message": "勾选的条目不在当前比对计划里：t/ghost/drop_index、u/x/drop_column（请重新比对后再执行）"
+}

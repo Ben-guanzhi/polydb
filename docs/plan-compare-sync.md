@@ -1101,6 +1101,12 @@ A.15 G17 那六个引用里 ①② 四处（采集层过滤那行**已被 E6.5 �
 | 契约对拍 | `cargo build -p polydb-server` 后 `cd test/contract && go test -v ./...` | **23 个顶层测试 / 89 个 PASS（含子测试）/ 0 FAIL / 0 SKIP 标记**；网络库与 Redis 在用例内部按 `connected:false` 软跳过（28 处记录，本机确实无 PG/MySQL/MSSQL/Oracle/Redis 实例） |
 | 共享语料 | `go test -run DDLVector ./pkg/schemadiff/` + `cargo test -p polydb-schema-diff --test ddl_vectors` | **26 份**（18 脚本 + 8 错误）双端各自全绿；diff 语料 16 份同样双端绿 |
 
+**【O1 系列之后对这张表的增量，2026-09-27】**：上表口径**冻结在 E6 收口**，此后的逐批数字看各批自己的附录，
+不在这里改历史值。跨批可复算的增量只有两项——
+① Rust 全量 **179 → 181**（A.24 新增 `select_vectors` 那 2 份；A.22/A.23 两批为零代码改动，179 未动）；
+② 共享语料从**两套变三套**：diff 16 + DDL 26 + **勾选 `test/schema-select-vectors/` 18**（A.24）。
+其余（Go 13 包全 ok、Web 163、协议 64 类型、契约 23/89/0）三批**逐项同数**，可直接沿用下面的复核命令。
+
 **这套数字怎么复核**（照抄可跑，Git Bash；不用从正文反推命令）：
 
 ```bash
@@ -1383,3 +1389,162 @@ for _, id := range idsByTable[k] {
 （一次建桶 + 查桶 + `want` 过滤），两处 Θ(R×P) 与一处 Θ(n²) 全在两实现里消失。
 剩下没做的同形项：**没有为"勾选校验"建跨语言共享语料**（本批差分是单语言新旧对比，不是跨语言对比）；
 要建就得同时给 Rust 侧接一份读同一 JSON 的测试，成本比这批高，仍排在方言扩展之后。
+**【2026-09-27 更新】这条债也已还掉 = A.24（O1.2）**：勾选校验现在有 18 份跨语言共享语料，
+Go 与 Rust 各自读同一批 JSON 并各自现算 plan，两端断言**同一条目序列 + 逐字同一条文案**。
+
+### A.24 O1.2 勾选校验跨语言共享语料（2026-09-27，**零规则代码改动 / 零 spec 变更：只加语料 + 两端各一份读语料的测试**）
+
+这批还的是 A.22→A.23 连记两笔的那条债。缺口说清楚：
+DDL 语料（26 份）里 `SelectEntries` 只是**被穿过**——用例把勾选喂进去、断言的是最终脚本，
+**picked 的集合与顺序从来没有被直接断言过**；两条中文文案虽然被 d22/d23 逐字钉死，
+但"每条分支都有语料打到"这件事没有任何门禁。diff 语料（16 份）只到 plan 层，压根不碰勾选。
+
+**形状（拍板选的那一档：「快照 + selected，plan 现算」）**
+每份用例带 `source`/`target`/`options`/`selected`，**不带** plan；两端各自跑 `Diff` 现算 plan 再喂勾选。
+⇒ 一份用例同时钉住两件事：plan 的**顺序**（勾选的输出序只能来自它）与 picked 的**结果**。
+好处是勾选层零额外真相源（plan 不入库，双实现若在此分叉，diff 语料会先红）；
+代价是勾选用例把 diff 的正确性也一起绑上了——这是有意的。
+
+字段表（`test/schema-select-vectors/*.json`，18 份，共 949 行 / 35,172 B，全部 LF）：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `name` | string | 与文件名同 |
+| `note` | string | **中文**：这份用例钉住哪条分支、为什么值得钉 |
+| `options` | object | `ignore_defaults` / `select_destructive`，两端都按 `Diff` 的入参用；**勾选函数不收 options**（见 s12） |
+| `source` / `target` | TableSnapshot | 与 DDL 语料同一套 DTO，字段名/必填完全一致 |
+| `selected` | string[] 或 **null** | null ⇒ "全选"，与 DDL 语料同口径 |
+| `expected` | string[] | 成功路径的 picked id 序列（**按 plan 序**） |
+| `error_code` / `error_message` | string | 失败路径；成功时两字段省略 |
+
+**生产纪律（照 E1/E3 的规矩，一条没破）**：`expected` **绝不手写**。
+只写输入 ⇒ `POLYDB_SELECT_VECTORS_WRITE=1 go test ./pkg/schemadiff -run WriteSelectVectorExpected`
+由 Go 侧回填 ⇒ 人工复核每一条落盘值 ⇒ Rust 侧作为**第二实现**读同一批文件，不参与生产。
+写回器只替换 `expected` / `error_code` / `error_message` 三处的值，其余字节逐字不动（含缩进与行尾风格）。
+基建复用：把 `ddl_vectors_test.go` 里那个只认 `expected` 的定点替换器泛化成
+`replaceJSONValue(raw, key, replacement, nl)`，原 `replaceExpectedValue` 退化成它的一行包装 ⇒
+**语料写回器从两套变一套半**，这是本批唯一碰到存量 Go 文件的地方（+10/−4，纯测试文件）。
+
+**18 份用例各钉什么**（`sel` = `selected`；⇒ 后是断言到的值）：
+
+| 用例 | sel | 钉住的行为 |
+|---|---|---|
+| s01 `all_selected_null` | null | ⇒ `["w//create_table","t/c/add_column"]`——**plan 序 = 相位序**（create_table 50 在 add_column 60 前），不是快照出现序 |
+| s02 `empty_selection` | `[]` | ⇒ `[]`：空勾选合法且产出为空 |
+| s03 `reordered_selection` | 4 条**逆序**（跨 4 个相位） | ⇒ `drop_index → create_table → add_column → add_index`：**输出只认 plan 序**，勾选数组的次序不影响 |
+| s04 `duplicate_ids_selected` | 4 条含 1 重复 | ⇒ 3 条：重复 id 合并，不产出两遍 |
+| s05 `stale_single_id` | 1 真 1 假 | ⇒ `勾选的条目不在当前比对计划里：t/nope/add_column（请重新比对后再执行）`（真实场景＝界面刷新后拿旧 id 来勾） |
+| s06 `stale_ids_first_appearance_dedupe` | 2 假 + 1 假重复 | ⇒ 幽灵 id 按**首次出现**去重、「、」连接（`t/ghost/drop_index、u/x/drop_column`），顺序稳定非 map 序 |
+| s07 `rebuild_group_partial` | 只勾重建组里的 `alter_column` | ⇒ `表 t 需要整表重建，同表变更必须整组勾选：缺少 t/note/add_column` |
+| s08 `rebuild_group_whole` | 整组、**逆序**给出 | ⇒ `["t/note/add_column","t/qty/alter_column"]`：勾全则通过，输出仍回 plan 序 |
+| s09 `two_rebuild_tables_report_first` | 两张重建表各缺一条 | ⇒ 文案点名 **表 a**（plan 里先出现的那张赢），不是勾选里先出现的那张 |
+| s10 `views_produce_no_entries` | null | ⇒ `["t/b/add_column"]`：**视图不产生任何条目**（两侧快照都带视图，plan 里一条都没有） |
+| s11 `mixed_case_table_ids_and_message` | `foo/qty/alter_column`（小写 id） | ⇒ `表 Foo 需要整表重建…缺少 foo/note/add_column`：**文案里的表名用显示大小写、id 用小写** |
+| s12 `destructive_selected_explicitly` | 显式勾 `legacy//drop_table`（options 里 `select_destructive:false`） | ⇒ `["legacy//drop_table","t/b/add_column"]`：该条目在 plan 里带的是 `Selected=false`（默认不勾），但**函数签名不收 options** ⇒ 破坏性条目的放行只认"有没有被勾"，与默认标记无关 |
+| s13 `selected_id_is_case_sensitive` | `Foo/Note/add_column`（显示大小写） | ⇒ 报 **stale**：勾选层不做大小写兜底，id 一律大小写敏感 |
+| s14 `stale_beats_group_check` | 幽灵 id + 缺组同时在场 | ⇒ 只报 **stale**（分支优先级；与 s11 同快照、只有 `selected` 不同） |
+| s15 `rebuild_missing_two_ids` | 只勾 `t/id/drop_column`（删 PK 列） | ⇒ 缺 3 条：`t/sqlite_autoindex_t_1/drop_index、t/note/add_column、t/idx_note/add_index`（删 PK 列牵出自建索引 + 重建） |
+| s16 `add_foreign_key_group` | 只勾 `t/fk_t_p/add_foreign_key` | ⇒ `…缺少 t/p_id/add_column`：**FK 条目的对象段是约束名**，不是列名 |
+| s17 `rebuild_check_only_looks_at_picked` | 只勾 `t/p_id/add_column`（与 s16 同快照） | ⇒ **通过**：组校验只审视 **picked** 里的条目，纯 `add_column` 不触发整组要求（有意的不对称，见下） |
+| s18 `rebuild_group_of_four_whole` | 4 条重建组**打乱**给出 | ⇒ `["t/idx_qty/drop_index","t/name/add_column","t/qty/alter_column","t/idx_name/add_index"]`（A.22/A.23 那条查桶改动的正向对照：R=1、P=4 的最小整组） |
+
+**建语料时才浮出来的三条非显然行为**（都已固化成用例，不是事后补的解释）：
+
+1. **视图零条目**（s10）。`tableMap` 按用途把非表项跳掉，视图既进不了 plan 也进不了重建组。
+   勾选层因此**永远看不见视图**——这与 A.20 的"视图名进快照只为避让临时名"是两件事，
+   此前只写在文档里，现在有断言。
+2. **组校验只看 picked**（s16 vs s17）。同一份快照，勾 FK 报缺列、只勾那列反而过。
+   这不是漏洞，是规则层的既定口径：**只有触发重建的那条条目才把整表拉进整组要求**。
+   以前这个形状没有任何测试覆盖，改起来全靠口头保证。
+3. **id 大小写敏感、文案用显示大小写**（s11 + s13）。一对用例把"归一只发生在桶键与 id 生成，
+   不发生在勾选输入"钉住：拿显示大小写去勾 ⇒ 直接判过期，不做兜底。
+
+**覆盖度门禁（两端各一份，15 个分支键缺一个即红）**：
+`selected_null`、`selected_empty`、`subset_pass`、`duplicate_ids`、`unordered_selected`、
+`view_present`、`plan_order_not_lexicographic`、`stale`、`stale_multi`、`stale_display_casing`、
+`stale_beats_group`、`group`、`group_multi_missing`、`group_mixed_case_display`、`group_whole_pass`。
+再加两条硬约束：**语料份数 ≥ 10**（两端都断言，现 18）与
+**"错误文案必须落在已知分支里"**（未知文案直接失败 ⇒ 将来改文案必须同时改两端门禁，不会静默漂移）。
+
+关键是**三个推导式键，不靠标记、也就不会恒真**：
+
+| 键 | 怎么推出来 |
+|---|---|
+| `plan_order_not_lexicographic` | picked 的 id 序列 ≠ 同一批 id 排序后的序列 ⇒ 将来谁把输出改成"按 id 排"，这条立刻红 |
+| `stale_beats_group` | 把幽灵 id 摘掉后**用同一份输入重跑一次** `SelectEntries`，若改报缺组 ⇒ 这次勾选确实同时踩中两个分支 |
+| `group_whole_pass` | 用规则层的 `needsRebuild`（Go）/ 生成结果里的 `pragmas_outside_tx`（Rust）**复核 picked 里确实有重建条目**，而不是靠文件名里写着"group" |
+
+另外两条结构性断言（两端都有，不只靠比字符串）：picked 必须是 plan 的**严格单调子序列**
+（逐位置 index 递增 + 每条 `assert_eq!(&plan[at], p)` 全字段等），以及勾选校验**幂等**（重跑同输入同输出）。
+
+**一处有意的实现不对称（如实标出）**：Rust 的 `needs_rebuild` 是 crate 内私有，
+集成测试（`tests/select_vectors.rs`）拿不到 ⇒ Rust 侧改用 `generate(...).pragmas_outside_tx` 作"这组真需要重建"的代理；
+Go 侧 `select_vectors_test.go` 在包内，直接调 `needsRebuild`。
+代价：Rust 的那条推导多绕一层生成器；好处：没有为此把 `needs_rebuild` 提公开（不扩大 API 面）。
+口径记录在 Rust 文件的块注释里。
+
+**两个由语料反过来的取证**（这批的价值不只在"有测试"）：
+
+1. **FK 的 id 对象段是约束名**。s16 最初按列名写成 `t/p_id/add_foreign_key`，
+   写回器回给它的是 **stale** 而不是缺组——由此确认 plan 里是 `t/fk_t_p/add_foreign_key`（`{表}/{约束名}/{op}`）。
+   先前这条只在 A.15 的叙述里，没有断言；现在是 s16。
+2. **语料必须满足更严的那一端**。s16/s17 的 FK 少写 `referenced_schema` 时，
+   Rust serde 直接 `missing field referenced_schema` 失败，Go 却**静默容忍**（该字段无 `validate` 约束）。
+   已补齐。教训与 A.13 的 serde 口径同类：**共享语料的必填集合取两端交集里的最严者**，
+   否则"Go 绿 Rust 红"会被误读成实现分叉。
+
+**等价性证据**：这份语料本身就是跨语言证据——两端读同一批 18 个 JSON，
+各自现算 plan、各自跑勾选，断言**同一条 id 序列 + 逐字同一条中文文案 + 同一个 `POLYDB_ERR_INVALID_PARAM`**。
+这与 A.23 的差分（单语言新旧对比）是互补的两层：那层证明"改索引结构不改行为"，这层证明"两实现行为一致"。
+
+**与存量语料的重叠（不粉饰）**：d22/d23 已经逐字钉过两条错误文案，
+`TestSelectEntries*`（Go 3 份：plan 序 / stale / 整组）与 Rust `select_entries_*`（同样 3 份）
+也已覆盖 plan 序与去重。s05/s06/s07 与它们是**同一断言的第二处**——保留的理由是：
+那些断言写在单语言测试里，改一端不会让另一端红；而这批文件是**共享数据**，跨语言分叉必须两端同时红。
+
+**本批门禁**（2026-09-27，工作树 = 18 份语料 + Go 测试 + Rust 测试 + `ddl_vectors_test.go` 泛化 + 本附录）：
+
+| 项 | 命令 | 结果 |
+|---|---|---|
+| Go 格式 | 剥 CR 后与 `gofmt` 输出比对 `select_vectors_test.go` / `ddl_vectors_test.go` | 两份都**已格式化**（新增两份本身即 LF；仍禁 `gofmt -w`，见 A.21） |
+| Go 编译/静态 | `go build ./... && go vet ./...` | 均 exit 0、无输出 |
+| Go 勾选语料 | `go test ./pkg/schemadiff -run 'SelectVectors' -count=1 -v` | **2 PASS**（`TestSharedSelectVectorsMatchExpectedPicked` + `TestSharedSelectVectorsCoverage`） |
+| Go 全量 | `go test -count=1 ./...` | **13 包全 ok、0 FAIL**（与 A.21–A.23 基线同数） |
+| Rust 勾选语料 | `cargo test -p polydb-schema-diff --test select_vectors` | **2 passed / 0 failed** |
+| Rust 单 crate | `cargo test -p polydb-schema-diff` | **46 passed / 0 failed**（40 lib + 2 diff + 2 DDL + 2 勾选） |
+| Rust 全量 | `cargo test --workspace` | **181 passed / 0 failed**（41 个 result 行）⇒ **恰好 = A.22 基线 179 + 本批 2**，逐笔对得上 |
+| Rust 格式/哨兵 | `cargo fmt --all --check`、`cargo clippy -p polydb-schema-diff --all-targets -- -D warnings` | 均 exit 0、零警告 |
+| 协议漂移 | `go run . ts --check` / `go run . check` | `TS types up to date` / `protocol check OK: 64 spec types vs rust + go` ⇒ 零 spec 变更 |
+| Web | `npm run check` + `npm run test` | tsc 无输出、**163 passed (163)** ⇒ 与 A.21 基线同数（本批零前端改动，重跑只为证明没被碰坏） |
+| 契约对拍 | `cargo build -p polydb-server` 后 `cd test/contract && go test -count=1 -v ./...` | **23 个顶层 / 66 个子测试（合计 89 个 PASS 行，口径见 A.23 ⑤）/ 0 FAIL**，另一次非 -v 复跑 `ok 265.7s` ⇒ 与 A.21–A.23 基线逐项同数 |
+
+**门禁自身会不会恒真？两组反证实测**（做完立刻按 md5 还原，语料最终态与反证前逐字节一致）：
+
+| 反证 | 结果 |
+|---|---|
+| 把 s01 的 `expected` 改成逆序 | **两端同时红**（Go `TestSharedSelectVectorsMatchExpectedPicked` FAIL、Rust 同名测试 FAILED），还原后双端绿 ⇒ 断言真在比数据 |
+| 逐份摘掉 s13 / s02 / s06 / s11 / s15 后跑覆盖度门禁 | 分别精确报缺 `stale_display_casing` / `selected_empty` / `stale_multi` / `group_mixed_case_display` / `group_multi_missing` ⇒ 覆盖度键**不是摆设** |
+| 摘掉 s03 | **不红** ⇒ `unordered_selected` 与 `plan_order_not_lexicographic` 由 s01/s04/s08/s12/s18 共同覆盖，s03 是冗余样本（冗余不是缺陷，但说明这两个键的"唯一来源"不是 s03） |
+| 其余 9 个键（`subset_pass`、`duplicate_ids`、`view_present`、`stale`、`stale_beats_group`、`group`、`group_whole_pass`、`selected_null`、份数下限） | **未逐一摘样**，只确认当前 18 份下非零 ⇒ 这条披露如实留白 |
+
+**本批未取/未验证项（照例标出）**：① `golangci-lint` v2 本机仍不在 PATH（§7 第 ⑦ 条原样成立，
+这是唯一一直没跑的门禁）；② **数错一次**：先前一条管道把 workspace passed 数报成 189，
+复核用的 `grep -E "^test result"` 计数 = **41 行、sum 181、failed sum 0**，与 A.22 的 179 差 2 恰好是本批新增两份，
+故上表采用 181；③ 三端 UI 零改动 ⇒ GUI/TUI/Web 向导未肉眼验证。
+
+**净账**：`git diff --numstat` = 存量代码只有 **`go/pkg/schemadiff/ddl_vectors_test.go` +10 / −4（1 文件，纯测试）**；
+新增 `go/pkg/schemadiff/select_vectors_test.go` 417 行、`rust/crates/schema-diff/tests/select_vectors.rs` 268 行、
+`test/schema-select-vectors/` 18 份 949 行。**规则层（`ddl.go` / `ddl.rs`）与 `spec/` 零字节改动**——
+这批没碰任何生产代码，全部是断言与数据。
+区间端点：**父提交 `3ed3be0`（A.23 Go 查桶）→ 本批（本行所在提交）**；
+本批之后的补账只动本附录，用 `git log --oneline 3ed3be0..HEAD` 列出、`git show --numstat <hash>` 逐笔复原。
+
+**遗留（下一批再说，本批没动）**：`test/schema-ddl-vectors/d22_stale_selected_id.json` 与
+`d23_rebuild_group_must_be_selected_whole.json` 的 `name` 字段都写成了 `d14_rebuild_group_absorbs_same_table`
+（E3.3 时期的复制粘贴，两份语料的 name 重复且与文件名不符）。它只进测试失败消息、不进断言，
+但会误导读语料的人；改它要同时重跑两端 DDL 语料，属于独立一笔账。
+
+**至此 O1 系列三条债清完**：A.22（Rust 两处 Θ(n²)/Θ(R×P) 归约）→ A.23（Go 同形病灶查桶）→
+A.24（勾选校验的跨语言共享语料）。规则层现在的状态是：
+**算法同形 + 渐进同阶 + 行为有 18 份共享数据钉住**，同形项里剩下的都在方言扩展之后
+（MySQL/PG/MSSQL/Oracle 四套 DDL 生成器尚无语料，勾选层只有 SQLite 口径）。

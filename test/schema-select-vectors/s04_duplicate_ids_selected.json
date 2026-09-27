@@ -1,0 +1,57 @@
+{
+  "name": "s04_duplicate_ids_selected",
+  "note": "同一个 id 在勾选数组里**重复出现**（t/b/add_column 两次）：picked 不得重复，且顺序仍回到计划序。UI 的三级勾选（表⇒对象⇒条目）容易把同一条目从两处灌进来，这条钉住「集合语义」。快照与 s03 相同。",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "a", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 }
+        ],
+        "indexes": [
+          { "name": "idx_a", "unique": false, "columns": [ { "name": "a", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "a", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 },
+          { "name": "b", "data_type": "TEXT", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "idx_b", "unique": false, "columns": [ { "name": "b", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      },
+      {
+        "name": "w",
+        "type": "table",
+        "columns": [
+          { "name": "x", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": ["t/b/add_column", "w//create_table", "t/b/add_column", "t/idx_a/drop_index"],
+  "expected": [
+  "t/idx_a/drop_index",
+  "w//create_table",
+  "t/b/add_column"
+],
+  "error_code": "",
+  "error_message": ""
+}

@@ -1,0 +1,55 @@
+{
+  "name": "s02_empty_selection",
+  "note": "selected=[] 是「一条都不勾」：勾选层必须原样给出空结果、不报错（空勾选是合法输入，拦它的是上层执行编排）。快照与 s01 相同，只有 selected 不同 ⇒ 两份合起来钉住 null 与 [] 的语义差别。",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "a", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 },
+          { "name": "b", "data_type": "INTEGER", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "idx_b", "unique": false, "columns": [ { "name": "b", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "a", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 },
+          { "name": "b", "data_type": "INTEGER", "nullable": true, "ordinal_position": 2 },
+          { "name": "c", "data_type": "TEXT", "nullable": true, "ordinal_position": 3 }
+        ],
+        "indexes": [
+          { "name": "idx_b", "unique": false, "columns": [ { "name": "b", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      },
+      {
+        "name": "w",
+        "type": "table",
+        "columns": [
+          { "name": "x", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": [],
+  "expected": [],
+  "error_code": "",
+  "error_message": ""
+}

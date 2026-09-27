@@ -1,0 +1,53 @@
+{
+  "name": "s18_rebuild_group_of_four_whole",
+  "note": "O1.1 查桶的正向对照：同表四条（drop_index(20) / add_column(60) / alter_column(70) / add_index(80)）**全部勾上** ⇒ 组校验必须一条不缺地放行，且 picked 按计划序输出四条（桶里四个 id 全部命中 want）。勾选数组按乱序给出，顺带再钉一次「输出只认计划序」。",
+  "options": { "ignore_defaults": false, "select_destructive": true },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "qty", "data_type": "INTEGER", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_t_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] },
+          { "name": "idx_qty", "unique": false, "columns": [ { "name": "qty", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "qty", "data_type": "TEXT", "nullable": true, "ordinal_position": 2 },
+          { "name": "name", "data_type": "TEXT", "nullable": true, "ordinal_position": 3 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_t_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] },
+          { "name": "idx_name", "unique": false, "columns": [ { "name": "name", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": ["t/qty/alter_column", "t/idx_name/add_index", "t/name/add_column", "t/idx_qty/drop_index"],
+  "expected": [
+  "t/idx_qty/drop_index",
+  "t/name/add_column",
+  "t/qty/alter_column",
+  "t/idx_name/add_index"
+],
+  "error_code": "",
+  "error_message": ""
+}

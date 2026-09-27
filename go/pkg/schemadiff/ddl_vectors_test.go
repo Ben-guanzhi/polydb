@@ -331,12 +331,18 @@ func indentJSON(s *Script, pad string) (string, error) {
 
 // replaceExpectedValue 定位 `"expected":` 后的那个 JSON 值并整段替换。
 func replaceExpectedValue(raw []byte, replacement, nl string) ([]byte, error) {
-	key := []byte(`"expected":`)
-	i := bytes.Index(raw, key)
+	return replaceJSONValue(raw, "expected", replacement, nl)
+}
+
+// replaceJSONValue 定位 `"<key>":` 后的那个 JSON 值并整段替换，其余字节逐字不动。
+// 语料生产器用它只改期望值，git diff 因而只反映期望本身。
+func replaceJSONValue(raw []byte, key, replacement, nl string) ([]byte, error) {
+	needle := []byte(`"` + key + `":`)
+	i := bytes.Index(raw, needle)
 	if i < 0 {
-		return nil, fmt.Errorf("文件里没有 expected 字段")
+		return nil, fmt.Errorf("文件里没有 %s 字段", key)
 	}
-	start := i + len(key)
+	start := i + len(needle)
 	for start < len(raw) && (raw[start] == ' ' || raw[start] == '\t') {
 		start++
 	}

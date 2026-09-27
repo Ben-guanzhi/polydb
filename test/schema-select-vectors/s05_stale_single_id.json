@@ -1,0 +1,40 @@
+{
+  "name": "s05_stale_single_id",
+  "note": "勾选里混进一个**不在当前计划**的 id（比对完成后目标库又变了，或 UI 拿了旧计划的 id）：整次勾选作废、报错并点名，绝不静默丢弃。stale 检查排在整组校验之前，所以即便同时缺组也只报 stale。",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "a", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "a", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 },
+          { "name": "b", "data_type": "TEXT", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": ["t/b/add_column", "t/nope/add_column"],
+  "expected": null,
+  "error_code": "POLYDB_ERR_INVALID_PARAM",
+  "error_message": "勾选的条目不在当前比对计划里：t/nope/add_column（请重新比对后再执行）"
+}

@@ -1,0 +1,46 @@
+{
+  "name": "s07_rebuild_group_partial",
+  "note": "该表有 alter_column（类型变更）⇒ 整表重建，同组还有一条 add_column。只勾重建那条 ⇒ 报「同表变更必须整组勾选」，缺项按**计划序**列出（这里是 add_column(60)）。文案里的表名用原样大小写、id 用小写形式（见 s11）。",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "qty", "data_type": "INTEGER", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_t_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "qty", "data_type": "TEXT", "nullable": true, "ordinal_position": 2 },
+          { "name": "note", "data_type": "TEXT", "nullable": true, "ordinal_position": 3 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_t_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": ["t/qty/alter_column"],
+  "expected": null,
+  "error_code": "POLYDB_ERR_INVALID_PARAM",
+  "error_message": "表 t 需要整表重建，同表变更必须整组勾选：缺少 t/note/add_column"
+}

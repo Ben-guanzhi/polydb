@@ -1,0 +1,46 @@
+{
+  "name": "s13_selected_id_is_case_sensitive",
+  "note": "勾选按 id **逐字**匹配（id 恒为小写形式 foo/note/add_column）。这里给的是显示大小写形式 Foo/Note/add_column ⇒ 判为过期条目而报错，不做大小写兜底。三端向导都直接回传 Entry.ID，所以这条是「别在勾选层做模糊匹配」的护栏：一旦哪天加了 lowerASCII，这条会立刻变红。",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "Foo",
+        "type": "table",
+        "columns": [
+          { "name": "ID", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "Qty", "data_type": "INTEGER", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_Foo_1", "unique": true, "primary": true, "columns": [ { "name": "ID", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "Foo",
+        "type": "table",
+        "columns": [
+          { "name": "ID", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "Qty", "data_type": "TEXT", "nullable": true, "ordinal_position": 2 },
+          { "name": "Note", "data_type": "TEXT", "nullable": true, "ordinal_position": 3 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_Foo_1", "unique": true, "primary": true, "columns": [ { "name": "ID", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": ["Foo/Note/add_column"],
+  "expected": null,
+  "error_code": "POLYDB_ERR_INVALID_PARAM",
+  "error_message": "勾选的条目不在当前比对计划里：Foo/Note/add_column（请重新比对后再执行）"
+}

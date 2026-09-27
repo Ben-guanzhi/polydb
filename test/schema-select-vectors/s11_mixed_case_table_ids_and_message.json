@@ -1,0 +1,46 @@
+{
+  "name": "s11_mixed_case_table_ids_and_message",
+  "note": "表名 Foo、列名 Qty/Note 都是混合大小写：id 全小写（foo/qty/alter_column），而报错文案里的表名用**原样大小写**（表 Foo …）。缺组顺序也按计划序（add_column 在前）。用户照文案里的 id 直接复制时大小写必须能对上 ⇒ 两端不能一端用 Table 另一端用 id 段拼文案。",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "Foo",
+        "type": "table",
+        "columns": [
+          { "name": "ID", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "Qty", "data_type": "INTEGER", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_Foo_1", "unique": true, "primary": true, "columns": [ { "name": "ID", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "Foo",
+        "type": "table",
+        "columns": [
+          { "name": "ID", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "Qty", "data_type": "TEXT", "nullable": true, "ordinal_position": 2 },
+          { "name": "Note", "data_type": "TEXT", "nullable": true, "ordinal_position": 3 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_Foo_1", "unique": true, "primary": true, "columns": [ { "name": "ID", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": ["foo/qty/alter_column"],
+  "expected": null,
+  "error_code": "POLYDB_ERR_INVALID_PARAM",
+  "error_message": "表 Foo 需要整表重建，同表变更必须整组勾选：缺少 foo/note/add_column"
+}

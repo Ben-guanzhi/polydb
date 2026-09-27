@@ -1,0 +1,47 @@
+{
+  "name": "s10_views_produce_no_entries",
+  "note": "两侧快照都带视图（源 2 个、目标 3 个）：视图**不进比对、不产生任何条目**（tableMap 直接跳过 ⇒ 视图增删既不会成为 drop_table/create_table，也不参与整组校验）。勾选结果只含表条目；这一条从勾选侧再钉一次 A.15 的口径。",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "a", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      },
+      { "name": "v_legacy", "type": "view", "columns": [], "indexes": [], "foreign_keys": [] },
+      { "name": "b_second", "type": "view", "columns": [], "indexes": [], "foreign_keys": [] }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "a", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 },
+          { "name": "b", "data_type": "TEXT", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      },
+      { "name": "v_legacy", "type": "view", "columns": [], "indexes": [], "foreign_keys": [] },
+      { "name": "b_second", "type": "view", "columns": [], "indexes": [], "foreign_keys": [] },
+      { "name": "v_new", "type": "materialized_view", "columns": [], "indexes": [], "foreign_keys": [] }
+    ]
+  },
+  "selected": null,
+  "expected": [
+  "t/b/add_column"
+],
+  "error_code": "",
+  "error_message": ""
+}

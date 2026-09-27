@@ -1,0 +1,49 @@
+{
+  "name": "s08_rebuild_group_whole",
+  "note": "与 s07 同一对快照，只是把整组勾全 ⇒ 通过。勾选数组按计划序的**逆序**给出，期望仍回到计划序（add_column(60) 在 alter_column(70) 前）⇒ 证明「整组勾全」不等于「按点选顺序输出」。",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "qty", "data_type": "INTEGER", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_t_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "qty", "data_type": "TEXT", "nullable": true, "ordinal_position": 2 },
+          { "name": "note", "data_type": "TEXT", "nullable": true, "ordinal_position": 3 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_t_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": ["t/qty/alter_column", "t/note/add_column"],
+  "expected": [
+  "t/note/add_column",
+  "t/qty/alter_column"
+],
+  "error_code": "",
+  "error_message": ""
+}

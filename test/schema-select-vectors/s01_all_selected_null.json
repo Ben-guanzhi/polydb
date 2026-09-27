@@ -1,0 +1,58 @@
+{
+  "name": "s01_all_selected_null",
+  "note": "selected=null 表示「全部条目」：口径与 DDL 语料一致，由各端加载器把 null 展开成计划里的全部 id。期望锁定**计划序**（相位为主键：先 create_table(50) 后 add_column(60)），而不是表在快照里的出现序。",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "a", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 },
+          { "name": "b", "data_type": "INTEGER", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "idx_b", "unique": false, "columns": [ { "name": "b", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "a", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 },
+          { "name": "b", "data_type": "INTEGER", "nullable": true, "ordinal_position": 2 },
+          { "name": "c", "data_type": "TEXT", "nullable": true, "ordinal_position": 3 }
+        ],
+        "indexes": [
+          { "name": "idx_b", "unique": false, "columns": [ { "name": "b", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      },
+      {
+        "name": "w",
+        "type": "table",
+        "columns": [
+          { "name": "x", "data_type": "TEXT", "nullable": true, "ordinal_position": 1 }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": null,
+  "expected": [
+  "w//create_table",
+  "t/c/add_column"
+],
+  "error_code": "",
+  "error_message": ""
+}

@@ -1,0 +1,46 @@
+{
+  "name": "s14_stale_beats_group_check",
+  "note": "同一次勾选里**既有过期 id、又缺整组**：先报过期（勾选作废要先重新比对），不报缺组。分支优先级是行为契约的一部分——若哪天顺序颠倒，用户在旧计划上点到的幽灵 id 会被缺组文案掩盖。快照与 s11 相同，只有 selected 不同。",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "Foo",
+        "type": "table",
+        "columns": [
+          { "name": "ID", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "Qty", "data_type": "INTEGER", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_Foo_1", "unique": true, "primary": true, "columns": [ { "name": "ID", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "Foo",
+        "type": "table",
+        "columns": [
+          { "name": "ID", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "Qty", "data_type": "TEXT", "nullable": true, "ordinal_position": 2 },
+          { "name": "Note", "data_type": "TEXT", "nullable": true, "ordinal_position": 3 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_Foo_1", "unique": true, "primary": true, "columns": [ { "name": "ID", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": ["ghost//drop_table", "foo/qty/alter_column"],
+  "expected": null,
+  "error_code": "POLYDB_ERR_INVALID_PARAM",
+  "error_message": "勾选的条目不在当前比对计划里：ghost//drop_table（请重新比对后再执行）"
+}

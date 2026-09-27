@@ -1,0 +1,68 @@
+{
+  "name": "s16_add_foreign_key_group",
+  "note": "外键条目的 id 用**约束名**（t/fk_t_p/add_foreign_key，不是列名）：与它依赖的新列同组，只勾它 ⇒ 缺 add_column 报错。反方向的「只勾 add_column」是允许的，见 s17。",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_t_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      },
+      {
+        "name": "p",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_p_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true },
+          { "name": "p_id", "data_type": "INTEGER", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_t_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] }
+        ],
+        "foreign_keys": [
+          { "name": "fk_t_p", "columns": [ "p_id" ], "referenced_schema": "main", "referenced_table": "p", "referenced_columns": [ "id" ] }
+        ]
+      },
+      {
+        "name": "p",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1, "is_primary_key": true }
+        ],
+        "indexes": [
+          { "name": "sqlite_autoindex_p_1", "unique": true, "primary": true, "columns": [ { "name": "id", "position": 1 } ] }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": ["t/fk_t_p/add_foreign_key"],
+  "expected": null,
+  "error_code": "POLYDB_ERR_INVALID_PARAM",
+  "error_message": "表 t 需要整表重建，同表变更必须整组勾选：缺少 t/p_id/add_column"
+}
