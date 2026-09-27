@@ -13,3 +13,8 @@ thiserror = { workspace = true }
 sqlx = { workspace = true }
 chrono = { workspace = true }
 bigdecimal = { version = "0.4", default-features = false }
+
+[dev-dependencies]
+# F0.2 的 PG 探测测试用 #[tokio::test]：sqlx 编译在 runtime-tokio 上，
+# 不能用 smol::block_on 包（db-sqlite 那套在这里会 panic「no reactor running」）。
+tokio = { workspace = true }
