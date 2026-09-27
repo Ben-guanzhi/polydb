@@ -1221,7 +1221,7 @@ E6 收口后，用「按过程的形状思考」（SICP ch1：递归过程的成
    （快照取空 ⇒ `needs_rebuild` 只由 op 决定，新旧共用同一判据，不引入第二个变量）。
 2. **既有逐字断言**：`schema-diff` lib 40 份全绿，含三处锁死消息与顺序的用例
    （失效名单按勾选顺序、组缺失按计划顺序），另**本批新增一条**：同一失效 id 重复勾选只点一次名。
-3. **双端与契约**：共享语料 DDL 26 份 + diff 16 份双端各自绿；契约套件在本批工作树上 `ok / 0 FAIL`。
+3. **双端与契约**：共享语料 DDL 26 份 + diff 16 份双端各自绿；契约套件在本批工作树上重跑 **23 顶层 / 89 含子测试 / 0 FAIL**。
 
 **本批门禁（2026-09-27 本机实跑，代码状态 = 本批工作树）**：
 
@@ -1231,12 +1231,14 @@ E6 收口后，用「按过程的形状思考」（SICP ch1：递归过程的成
 | Rust 全量 | `cargo test --workspace` | **179 passed / 0 failed** ⇒ 与 A.21 基线**同数**（新断言并进了既有测试，不新增份数） |
 | Go | `go build ./... && go vet ./... && go test -count=1 ./...` | 编译与 vet 干净、**13 包全 ok、0 FAIL** |
 | 协议漂移 | `tools/genprotocol` 的 `go run . check` / `go run . ts --check` | `protocol check OK: 64 spec types vs rust + go` / `TS types up to date` ⇒ 零 spec 变更 |
-| 契约对拍 | `cargo build --workspace` 后 `cd test/contract && go test -count=1 ./...` | **ok / 0 FAIL**（262.5s） |
+| 契约对拍 | `cargo build --workspace` 后 `cd test/contract && go test -count=1 -v ./...` | **23 个顶层 / 89 个 PASS（含子测试）/ 0 FAIL / 0 SKIP 标记**（319.8s，**在 `eaa93b1` 已提交后的工作树上重跑**；网络库与 Redis 仍在用例内按 `connected:false` 软跳过）⇒ 与 A.21 基线同数 |
 
-**本轮门禁未重取的两项（如实标出，不是跳过、是没做）**：① 契约**加 `-v` 的子测试计数**（23 顶层 / 89 含子测试）
-本轮没有重跑，沿用 A.21 口径——依据是本批 Go 侧、契约层、spec 全部零改动，Rust 侧只换纯函数内部实现；
-② `golangci-lint` v2 本机仍不在 PATH（§7 第 ⑦ 条原样成立）。
-另：Web 端本批零改动，未重跑 `test/lint/build`。
+**本轮门禁未重取的一项（如实标出，不是跳过、是没做）**：`golangci-lint` v2 本机仍不在 PATH
+（§7 第 ⑦ 条原样成立）。另：Web 端与 Go 侧本批零改动，故 `npm run test/lint/build` 与 Go 子测试计数未重跑
+（契约 `-v` 计数**有**在本批工作树上重跑，即上表那行）。
+契约这一行**返工过一次**：第一次 `-v` 日志是在"反向打补丁量旧实现"的混合状态期间产出的，
+不足以背书新实现 ⇒ 已作废，上表是**代码提交之后**在干净工作树重跑的那一份（耗时 319.8s，比 A.21 的 280s 量级慢，
+只作参考、不作门禁属性）。
 
 **范围（经选项确认拍的）**：**只修 Rust 这两处**。
 Go `pkg/schemadiff/ddl.go` 的 `SelectEntries` 已经建了 `want` / `inPlan` 两张 map（第 1 处旧病灶它本来就没有），
@@ -1246,8 +1248,11 @@ Go `pkg/schemadiff/ddl.go` 的 `SelectEntries` 已经建了 `want` / `inPlan` �
 它每轮比较都重算 `lowerASCII`，改完可以省掉）。
 
 **净账**：`git diff --numstat` = **`rust/crates/schema-diff/src/ddl.rs` +36 / −10（1 文件）**，
-其中 +13 是新的两条断言与注释、其余是索引化改写；另有本附录（`docs/` 自身不计入代码账，口径同 A.21）。
-区间端点：**父提交 `8a40183`（E6.6 数字复核）→ 本批单笔**。
+其中 **+13 全在 `mod tests`**（新增"同一失效 id 重复勾选只点一次名"那一段），其余 +23 / −10 是 `select_entries`
+本体的索引化改写与注释；另有本附录（`docs/` 自身不计入代码账，口径同 A.21）。
+区间端点：**父提交 `8a40183`（E6.6 数字复核）→ 本批主体 `eaa93b1`（代码 + 本附录）**；
+本批之后的每一笔补账只动本附录、不引入新口径，用 `git log --oneline eaa93b1..HEAD` 列出、
+`git show --numstat <hash>` 逐笔复原（正文不逐笔自指——写进来就会改变自己要写的数）。
 
 **为什么不留脚手架**：把旧算法的转录实现留在仓库里，后来人会以为有一份"参照实现"要跟着维护，
 而它唯一的价值就是证明这一次替换；场景定义（两张表的列、best-of-7、600 例随机规则）已写全在本节里，
