@@ -35,20 +35,14 @@ type FileKeyring struct {
 
 func NewFileKeyring(dataDir, masterPassword string) (*FileKeyring, error) {
 	path := filepath.Join(dataDir, "keyring.bin")
-	salt := make([]byte, saltLen)
-	if _, err := rand.Read(salt); err != nil {
-		return nil, fmt.Errorf("keyring: generate salt: %w", err)
-	}
-	key, err := scrypt.Key([]byte(masterPassword), salt, scryptN, scryptR, scryptP, scryptKeyLen)
-	if err != nil {
-		return nil, fmt.Errorf("keyring: derive key: %w", err)
-	}
-	k := &FileKeyring{path: path, mu: sync.Mutex{}}
-	copy(k.key[:], key)
-	k.salt = salt
+	k := &FileKeyring{path: path, salt: make([]byte, saltLen), mu: sync.Mutex{}}
 
-	// 已存在文件：校验 magic 并保留原 salt；否则创建空文件。
-	if data, err := os.ReadFile(path); err == nil {
+	// 先读文件确定 salt：已有文件保留原 salt，全新库才随机生成。
+	// 这样 scrypt 只派生一次（旧实现先无脑用随机 salt 派生一遍再派生第二遍，
+	// 开一次库要 ~286ms，纯浪费）。magic/长度校验提前到派生之前，错误更早更省。
+	data, readErr := os.ReadFile(path)
+	switch {
+	case readErr == nil:
 		if len(data) < len(magic)+saltLen+nonceLen {
 			return nil, fmt.Errorf("keyring: file %s is corrupt (too short)", path)
 		}
@@ -56,18 +50,26 @@ func NewFileKeyring(dataDir, masterPassword string) (*FileKeyring, error) {
 			return nil, fmt.Errorf("keyring: file %s has wrong magic", path)
 		}
 		copy(k.salt, data[len(magic):len(magic)+saltLen])
-		key, err := scrypt.Key([]byte(masterPassword), k.salt, scryptN, scryptR, scryptP, scryptKeyLen)
-		if err != nil {
-			return nil, fmt.Errorf("keyring: derive key: %w", err)
+	case os.IsNotExist(readErr):
+		if _, err := rand.Read(k.salt); err != nil {
+			return nil, fmt.Errorf("keyring: generate salt: %w", err)
 		}
-		copy(k.key[:], key)
-	} else if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("keyring: read %s: %w", path, err)
+	default:
+		return nil, fmt.Errorf("keyring: read %s: %w", path, readErr)
 	}
-	// 新文件：salt 已生成，稍后首次 save 时落盘。
-	// 已有文件时立即验证主密码（解密失败则报错，避免延迟到首次 Get）。
-	if _, err := k.load(); err != nil {
-		return nil, err
+
+	key, err := scrypt.Key([]byte(masterPassword), k.salt, scryptN, scryptR, scryptP, scryptKeyLen)
+	if err != nil {
+		return nil, fmt.Errorf("keyring: derive key: %w", err)
+	}
+	copy(k.key[:], key)
+
+	// 已有文件时立即验证主密码（解密失败则报错，避免延迟到首次 Get）；
+	// 新文件 salt 已生成，稍后首次 save 时落盘，无需 load 校验。
+	if readErr == nil {
+		if _, err := k.load(); err != nil {
+			return nil, err
+		}
 	}
 	return k, nil
 }

@@ -70,7 +70,9 @@ impl Op {
 
     /// 破坏性动作：删表/删列/删索引/删外键（默认不勾选，见 `docs/plan-compare-sync.md` D4）。
     pub fn destructive(self) -> bool {
-        ops_gen::lookup_op_row(self).map(|r| r.destructive).unwrap_or(false)
+        ops_gen::lookup_op_row(self)
+            .map(|r| r.destructive)
+            .unwrap_or(false)
     }
 
     /// 线路名 → op（`as_str` 的逆）；未知串返回 `None`，供回滚镜像等场景使用。

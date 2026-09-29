@@ -21,6 +21,9 @@ import (
 // timeout 覆盖拨号/读写：不可达主机（防火墙丢包）时快速失败而非长挂。
 const timeout = 5 * time.Second
 
+// scanMaxRounds 是单次 ScanKeys 内部续扫的轮次上限（D5，spec/behavior.md §1.3），Rust 侧同名同值。
+const scanMaxRounds = 100
+
 type Conn struct {
 	mu     sync.Mutex
 	client *redis.Client
@@ -95,30 +98,39 @@ func (c *Conn) ScanKeys(ctx context.Context, cursor uint64, pattern string, coun
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	keys, next, err := c.conn.Scan(ctx, cursor, pattern, int64(count)).Result()
-	if err != nil {
-		return nil, kvErr(err)
-	}
 	cur := uint32(c.db)
-	page := &protocol.RedisScanPage{Cursor: next, DB: &cur, Keys: []protocol.RedisKeyInfo{}}
-	for _, k := range keys {
-		typ, err := c.conn.Type(ctx, k).Result()
+	page := &protocol.RedisScanPage{DB: &cur, Keys: []protocol.RedisKeyInfo{}}
+	// D5 服务端游标循环（spec/behavior.md §1.3）：单轮 SCAN 只给建议批次，
+	// 这里续扫到凑满 count、游标回 0，或触及轮次上限（与 Rust 侧严格一致）。
+	for round := 0; round < scanMaxRounds; round++ {
+		keys, next, err := c.conn.Scan(ctx, cursor, pattern, int64(count)).Result()
 		if err != nil {
 			return nil, kvErr(err)
 		}
-		ttl := c.conn.TTL(ctx, k).Val()
-		// go-redis 的 DurationCmd 对负值（-1 无过期 / -2 不存在）以纳秒原样返回，
-		// 正值是整秒；直接 /time.Second 会把 -1ns 截断成 0（与 Rust 原始 TTL 对齐）。
-		ttlSec := int64(ttl / time.Second)
-		if ttl < 0 {
-			ttlSec = int64(ttl)
+		for _, k := range keys {
+			typ, err := c.conn.Type(ctx, k).Result()
+			if err != nil {
+				return nil, kvErr(err)
+			}
+			ttl := c.conn.TTL(ctx, k).Val()
+			// go-redis 的 DurationCmd 对负值（-1 无过期 / -2 不存在）以纳秒原样返回，
+			// 正值是整秒；直接 /time.Second 会把 -1ns 截断成 0（与 Rust 原始 TTL 对齐）。
+			ttlSec := int64(ttl / time.Second)
+			if ttl < 0 {
+				ttlSec = int64(ttl)
+			}
+			page.Keys = append(page.Keys, protocol.RedisKeyInfo{
+				Key:  k,
+				Type: redisKeyType(typ),
+				TTL:  &ttlSec,
+			})
 		}
-		page.Keys = append(page.Keys, protocol.RedisKeyInfo{
-			Key:  k,
-			Type: redisKeyType(typ),
-			TTL:  &ttlSec,
-		})
+		cursor = next
+		if cursor == 0 || len(page.Keys) >= count {
+			break
+		}
 	}
+	page.Cursor = cursor
 	return page, nil
 }
 

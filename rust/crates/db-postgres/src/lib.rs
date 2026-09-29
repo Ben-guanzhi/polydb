@@ -99,7 +99,7 @@ impl PostgresConn {
             return Value::String(v);
         }
         if let Ok(v) = row.try_get::<Vec<u8>, _>(i) {
-            return Value::String(format!("<blob {} bytes>", v.len()));
+            return polydb_core::blob_value(&v);
         }
         Value::String(format!("<{}>", raw.type_info().name()))
     }

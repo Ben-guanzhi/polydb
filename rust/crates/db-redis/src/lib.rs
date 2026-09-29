@@ -19,6 +19,12 @@ use polydb_db_core::{DatabaseDriver, KvDriver};
 /// 拨号/读/写超时（与 Go 侧 5s 对齐）。
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+/// D5（spec/behavior.md §1.3）：单次 scan_keys 内部续扫的轮次上限，Go 侧同名同值。
+const SCAN_MAX_ROUNDS: u32 = 100;
+
+#[cfg(test)]
+mod scan_tests;
+
 /// conn 为 Option：close() 时 take 掉并 drop，同步 Connection 在 Drop 时关闭 socket。
 pub struct RedisConn {
     conn: Mutex<Option<redis::Connection>>,
@@ -139,29 +145,38 @@ impl KvDriver for RedisConn {
         let count = if count == 0 { 100 } else { count };
         let mut guard = self.conn.lock();
         let conn = guard.as_mut().ok_or_else(Self::closed)?;
-        let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
-            .arg(cursor)
-            .arg("MATCH")
-            .arg(pattern)
-            .arg("COUNT")
-            .arg(count)
-            .query(conn)
-            .map_err(Self::err)?;
-        let mut page = RedisScanPage {
-            cursor: next,
-            db: Some(self.db.load(Ordering::Relaxed)),
-            keys: Vec::with_capacity(keys.len()),
-        };
-        for k in keys {
-            let typ: String = redis::cmd("TYPE").arg(&k).query(conn).map_err(Self::err)?;
-            let ttl: i64 = redis::cmd("TTL").arg(&k).query(conn).map_err(Self::err)?;
-            page.keys.push(RedisKeyInfo {
-                key: k,
-                key_type: Self::key_type_of(&typ),
-                ttl: Some(ttl),
-            });
+        // D5 服务端游标循环（spec/behavior.md §1.3）：单轮 SCAN 只给建议批次，
+        // 这里续扫到凑满 count、游标回 0，或触及轮次上限（与 Go 侧严格一致）。
+        let mut cursor = cursor;
+        let mut keys: Vec<RedisKeyInfo> = Vec::new();
+        for _ in 0..SCAN_MAX_ROUNDS {
+            let (next, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(pattern)
+                .arg("COUNT")
+                .arg(count)
+                .query(conn)
+                .map_err(Self::err)?;
+            for k in batch {
+                let typ: String = redis::cmd("TYPE").arg(&k).query(conn).map_err(Self::err)?;
+                let ttl: i64 = redis::cmd("TTL").arg(&k).query(conn).map_err(Self::err)?;
+                keys.push(RedisKeyInfo {
+                    key: k,
+                    key_type: Self::key_type_of(&typ),
+                    ttl: Some(ttl),
+                });
+            }
+            cursor = next;
+            if cursor == 0 || keys.len() >= count as usize {
+                break;
+            }
         }
-        Ok(page)
+        Ok(RedisScanPage {
+            cursor,
+            db: Some(self.db.load(Ordering::Relaxed)),
+            keys,
+        })
     }
 
     async fn key_type(&self, key: &str) -> CoreResult<RedisKeyType> {

@@ -12,3 +12,6 @@ async-trait = { workspace = true }
 thiserror = { workspace = true }
 redis = { workspace = true }
 parking_lot = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

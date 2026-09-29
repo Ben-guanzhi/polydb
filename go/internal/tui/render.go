@@ -20,9 +20,13 @@ const (
 )
 
 // cellString 把协议值渲染为可读文本（字符串去引号、NULL 大写、其余取 JSON 原文）。
+// $blob 值渲染为紧凑标签，与 Web 端 formatCell 对齐。
 func cellString(v protocol.Value) string {
 	if v.IsNull() {
 		return "NULL"
+	}
+	if n, _, isBlob := protocol.TryGetBlob(v); isBlob {
+		return fmt.Sprintf("<blob %d bytes>", n)
 	}
 	b, err := v.MarshalJSON()
 	if err != nil {
@@ -70,7 +74,17 @@ func resultTable(cols []protocol.ResultColumn, rows [][]protocol.Value, maxWidth
 }
 
 // cellFullText 单元格完整值：对象/数组字面量自动美化 JSON（与 Web tryParseJson 对齐）。
+// $blob 例外：完整值面板是 TUI 的取回/复制路径（spec §5.1），必须显示含 base64 的原始 JSON。
 func cellFullText(v protocol.Value) string {
+	if _, _, isBlob := protocol.TryGetBlob(v); isBlob {
+		if b, err := v.MarshalJSON(); err == nil {
+			var buf bytes.Buffer
+			if json.Indent(&buf, b, "", "  ") == nil {
+				return buf.String()
+			}
+			return string(b)
+		}
+	}
 	s := cellString(v)
 	t := strings.TrimSpace(s)
 	if !strings.HasPrefix(t, "{") && !strings.HasPrefix(t, "[") {

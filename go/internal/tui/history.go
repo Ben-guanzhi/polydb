@@ -10,7 +10,6 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/polydb/polydb/pkg/storage"
 )
 
 // queryHistoryLimit 抽屉展示 / 落盘保留的最大条数。
@@ -23,9 +22,21 @@ type histEntry struct {
 	SQL  string `json:"sql"`
 }
 
-// historyPath 历史 JSONL 路径：storage.DataDir()/query_history.jsonl（受 POLYDB_DATA_DIR 覆盖，便于测试）。
+// dataDirFn 解析历史 JSONL 所在的数据目录。TUI 不再直接 import pkg/storage
+// （分层约束：UI 层经由组合根注入解析器）；由 main.go 传入 storage.DataDir。
+var dataDirFn func() string
+
+// SetDataDirFunc 注入数据目录解析器（组合根调用）；每次取路径时调用，
+// 保持与直接调 storage.DataDir() 相同的 POLYDB_DATA_DIR 动态覆盖语义。
+func SetDataDirFunc(f func() string) { dataDirFn = f }
+
+// historyPath 历史 JSONL 路径：<dataDir>/query_history.jsonl。
 func historyPath() string {
-	return filepath.Join(storage.DataDir(), "query_history.jsonl")
+	dir := "."
+	if dataDirFn != nil {
+		dir = dataDirFn()
+	}
+	return filepath.Join(dir, "query_history.jsonl")
 }
 
 // appendHistory 追加一条历史并保留末尾 queryHistoryLimit 条（读回截断重写）。

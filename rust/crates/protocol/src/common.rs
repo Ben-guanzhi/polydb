@@ -143,3 +143,97 @@ pub enum GenericType {
     Enum,
     Other,
 }
+
+/// 二进制单元格的编码阈值（spec/encoding.md §5）：
+/// ≤1MB 内联 base64，>1MB 只回长度（旁路 Range 取回仍为预留设计）。
+pub const MAX_INLINE_BLOB_BYTES: usize = 1_048_576;
+
+/// 按 spec/encoding.md §5 的约定编码二进制单元格：
+/// `{"$blob": {"len": N, "base64": "..."}}`；超过阈值时省略 `base64`。
+/// 用既有的 Object 变体承载，msgpack 与 JSON 通道都能无损往返。
+pub fn blob_value(bytes: &[u8]) -> Value {
+    let mut inner = std::collections::HashMap::new();
+    inner.insert("len".to_string(), Value::Integer(bytes.len() as i64));
+    if bytes.len() <= MAX_INLINE_BLOB_BYTES {
+        inner.insert("base64".to_string(), Value::String(base64_encode(bytes)));
+    }
+    let mut outer = std::collections::HashMap::new();
+    outer.insert("$blob".to_string(), Value::Object(inner));
+    Value::Object(outer)
+}
+
+const B64_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// 标准 base64（RFC 4648，带 `=` 填充），与 Go `base64.StdEncoding` 逐字节一致。
+pub fn base64_encode(input: &[u8]) -> String {
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(B64_ALPHABET[(n >> 18) as usize & 63] as char);
+        out.push(B64_ALPHABET[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            B64_ALPHABET[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            B64_ALPHABET[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+#[cfg(test)]
+mod blob_tests {
+    use super::*;
+
+    #[test]
+    fn base64_matches_rfc4648_vectors() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+        assert_eq!(base64_encode(&[0x01, 0x02]), "AQI=");
+    }
+
+    #[test]
+    fn small_blob_inlines_base64() {
+        let v = blob_value(&[1, 2]);
+        let Value::Object(outer) = v else {
+            panic!("expected object");
+        };
+        let Some(Value::Object(inner)) = outer.get("$blob") else {
+            panic!("expected $blob key");
+        };
+        assert_eq!(inner.get("len"), Some(&Value::Integer(2)));
+        assert_eq!(
+            inner.get("base64"),
+            Some(&Value::String("AQI=".to_string()))
+        );
+    }
+
+    #[test]
+    fn oversized_blob_keeps_length_only() {
+        let big = vec![7u8; MAX_INLINE_BLOB_BYTES + 1];
+        let v = blob_value(&big);
+        let Value::Object(outer) = v else {
+            panic!("expected object");
+        };
+        let Some(Value::Object(inner)) = outer.get("$blob") else {
+            panic!("expected $blob key");
+        };
+        assert_eq!(
+            inner.get("len"),
+            Some(&Value::Integer((MAX_INLINE_BLOB_BYTES + 1) as i64))
+        );
+        assert!(!inner.contains_key("base64"));
+    }
+}

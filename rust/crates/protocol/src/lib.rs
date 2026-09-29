@@ -1,7 +1,8 @@
 //! PolyDB Protocol Types
 //!
-//! Generated from `spec/schemas/*.json`.
-//! This crate defines all wire types shared between Rust and Go implementations.
+//! 手工维护的线路类型，唯一真相源是 `spec/schemas/*.json`（非代码生成——
+//! `tools/genprotocol` 只生成 TS 与 ops 表）。一致性由 `go run polydb.dev/tools/genprotocol check`
+//! 门禁校验：本 crate 与 Go 侧 `pkg/protocol` 若与 spec 漂移即 CI 失败。
 
 pub mod common;
 pub mod connection;

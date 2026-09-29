@@ -811,7 +811,9 @@ fn emit_script(
 }
 
 fn inverse_op(op: Op) -> Op {
-    crate::ops_gen::lookup_op_row(op).map(|r| r.inverse).unwrap_or(op)
+    crate::ops_gen::lookup_op_row(op)
+        .map(|r| r.inverse)
+        .unwrap_or(op)
 }
 
 /// 正向条目 id → 反向条目 id：只替换最后一段 op。

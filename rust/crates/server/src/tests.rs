@@ -785,7 +785,11 @@ fn ws_encode(msg: &ClientMessage) -> Vec<u8> {
     buf
 }
 
-async fn ws_recv(ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>) -> ServerMessage {
+async fn ws_recv(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> ServerMessage {
     let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
         .await
         .expect("ws recv timeout")
@@ -825,9 +829,11 @@ async fn ws_query_without_auth_hello_rejected() {
     let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
 
     // 跳过 hello 直接带 connection_id 发 query：必须收到 UNAUTHORIZED 并被断开。
-    ws.send(WsMessage::Binary(ws_encode(&ws_query(id.parse().unwrap())).into()))
-        .await
-        .unwrap();
+    ws.send(WsMessage::Binary(
+        ws_encode(&ws_query(id.parse().unwrap())).into(),
+    ))
+    .await
+    .unwrap();
     match ws_recv(&mut ws).await {
         ServerMessage::QueryError { error, .. } => {
             assert_eq!(error.code, "POLYDB_ERR_UNAUTHORIZED", "got: {error:?}");
@@ -858,12 +864,19 @@ async fn ws_auth_hello_then_query_succeeds() {
             token: Some("secret-token".into()),
         }),
     };
-    ws.send(WsMessage::Binary(ws_encode(&hello).into())).await.unwrap();
-    assert!(matches!(ws_recv(&mut ws).await, ServerMessage::HelloAck { .. }));
-
-    ws.send(WsMessage::Binary(ws_encode(&ws_query(id.parse().unwrap())).into()))
+    ws.send(WsMessage::Binary(ws_encode(&hello).into()))
         .await
         .unwrap();
+    assert!(matches!(
+        ws_recv(&mut ws).await,
+        ServerMessage::HelloAck { .. }
+    ));
+
+    ws.send(WsMessage::Binary(
+        ws_encode(&ws_query(id.parse().unwrap())).into(),
+    ))
+    .await
+    .unwrap();
     assert!(matches!(
         ws_recv(&mut ws).await,
         ServerMessage::QueryStarted { .. }

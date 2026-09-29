@@ -125,7 +125,8 @@ func sqliteScenario(r *recorder) {
 		200, map[string]any{"statement_type": "insert", "affected_rows": int64(1)})
 
 	// 值类型矩阵：两端驱动必须产出相同的 Value 映射（NULL→nil、INTEGER→int、REAL→float、
-	// TEXT→string、BLOB→"<blob N bytes>" 占位符），这是 QueryResult rows 的核心 parity。
+	// TEXT→string、BLOB→{"$blob":{"len":N,"base64":...}} 内联编码，见 spec/encoding.md §5），
+	// 这是 QueryResult rows 的核心 parity。
 	r.step("type matrix create", "POST", "/api/connections/"+id+"/query",
 		map[string]any{"sql": "CREATE TABLE ct_types(id INTEGER PRIMARY KEY, s TEXT, i INTEGER, r REAL, b BLOB)"},
 		200, map[string]any{"statement_type": "ddl"})
@@ -138,7 +139,7 @@ func sqliteScenario(r *recorder) {
 		map[string]any{"sql": "SELECT s, i, r, b FROM ct_types ORDER BY id"},
 		200, map[string]any{
 			"rows": []any{
-				[]any{"hello", int64(42), 1.5, "<blob 2 bytes>"},
+				[]any{"hello", int64(42), 1.5, map[string]any{"$blob": map[string]any{"len": int64(2), "base64": "AQI="}}},
 				[]any{nil, nil, nil, nil},
 			},
 		}, keep("rows"))

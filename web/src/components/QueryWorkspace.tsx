@@ -97,6 +97,8 @@ const HISTORY_KEY = 'polydb.queryHistory';
 const THEME_KEY = 'polydb.theme';
 const INSPECTOR_KEY = 'polydb.inspector.v1';
 const HISTORY_LIMIT = 50;
+// 网格增量渲染窗口行数（触底哨兵进入视口即再扩这么多）。
+const GRID_RENDER_WINDOW = 300;
 
 type EditorTheme = 'vs' | 'vs-dark' | 'hc-black';
 const THEME_LABELS: Record<EditorTheme, string> = {
@@ -1269,6 +1271,26 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
     });
   }, [result, sortCol, sortDir, colFilters, editDrafts]);
 
+  // 增量渲染：服务端最多回 10000 行（spec/behavior.md §5），整表 DOM 会让大结果集
+  // 冻结滚动/编辑。这里只渲染前 renderLimit 行，触底哨兵进入视口即扩窗；
+  // 渲染的仍是真实行，选择/编辑/导出（作用于全量数组）行为不变。
+  const [renderLimit, setRenderLimit] = useState(GRID_RENDER_WINDOW);
+  useEffect(() => {
+    setRenderLimit(GRID_RENDER_WINDOW);
+  }, [result, sortCol, sortDir, colFilters]);
+  const gridSentinelRef = useRef<HTMLTableRowElement>(null);
+  useEffect(() => {
+    const el = gridSentinelRef.current;
+    if (!el || renderLimit >= displayRows.length) return;
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) {
+        setRenderLimit((n) => Math.min(n + GRID_RENDER_WINDOW, displayRows.length));
+      }
+    });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [renderLimit, displayRows.length]);
+
   const flashCell = (row: number, col: number, kind: 'ok' | 'err') => {
     const k = draftKey(row, col);
     setFlashCells((prev) => {
@@ -1811,7 +1833,11 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
   const editEnabled = pkCols.length > 0 && !!contextTable && !!contextSchema && result?.statement_type === 'select';
 
   const visibleColumns = columns.filter((_, j) => !hiddenCols.has(j));
-  const visibleRows = displayRows.map((entry) => ({ origIdx: entry.origIdx, cells: entry.row.filter((_, j) => !hiddenCols.has(j)) }));
+  // 全量派生供导出/检查器使用；渲染时只切前 renderLimit 行（增量渲染）。
+  const visibleRows = useMemo(
+    () => displayRows.map((entry) => ({ origIdx: entry.origIdx, cells: entry.row.filter((_, j) => !hiddenCols.has(j)) })),
+    [displayRows, hiddenCols],
+  );
   const exportRows = visibleRows.filter((entry) => selRows.size === 0 || selRows.has(entry.origIdx));
 
   // ── W1：结果区视图模式（表格 / JSON / 图表 / 消息）──
@@ -3870,7 +3896,7 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
                     </tr>
                   </thead>
                   <tbody>
-                    {visibleRows.map((entry, i) => {
+                    {visibleRows.slice(0, renderLimit).map((entry, i) => {
                       const realIdx = entry.origIdx;
                       const selected = selRows.has(realIdx);
                       const fullRow = (result.rows ?? [])[realIdx];
@@ -3963,6 +3989,13 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
                         </tr>
                       );
                     })}
+                    {renderLimit < displayRows.length && (
+                      <tr ref={gridSentinelRef}>
+                        <td colSpan={visibleColumns.length + 1} style={{ textAlign: 'center', color: 'var(--muted)', fontSize: 11 }}>
+                          已加载 {Math.min(renderLimit, displayRows.length)} / {displayRows.length} 行 · 继续滚动以加载更多
+                        </td>
+                      </tr>
+                    )}
                   </tbody>
                   </table>
                   {showInspector && inspectorEntry && (

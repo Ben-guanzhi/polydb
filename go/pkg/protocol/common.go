@@ -39,6 +39,12 @@ func NewStringValue(v string) Value {
 	return Value{raw: json.RawMessage(b)}
 }
 
+// NewObjectValue 构造 JSON 对象 Value（如 spec/encoding.md §5 的 $blob 编码）。
+func NewObjectValue(fields map[string]any) Value {
+	b, _ := json.Marshal(fields)
+	return Value{raw: json.RawMessage(b)}
+}
+
 func (v Value) MarshalJSON() ([]byte, error) {
 	if v.raw == nil {
 		return []byte("null"), nil

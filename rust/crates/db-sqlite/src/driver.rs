@@ -116,9 +116,7 @@ impl SqliteConn {
                 rusqlite::types::ValueRef::Text(b) => {
                     Value::String(String::from_utf8_lossy(b).into_owned())
                 }
-                rusqlite::types::ValueRef::Blob(b) => {
-                    Value::String(format!("<blob {} bytes>", b.len()))
-                }
+                rusqlite::types::ValueRef::Blob(b) => polydb_core::blob_value(b),
             };
             values.push(val);
         }

@@ -2,6 +2,7 @@ package dbcore
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -10,6 +11,21 @@ import (
 
 	"github.com/polydb/polydb/pkg/protocol"
 )
+
+// MaxInlineBlobBytes 是二进制单元格内联 base64 的阈值（spec/encoding.md §5），
+// 与 Rust polydb_protocol::common::MAX_INLINE_BLOB_BYTES 必须一致。
+const MaxInlineBlobBytes = 1024 * 1024
+
+// BlobValue 按 spec/encoding.md §5 约定编码二进制单元格：
+// {"$blob": {"len": N, "base64": "..."}}；超过阈值时省略 base64。
+// 用既有 Object 承载，msgpack / JSON 通道都能无损往返，与 Rust blob_value 对齐。
+func BlobValue(bytes []byte) protocol.Value {
+	inner := map[string]any{"len": len(bytes)}
+	if len(bytes) <= MaxInlineBlobBytes {
+		inner["base64"] = base64.StdEncoding.EncodeToString(bytes)
+	}
+	return protocol.NewObjectValue(map[string]any{"$blob": inner})
+}
 
 // ValueToDriver 将协议 Value 转为 database/sql 驱动参数。
 func ValueToDriver(v protocol.Value) any {
@@ -48,7 +64,7 @@ func DriverToValue(v any) protocol.Value {
 	case string:
 		return protocol.NewStringValue(t)
 	case []byte:
-		return protocol.NewStringValue(fmt.Sprintf("<blob %d bytes>", len(t)))
+		return BlobValue(t)
 	case time.Time:
 		return protocol.NewStringValue(t.Format("2006-01-02 15:04:05"))
 	case fmt.Stringer:
@@ -78,7 +94,7 @@ func DriverToValueTyped(v any, declType string) protocol.Value {
 		}
 	case "BLOB", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB", "BINARY", "VARBINARY",
 		"BYTEA", "BIT", "IMAGE":
-		return protocol.NewStringValue(fmt.Sprintf("<blob %d bytes>", len(b)))
+		return BlobValue(b)
 	}
 	return protocol.NewStringValue(string(b))
 }

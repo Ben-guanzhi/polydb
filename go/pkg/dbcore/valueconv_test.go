@@ -1,11 +1,20 @@
 package dbcore
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"testing"
 
 	"github.com/polydb/polydb/pkg/protocol"
 )
+
+func blobCell(b []byte) protocol.Value {
+	inner := map[string]any{"len": len(b)}
+	if len(b) <= MaxInlineBlobBytes {
+		inner["base64"] = base64.StdEncoding.EncodeToString(b)
+	}
+	return protocol.NewObjectValue(map[string]any{"$blob": inner})
+}
 
 func TestDriverToValueTyped(t *testing.T) {
 	cases := []struct {
@@ -23,8 +32,8 @@ func TestDriverToValueTyped(t *testing.T) {
 		{"decimal as string", []byte("10.50"), "DECIMAL(10,2)", protocol.NewStringValue("10.50")},
 		{"datetime as string", []byte("2024-01-02 03:04:05"), "DATETIME", protocol.NewStringValue("2024-01-02 03:04:05")},
 		{"varchar as string", []byte("hello"), "VARCHAR(255)", protocol.NewStringValue("hello")},
-		{"blob stays placeholder", []byte{0x00, 0x01, 0x02}, "BLOB", protocol.NewStringValue("<blob 3 bytes>")},
-		{"binary stays placeholder", []byte{0xff, 0xfe}, "VARBINARY(16)", protocol.NewStringValue("<blob 2 bytes>")},
+		{"blob inlines base64", []byte{0x00, 0x01, 0x02}, "BLOB", blobCell([]byte{0x00, 0x01, 0x02})},
+		{"binary inlines base64", []byte{0xff, 0xfe}, "VARBINARY(16)", blobCell([]byte{0xff, 0xfe})},
 		{"non-bytes delegates", int64(99), "BIGINT", protocol.NewIntValue(99)},
 		{"nil delegates", nil, "INT", protocol.NewNullValue()},
 		{"unparseable int falls back string", []byte("not-a-number"), "INT", protocol.NewStringValue("not-a-number")},
@@ -43,4 +52,15 @@ func valuesEqual(a, b protocol.Value) bool {
 	ra, _ := json.Marshal(a)
 	rb, _ := json.Marshal(b)
 	return string(ra) == string(rb)
+}
+
+// 超过 spec/encoding.md §5 的 1MB 阈值：只回长度，不内联 base64。
+func TestBlobValueOverThresholdOmitsBase64(t *testing.T) {
+	big := make([]byte, MaxInlineBlobBytes+1)
+	want := protocol.NewObjectValue(map[string]any{
+		"$blob": map[string]any{"len": len(big)},
+	})
+	if got := BlobValue(big); !valuesEqual(got, want) {
+		t.Errorf("oversized BlobValue kept base64: %v", got)
+	}
 }

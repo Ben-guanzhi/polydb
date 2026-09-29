@@ -22,7 +22,11 @@ type AppRef = Arc<AppCore>;
 
 const SERVER_VERSION: &str = "0.1.0";
 
-pub async fn ws_upgrade(State(state): State<AppState>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+pub async fn ws_upgrade(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
     // 防浏览器跨站 WebSocket 劫持（CSWSH），契约同 Go 侧 checkWSOrigin：
     // 无 Origin（非浏览器）、同源、POLYDB_ALLOWED_ORIGINS 白名单放行，其余拒绝。
     if !check_origin(&headers) {
@@ -356,7 +360,10 @@ mod tests {
 
     #[test]
     fn same_origin_is_allowed() {
-        assert!(check_origin(&headers(Some("http://127.0.0.1:8080"), Some("127.0.0.1:8080"))));
+        assert!(check_origin(&headers(
+            Some("http://127.0.0.1:8080"),
+            Some("127.0.0.1:8080")
+        )));
     }
 
     #[test]
@@ -369,8 +376,14 @@ mod tests {
 
     #[test]
     fn malformed_origin_is_rejected() {
-        assert!(!check_origin(&headers(Some("not-a-url"), Some("127.0.0.1:8080"))));
-        assert!(!check_origin(&headers(Some("https://"), Some("127.0.0.1:8080"))));
+        assert!(!check_origin(&headers(
+            Some("not-a-url"),
+            Some("127.0.0.1:8080")
+        )));
+        assert!(!check_origin(&headers(
+            Some("https://"),
+            Some("127.0.0.1:8080")
+        )));
     }
 
     #[test]

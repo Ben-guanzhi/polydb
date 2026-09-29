@@ -49,9 +49,9 @@ pub fn detect_statement_type(sql: &str) -> StatementType {
 /// 后者把数据修改 CTE（`WITH … DELETE/UPDATE/INSERT`）与 TRUNCATE/GRANT 等
 /// 归入 select/other，会让这些写语句漏过只读红线。
 const MUTATING_KEYWORDS: &[&str] = &[
-    "INSERT", "UPDATE", "DELETE", "MERGE", "REPLACE", "TRUNCATE", "GRANT",
-    "REVOKE", "CREATE", "ALTER", "DROP", "CALL", "EXEC", "EXECUTE", "COPY",
-    "VACUUM", "REINDEX", "CLUSTER", "LOCK", "COMMENT",
+    "INSERT", "UPDATE", "DELETE", "MERGE", "REPLACE", "TRUNCATE", "GRANT", "REVOKE", "CREATE",
+    "ALTER", "DROP", "CALL", "EXEC", "EXECUTE", "COPY", "VACUUM", "REINDEX", "CLUSTER", "LOCK",
+    "COMMENT",
 ];
 
 /// 判断语句是否包含变更关键字。扫描整条语句（含 WITH 子树与多语句），先剥离
@@ -137,9 +137,18 @@ mod tests {
             ("-- DROP TABLE users\nSELECT 1", false),
             ("/* update */ SELECT 1", false),
             ("SELECT 'insert' AS note", false),
-            ("WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d", true),
-            ("WITH u AS (UPDATE t SET x = 1 RETURNING x) SELECT * FROM u", true),
-            ("WITH i AS (INSERT INTO t VALUES (1) RETURNING id) SELECT * FROM i", true),
+            (
+                "WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d",
+                true,
+            ),
+            (
+                "WITH u AS (UPDATE t SET x = 1 RETURNING x) SELECT * FROM u",
+                true,
+            ),
+            (
+                "WITH i AS (INSERT INTO t VALUES (1) RETURNING id) SELECT * FROM i",
+                true,
+            ),
             ("TRUNCATE TABLE t", true),
             ("GRANT SELECT ON t TO u", true),
             ("CALL do_write()", true),

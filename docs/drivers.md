@@ -61,7 +61,7 @@ TTL 不在 driver API 中（set_value 只有 key+value），过期时间通过 `
 ## 契约测试
 
 - 场景：`test/contract/contract_test.go` — `TestContractSQLite`（全流程真跑）、`TestContractPostgres/MySQL/MSSQL/Oracle`（网络场景，软跳过）、`TestContractRedis`（KV 场景，软跳过）。
-- SQLite 场景另覆盖：**值类型矩阵**（NULL/INTEGER/REAL/TEXT/BLOB 的 rows 值映射 parity，BLOB 两端统一 `"<blob N bytes>"` 占位符）、**batch stop_on_error=true**（错误项 append 后 break，results 仅 1 项）、**单条 GET /api/connections/:id**、空库 `[]` wire 断言。
+- SQLite 场景另覆盖：**值类型矩阵**（NULL/INTEGER/REAL/TEXT/BLOB 的 rows 值映射 parity，BLOB 两端统一 `$blob` 内联编码 `{"len":N,"base64":...}`，见 spec/encoding.md §5.1）、**batch stop_on_error=true**（错误项 append 后 break，results 仅 1 项）、**单条 GET /api/connections/:id**、空库 `[]` wire 断言。
 - 环境变量（默认 DSN 均为本机免密）：`POLYDB_TEST_PG`、`POLYDB_TEST_MYSQL`、`POLYDB_TEST_MSSQL`、`POLYDB_TEST_ORACLE`、`POLYDB_TEST_REDIS`（默认 `localhost:6379`）。网络 DSN 支持 `scheme://user:password@host:port/db`（密码按 URL 百分号转义），带密码时创建连接自动携带 `password` 字段（MSSQL 容器强制 sa 密码即用此路径）。
 - 网络场景 SQL 用唯一表名 `ct_users_<unixnano%1e8>`，避免重复跑测试时的残留表；Oracle 标识符大写，SELECT 用 `AS "id"` 小写别名对齐列名断言。
 - Redis 场景键名带唯一后缀 `ct:redis:<type>:<unixnano%1e8>`；SCAN 不保证单轮返回全部匹配，`scanAllKeys` 循环收集到 `cursor=0` 再断言；持久键断言 `ttl=-1`（无过期竞态）；流 ID 由 Redis 生成，比对前用 `onlyStreamData` 剥离动态 ID。

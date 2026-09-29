@@ -25,6 +25,9 @@ import (
 // 测试阻塞 30s/跳；心跳逻辑由 TestHeartbeatArming 单独覆盖。
 func TestMain(t *testing.M) {
 	heartbeatDisabled = true
+	// 历史目录注入 storage.DataDir（与 main.go 组合根一致）：测试里
+	// t.Setenv("POLYDB_DATA_DIR") 仍能动态改写历史落盘位置。
+	SetDataDirFunc(storage.DataDir)
 	// 固定主题档位：非 tty 下 termenv 自动探测为 Ascii 会剥离样式，
 	// 令断言 ANSI 的测试不确定；显式设 ANSI 深色底使样式可预期。
 	os.Setenv("POLYDB_TUI_COLOR", "ansi")
@@ -78,6 +81,8 @@ func TestCellString(t *testing.T) {
 		{protocol.NewIntValue(42), "42"},
 		{protocol.NewBoolValue(true), "true"},
 		{protocol.NewFloatValue(1.5), "1.5"},
+		{protocol.NewObjectValue(map[string]any{"$blob": map[string]any{"len": int64(2), "base64": "AQI="}}), "<blob 2 bytes>"},
+		{protocol.NewObjectValue(map[string]any{"$blob": map[string]any{"len": int64(2000000)}}), "<blob 2000000 bytes>"},
 	}
 	for _, c := range cases {
 		if got := cellString(c.v); got != c.want {
@@ -135,6 +140,18 @@ func TestCellFullText(t *testing.T) {
 	}
 	if got := cellFullText(protocol.NewIntValue(7)); got != "7" {
 		t.Errorf("int = %q", got)
+	}
+	// $blob：完整值面板保留原始 JSON（含 base64，取回/复制路径），网格才用紧凑标签
+	blob := protocol.NewObjectValue(map[string]any{"$blob": map[string]any{"len": int64(2), "base64": "AQI="}})
+	got := cellFullText(blob)
+	if !strings.Contains(got, "$blob") || !strings.Contains(got, "AQI=") {
+		t.Errorf("blob full text lost base64 payload:\n%s", got)
+	}
+	if strings.Contains(got, "<blob") {
+		t.Errorf("blob full text should not use compact label:\n%s", got)
+	}
+	if got := cellString(blob); got != "<blob 2 bytes>" {
+		t.Errorf("cellString blob = %q", got)
 	}
 }
 

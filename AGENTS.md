@@ -135,8 +135,13 @@ pub struct Connection { driver: Arc<dyn DatabaseDriver> }
 
 impl Connection {
     pub fn new(driver: Arc<dyn DatabaseDriver>) -> Self;   // kind 由驱动自身决定
-    pub fn as_sql(&self) -> Option<&dyn SqlDriver>;
-    pub fn sql_driver_arc(&self) -> Option<Arc<dyn SqlDriver>>; // → SqlConnection::new(conn) 包装
+    // 草案为 Option，实现定稿为 Result：Connection 层把能力缺失降级为
+    // ErrNotSupported，错误消息单点生成，与 Go 侧
+    // `Connection.AsSQL() (SQLDriver, error)` 严格一致；
+    // 驱动层探针仍为草案形态 `as_sql()/as_kv() -> Option`（Go 为 `(Driver, bool)`）。
+    pub fn as_sql(&self) -> CoreResult<&dyn SqlDriver>;
+    pub fn as_kv(&self) -> CoreResult<&dyn KvDriver>;
+    pub fn sql_driver_arc(&self) -> CoreResult<Arc<dyn SqlDriver>>; // → SqlConnection::new(conn) 包装
 }
 
 pub struct SqlConnection { conn: Arc<dyn SqlDriver> }
@@ -182,7 +187,7 @@ REST 控制面（连接/元数据/DDL）	MessagePack
 REST 数据面（查询结果）	MessagePack（当前实现；Arrow IPC 为预留，未实现）
 WebSocket 事件	MessagePack
 WebSocket 大结果流	MessagePack（当前实现；Arrow IPC stream 为预留，未实现）
-大字段（BLOB/大 TEXT）	预留（旁路 + Range 请求，未实现；当前直接在结果集内联）
+大字段（BLOB）	按 spec/encoding.md §5.1 的 $blob 编码内联（≤1MB 含 base64，超阈值仅发长度）；旁路 + Range 请求为预留（§5.2），未实现
 进程内（GUI/TUI↔app-core）	零序列化，直接传结构体
 Content-Type：application/msgpack（预留：application/vnd.apache.arrow.stream）。
 
@@ -315,7 +320,7 @@ M8	SSH 隧道、keyring、Pub/Sub、Cluster（可选）
 
 不要在数据面引入 JSON；用 MessagePack / Arrow。
 
-不要把大字段内联进结果集；用旁路引用。
+不要把大字段内容无限内联进结果集；按 spec/encoding.md §5 执行阈值策略（≤1MB 内联 $blob，超阈值仅发长度；旁路引用为预留）。
 
 不要在 DB 里存明文密码。
 
@@ -379,7 +384,7 @@ make gen-protocol   # spec/ → rust/crates/protocol, go/pkg/protocol, web/src/a
 
 ❌ 数据面用 JSON
 
-❌ 大字段内联结果集
+❌ 大字段内容无界内联（超过 1MB 仍内联，违反 spec §5）
 
 ❌ 明文密码落库
 

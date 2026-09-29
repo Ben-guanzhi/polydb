@@ -156,8 +156,7 @@ function stripComments(text: string): string {
   return text.replace(/--[^\n]*/g, ' ').replace(/\/\*[\s\S]*?\*\*/g, ' ');
 }
 
-function findContext(text: string, endOffset: number): { kind: 'keyword' | 'column'; table?: { schema?: string; name: string } } {
-  const upto = text.slice(Math.max(0, endOffset - 400), endOffset);
+function findContext(upto: string): { kind: 'keyword' | 'column'; table?: { schema?: string; name: string } } {
   const cleaned = stripComments(upto);
   const tableRe = /\b(?:FROM|JOIN|UPDATE|INTO|TABLE)\s+((?:[A-Za-z_][\w$]*\.)?[A-Za-z_][\w$]*)\b/g;
   let lastIndex = -1;
@@ -180,6 +179,18 @@ function findContext(text: string, endOffset: number): { kind: 'keyword' | 'colu
   return { kind: 'column', table };
 }
 
+// 游标前窗口：getValueInRange 只切回 ~400 字符，避免每次按键序列化整篇文档（O(doc)）。
+function windowBeforeCursor(model: monaco.editor.ITextModel, position: monaco.Position): string {
+  const offset = model.getOffsetAt(position);
+  const from = model.getPositionAt(Math.max(0, offset - 400));
+  return model.getValueInRange({
+    startLineNumber: from.lineNumber,
+    startColumn: from.column,
+    endLineNumber: position.lineNumber,
+    endColumn: position.column,
+  });
+}
+
 let registered = false;
 const connIdRef: { current: string | null } = { current: null };
 
@@ -198,7 +209,6 @@ export function registerSqlCompletionGlobal(): void {
     async provideCompletionItems(model, position) {
       const connId = connIdRef.current;
       if (!connId) return { suggestions: [] };
-      const offset = model.getOffsetAt(position);
       const lineText = model.getLineContent(position.lineNumber);
       const lineUpto = lineText.slice(0, position.column - 1);
       const rawKind = await getConnKind(connId);
@@ -222,7 +232,7 @@ export function registerSqlCompletionGlobal(): void {
 
       // `.` 后：优先补列
       if (lineUpto.endsWith('.')) {
-        const ctx = findContext(model.getValue(), offset);
+        const ctx = findContext(windowBeforeCursor(model, position));
         if (ctx.kind === 'column' && ctx.table) {
           const schema = ctx.table.schema ?? meta.schemas[0] ?? '';
           const cols = await getCols(connId, schema, ctx.table.name);
@@ -256,7 +266,7 @@ export function registerSqlCompletionGlobal(): void {
       }
 
       // 列上下文：追加该表列
-      const ctx = findContext(model.getValue(), offset);
+      const ctx = findContext(windowBeforeCursor(model, position));
       if (ctx.kind === 'column' && ctx.table) {
         const schema = ctx.table.schema ?? meta.schemas[0] ?? '';
         const cols = await getCols(connId, schema, ctx.table.name);

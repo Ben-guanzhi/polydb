@@ -24,6 +24,9 @@ func main() {
 	flag.Parse()
 
 	var client transport.Client
+	// 查询历史 JSONL 落在数据目录（两种模式都用本地目录）；
+	// 由组合根注入解析器，internal/tui 不再直接 import pkg/storage。
+	tui.SetDataDirFunc(storage.DataDir)
 	if *server != "" {
 		// 远程模式：无需本地存储/密钥环（连接与密码都归属服务端）。
 		remote := transport.NewRemote(*server)

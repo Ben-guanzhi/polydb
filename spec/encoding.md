@@ -18,7 +18,7 @@
 | 错误响应 | JSON | `application/json` |
 | 调试 / 握手 | JSON | `application/json` |
 
-> **状态说明**：Arrow IPC（`application/vnd.apache.arrow.stream`）与大数据体旁路（§3、§5）均为**预留设计，当前未实现**——REST 与 WebSocket 数据面的实际格式一律 MessagePack。实现 Arrow 后按本文件约定回填。
+> **状态说明**：Arrow IPC（`application/vnd.apache.arrow.stream`）与大数据体旁路（§3、§5.2）均为**预留设计，当前未实现**——REST 与 WebSocket 数据面的实际格式一律 MessagePack。BLOB 值按 §5.1 的 `$blob` 编码内联（≤1MB 含 base64）。实现 Arrow 后按本文件约定回填。
 
 ---
 
@@ -74,13 +74,26 @@ JSON 仅用于：
 
 ---
 
-## 5. 大字段旁路（预留，未实现）
+## 5. 大字段（BLOB）编码与旁路
 
-> 本节为预留设计。当前大字段（BLOB/大 TEXT）直接在结果集内联，未做旁路引用。以下约定在实现旁路时生效。
+### 5.1 内联 `$blob` 编码（已实现）
 
-大字段（BLOB / 大 TEXT，阈值 1MB）**不内联**到结果集中。
+BLOB 值在结果集中以 tagged object 内联编码（复用 Value 的 Object 变体，MessagePack / JSON 两通道形状一致）：
 
-替代方案：
+```json
+{"$blob": {"len": 1024, "base64": "..."}}
+```
+
+- `len`：原始字节数（整数），始终存在。
+- `base64`：RFC 4648 标准字母表、含 `=` 填充的完整编码；仅当 `len <= 1048576`（1MB）时内联，超阈值只发长度、不发内容。
+- 两端驱动（Rust `blob_value` / Go `BlobValue`）必须产出逐字段一致的结果；契约测试的类型矩阵以 `X'0102'` → `{"$blob":{"len":2,"base64":"AQI="}}` 锁定 parity。
+- Web 网格单元格显示 `<blob N bytes>`，"复制单元格"导出 base64 内容；预览面板显示完整 JSON（含 base64），即取回路径。
+- TUI 网格单元格同样显示 `<blob N bytes>` 紧凑标签；「完整值」面板（`cellFullText`）保留原始 JSON 供终端选择复制。
+
+### 5.2 旁路引用（预留，未实现）
+
+> 预留设计：超过 1MB 的大字段当前只有长度占位（无内容），以下为将来启用旁路时的约定。
+
 1. 结果集中大字段位置替换为引用 ID（`$polydb_blob:<uuid>`）
 2. 客户端通过 REST 接口获取大字段内容：
    ```
