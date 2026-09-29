@@ -19,7 +19,7 @@ pub mod ops_gen;
 
 pub use ddl::{
     generate, select_entries, Script, Statement, W_ADD_COLUMN_LIMITS, W_AUTOINCREMENT,
-    W_CHECK_CONSTRAINTS, W_CREATE_TABLE, W_DROP_COLUMN_CHECK, W_GENERATED_COLUMNS,
+    W_CHECK_CONSTRAINTS, W_CREATE_TABLE, W_DROP_COLUMN_CHECK, W_FK_CYCLE, W_GENERATED_COLUMNS,
     W_REBUILD_NEW_NOT_NULL, W_TRIGGERS,
 };
 pub use normalize::{lower_ascii, normalize_default, normalize_type};
@@ -799,6 +799,38 @@ mod tests {
         )
         .unwrap();
         assert!(out.is_empty(), "应为空计划：{out:?}");
+    }
+
+    /// 新建表成环时拓扑必须**终止**，且输出与快照数组顺序无关。
+    ///
+    /// 环上没有拓扑序可言，实现取 DFS 到达序（`users` 先出，因为 DFS 从 `orders` 进入、
+    /// 递归到 `users` 后才落 `orders`）。这条测试锁两点：不死循环、不受输入数组顺序影响。
+    /// 逐字输出另由共享语料 `17_create_table_fk_cycle.json` 与 Go 侧对拍。
+    #[test]
+    fn create_table_topo_on_a_cycle_terminates_and_ignores_input_order() {
+        let users = || {
+            let mut t = table("users", vec![col("id", "integer", false)]);
+            t.foreign_keys = vec![fk("fk_users_order", &["order_id"], "orders", &["id"])];
+            t
+        };
+        let orders = || {
+            let mut t = table("orders", vec![col("id", "integer", false)]);
+            t.foreign_keys = vec![fk("fk_orders_user", &["user_id"], "users", &["id"])];
+            t
+        };
+        let plan = |tables: Vec<TableSnapshot>| {
+            diff(
+                &snap(DatabaseKind::Postgres, vec![]),
+                &snap(DatabaseKind::Postgres, tables),
+                &Options::default(),
+            )
+            .unwrap()
+            .iter()
+            .map(|e| e.table.clone())
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(plan(vec![orders(), users()]), ["users", "orders"]);
+        assert_eq!(plan(vec![users(), orders()]), ["users", "orders"]);
     }
 
     #[test]

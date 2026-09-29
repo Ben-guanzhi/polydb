@@ -396,7 +396,9 @@ Entry          { id, op, phase, table, object?, from?, to?, flags?, destructive,
 - 全序排序键 `(phase, lower(table), lower(object), id)`；`op` 拼在 `id` 里，所以同相位的
   drop/add 对（`idx_a` 与 `primary` 这类）由对象名再自然定序，不做额外特判。
 - `create_table` 段整体替换为 **DFS 拓扑序**（被引用表先建），拓扑内部以名字序为 tie-break，
-  **成环时不报错**、按到达顺序放行（执行期由数据库报错兜底，与视图策略一致）。
+  **成环时不报错**、按到达顺序放行（执行期由数据库报错兜底，与视图策略一致）；
+  到达顺序只是**不承诺**父子先后，并非"退回名字序"（此前提过，见 `spec/behavior.md` §14.4 订正）。
+  环上每张新建表挂 §15.8 的成环告警，把"顺序无法保证"说出口，不再静默。
 - `destructive` = 四类 Drop；`selected = !destructive || opts.select_destructive`（D4：默认不勾选）。
 
 ### A.4 归一规则（「同一语义不同写法」折叠，双端逐字等价）

@@ -1,0 +1,69 @@
+{
+  "name": "17_create_table_fk_cycle",
+  "note": "新建表之间成环（orders→users、users→orders）：拓扑排序只能按 DFS 到达序输出，父表不在前；名字序也不是兜底（§14.4 的文案已按实现更正）",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": { "kind": "postgres", "schema": "public", "tables": [] },
+  "target": {
+    "kind": "postgres",
+    "schema": "public",
+    "tables": [
+      {
+        "name": "orders",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "integer", "nullable": false, "ordinal_position": 1 },
+          { "name": "user_id", "data_type": "integer", "nullable": false, "ordinal_position": 2 }
+        ],
+        "indexes": [],
+        "foreign_keys": [
+          {
+            "name": "fk_orders_user",
+            "columns": ["user_id"],
+            "referenced_schema": "public",
+            "referenced_table": "users",
+            "referenced_columns": ["id"],
+            "on_delete": "cascade"
+          }
+        ]
+      },
+      {
+        "name": "users",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "integer", "nullable": false, "ordinal_position": 1 },
+          { "name": "order_id", "data_type": "integer", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [],
+        "foreign_keys": [
+          {
+            "name": "fk_users_order",
+            "columns": ["order_id"],
+            "referenced_schema": "public",
+            "referenced_table": "orders",
+            "referenced_columns": ["id"]
+          }
+        ]
+      }
+    ]
+  },
+  "expected": [
+    {
+      "id": "users//create_table",
+      "op": "create_table",
+      "phase": 50,
+      "table": "users",
+      "destructive": false,
+      "selected": true,
+      "reason": "表中缺失，需新建"
+    },
+    {
+      "id": "orders//create_table",
+      "op": "create_table",
+      "phase": 50,
+      "table": "orders",
+      "destructive": false,
+      "selected": true,
+      "reason": "表中缺失，需新建"
+    }
+  ]
+}

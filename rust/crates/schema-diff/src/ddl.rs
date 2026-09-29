@@ -57,6 +57,9 @@ pub const W_REBUILD_NEW_NOT_NULL: &str =
 /// 视图警告里的名单上限：再多只报数不报名（警告是给人扫一眼的）。
 const VIEW_WARN_MAX: usize = 5;
 
+/// 新建表之间的外键环警告（§14.4 的拓扑排序在环上只能按 DFS 到达序输出）。
+pub const W_FK_CYCLE: &str = "外键依赖成环";
+
 /// 「N 个视图（a, b 等）」——快照里的视图名升序，超过 5 个以「等」收尾。
 fn view_scope(names: &[String]) -> String {
     let head = names
@@ -88,6 +91,83 @@ fn w_view_rebuild(views: &[String]) -> String {
         "本库现有 {}：重建经 RENAME，而 SQLite 改名时会重解析依赖该表的视图 ⇒ 有视图引用它就整条重建报错",
         view_scope(views)
     )
+}
+
+/// 环警告里的名单渲染：「2 个表（orders, users）」，超过 5 个以「等」收尾。
+/// 名单是**小写键升序**——拓扑与依赖图都建在小写键上，报小写键才与判据同源。
+fn table_scope(names: &[String]) -> String {
+    let head = names
+        .iter()
+        .take(VIEW_WARN_MAX)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if names.len() > VIEW_WARN_MAX {
+        format!("{} 个表（{head} 等）", names.len())
+    } else {
+        format!("{} 个表（{head}）", names.len())
+    }
+}
+
+/// 建表成环的警告。SQLite 允许先建引用不存在父表的表（到**写入**时才报错），
+/// 所以这里只说顺序不保证，不说语句会失败。
+fn w_fk_cycle(names: &[String]) -> String {
+    format!(
+        "{W_FK_CYCLE}：{}互相引用，建表顺序无法保证父表在前（SQLite 到写入时才报错）",
+        table_scope(names)
+    )
+}
+
+/// 本次计划里**新建表之间**的 FK 环：返回位于任一环上的表（小写键，升序）。
+///
+/// 依赖边与 §14.4 的拓扑排序同源（只认同批新建表、排除自引用）。判据用「从自己出发
+/// 能否走回自己」而不是 Tarjan SCC：可达结果是一个集合，与遍历顺序无关 ⇒ 双端实现
+/// 必然逐字一致，而 SCC 的低链值依赖 DFS 编号，跨语言对齐的风险更高。
+fn fk_cycle_keys(entries: &[Entry], tgt: &BTreeMap<String, &TableSnapshot>) -> Vec<String> {
+    let mut built: BTreeSet<String> = BTreeSet::new();
+    for e in entries {
+        if e.op == Op::CreateTable {
+            built.insert(lower_ascii(&e.table));
+        }
+    }
+    if built.len() < 2 {
+        return Vec::new();
+    }
+    let mut deps: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for k in &built {
+        let Some(t) = tgt.get(k) else { continue };
+        let mut d: Vec<String> = t
+            .foreign_keys
+            .iter()
+            .map(|f| lower_ascii(&f.referenced_table))
+            .filter(|r| built.contains(r) && r != k)
+            .collect();
+        d.sort();
+        d.dedup();
+        deps.insert(k.clone(), d);
+    }
+    let mut cyclic = Vec::new();
+    for k in &built {
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut stack: Vec<String> = deps.get(k).cloned().unwrap_or_default();
+        let mut back_to_self = false;
+        while let Some(n) = stack.pop() {
+            if &n == k {
+                back_to_self = true;
+                break;
+            }
+            if !seen.insert(n.clone()) {
+                continue;
+            }
+            if let Some(d) = deps.get(&n) {
+                stack.extend(d.iter().cloned());
+            }
+        }
+        if back_to_self {
+            cyclic.push(k.clone());
+        }
+    }
+    cyclic
 }
 
 const PRAGMA_FK_OFF: &str = "PRAGMA foreign_keys=OFF;";
@@ -602,19 +682,25 @@ fn rebuild_statements(
     out
 }
 
-/// 直改动作 → 单条语句。
+/// 直改动作 → 单条语句。`cyclic` 是本次计划里成环的表小写键（升序），只影响建表告警。
 fn direct_statement(
     kind: DatabaseKind,
     e: &Entry,
     src: Option<&TableSnapshot>,
     tgt: Option<&TableSnapshot>,
     views: &[String],
+    cyclic: &[String],
 ) -> CoreResult<Statement> {
     let one = vec![e.id.clone()];
     let nr = entry_non_reversible(e);
     match e.op {
         Op::CreateTable => {
             let t = table_or_err(tgt, &e.table)?;
+            let key = lower_ascii(&e.table);
+            let mut warnings = create_warnings(kind, t);
+            if cyclic.contains(&key) {
+                warnings.push(w_fk_cycle(cyclic));
+            }
             Ok(mk_stmt(
                 &one,
                 format!(
@@ -624,7 +710,7 @@ fn direct_statement(
                 ),
                 e.phase,
                 &e.table,
-                create_warnings(kind, t),
+                warnings,
                 nr,
             ))
         }
@@ -777,6 +863,8 @@ fn emit_script(
     }
 
     // 3. 按条目顺序输出（E1 的计划顺序已含建表拓扑，这里不再重排）
+    //    环上的表要挂警告：拓扑在环上只能按 DFS 到达序出，顺序承诺不了父表在前。
+    let cyclic = fk_cycle_keys(entries, &tgt);
     let mut out: Vec<Statement> = Vec::new();
     let mut done: BTreeSet<String> = BTreeSet::new();
     for e in entries {
@@ -796,6 +884,7 @@ fn emit_script(
             src.get(&k).copied(),
             tgt.get(&k).copied(),
             &seen.views,
+            &cyclic,
         )?);
     }
 
@@ -1422,6 +1511,134 @@ mod tests {
         assert_eq!(view_names(&single), ["v_a"]);
         let no_view = snap(DatabaseKind::Sqlite, vec![table("t", Vec::new())]);
         assert!(view_names(&no_view).is_empty());
+    }
+
+    /// 成环的判据：只有真正闭合环路的表被报出。自引用不算环（与拓扑排序的过滤条件一致）、
+    /// 单向链不算环、指向**本次计划外**的表不算环、大小写不同的引用要能闭环。
+    #[test]
+    fn fk_cycle_keys_reports_only_tables_that_close_a_loop() {
+        let cyclic = |tables: Vec<TableSnapshot>| {
+            let s = snap(DatabaseKind::Sqlite, tables);
+            let m = table_map(&s);
+            let entries: Vec<Entry> = s
+                .tables
+                .iter()
+                .map(|t| entry(Op::CreateTable, &t.name, ""))
+                .collect();
+            fk_cycle_keys(&entries, &m)
+        };
+        assert!(
+            cyclic(vec![with_fks(
+                table("t", vec![col("parent_id", "integer", true, 1)]),
+                vec![fk(&["parent_id"], "t", &["id"])]
+            )])
+            .is_empty(),
+            "自引用不该算环"
+        );
+        assert!(
+            cyclic(vec![
+                with_fks(
+                    table("a", vec![col("b_id", "integer", true, 1)]),
+                    vec![fk(&["b_id"], "b", &["id"])]
+                ),
+                table("b", vec![col("id", "integer", false, 1)])
+            ])
+            .is_empty(),
+            "单向链不该算环"
+        );
+        assert!(
+            cyclic(vec![
+                with_fks(
+                    table("a", vec![col("x_id", "integer", true, 1)]),
+                    vec![fk(&["x_id"], "outside", &["id"])]
+                ),
+                table("b", vec![col("id", "integer", false, 1)])
+            ])
+            .is_empty(),
+            "指向计划外的表不该算环"
+        );
+        assert_eq!(
+            cyclic(vec![
+                with_fks(
+                    table("a", vec![col("b_id", "integer", true, 1)]),
+                    vec![fk(&["b_id"], "b", &["id"])]
+                ),
+                with_fks(
+                    table("b", vec![col("c_id", "integer", true, 1)]),
+                    vec![fk(&["c_id"], "c", &["id"])]
+                ),
+                // 反向引用写成大写 `A`：环的判据走小写键，必须照样闭环
+                with_fks(
+                    table("c", vec![col("a_id", "integer", true, 1)]),
+                    vec![fk(&["a_id"], "A", &["id"])]
+                ),
+            ]),
+            ["a", "b", "c"]
+        );
+    }
+
+    /// 环上的两条 CREATE TABLE 各挂一条成环警告；无环时一条都不许出。
+    #[test]
+    fn create_tables_on_a_foreign_key_cycle_are_warned() {
+        let src = snap(DatabaseKind::Sqlite, Vec::new());
+        let cyclic = snap(
+            DatabaseKind::Sqlite,
+            vec![
+                with_fks(
+                    table(
+                        "orders",
+                        vec![
+                            col("id", "INTEGER", false, 1),
+                            col("user_id", "INTEGER", true, 2),
+                        ],
+                    ),
+                    vec![fk(&["user_id"], "users", &["id"])],
+                ),
+                with_fks(
+                    table(
+                        "users",
+                        vec![
+                            col("id", "INTEGER", false, 1),
+                            col("order_id", "INTEGER", true, 2),
+                        ],
+                    ),
+                    vec![fk(&["order_id"], "orders", &["id"])],
+                ),
+            ],
+        );
+        let entries = vec![
+            entry(Op::CreateTable, "users", ""),
+            entry(Op::CreateTable, "orders", ""),
+        ];
+        let out = gen(&src, &cyclic, &entries);
+        assert_eq!(out.statements.len(), 2);
+        for st in &out.statements {
+            assert_eq!(
+                st.warnings.last().unwrap(),
+                "外键依赖成环：2 个表（orders, users）互相引用，建表顺序无法保证父表在前（SQLite 到写入时才报错）",
+                "{} 的环警告不符",
+                st.table
+            );
+        }
+        // 单向引用（users 是被引方、自己没有外键）⇒ 一条环警告都不许出
+        let acyclic = snap(
+            DatabaseKind::Sqlite,
+            vec![
+                with_fks(
+                    table("orders", vec![col("user_id", "INTEGER", true, 1)]),
+                    vec![fk(&["user_id"], "users", &["id"])],
+                ),
+                table("users", vec![col("id", "INTEGER", false, 1)]),
+            ],
+        );
+        for st in &gen(&src, &acyclic, &entries).statements {
+            assert!(
+                !st.warnings.iter().any(|w| w.contains(W_FK_CYCLE)),
+                "{} 不该有成环警告：{:?}",
+                st.table,
+                st.warnings
+            );
+        }
     }
 
     #[test]

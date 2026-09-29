@@ -190,12 +190,16 @@ fn shared_ddl_vectors_cover_every_op_and_warning() {
     ] {
         assert!(warnings.iter().any(|x| x == w), "DDL 语料未覆盖告警：{w}");
     }
-    // 视图警告（E6.5）是带名字的动态文案，不能按常量逐字比 ⇒ 退一步锁它的两句话头，
-    // 完整的逐字一致性由 d24/d25 两份语料的 expected 兜住。
-    for needle in ["DROP TABLE 不检查依赖", "重建经 RENAME"] {
+    // 视图警告（E6.5）与成环警告都是带名单的动态文案，不能按常量逐字比 ⇒ 退一步锁话头，
+    // 完整的逐字一致性由 d24/d25/d27 三份语料的 expected 兜住。
+    for needle in [
+        "DROP TABLE 不检查依赖",
+        "重建经 RENAME",
+        polydb_schema_diff::W_FK_CYCLE,
+    ] {
         assert!(
             warnings.iter().any(|w| w.contains(needle)),
-            "DDL 语料未覆盖视图警告：{needle}"
+            "DDL 语料未覆盖动态警告：{needle}"
         );
     }
     assert!(

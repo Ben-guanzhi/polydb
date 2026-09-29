@@ -792,3 +792,110 @@ func TestSelectEntriesRequiresWholeGroupForRebuiltTables(t *testing.T) {
 		t.Fatalf("未触发重建的子集不该报错：%v", err)
 	}
 }
+
+// TestFKCycleKeysReportsOnlyLoopClosingTables 直测成环判据：自引用不算环（与拓扑排序的
+// 过滤条件一致）、单向链不算环、指向本次计划外的表不算环、大小写不同的引用必须照样闭环。
+func TestFKCycleKeysReportsOnlyLoopClosingTables(t *testing.T) {
+	cyclic := func(tables ...TableSnapshot) []string {
+		s := dsnap(protocol.DatabaseKindSQLite, tables...)
+		entries := make([]Entry, 0, len(s.Tables))
+		for i := range s.Tables {
+			entries = append(entries, dentry(OpCreateTable, s.Tables[i].Name, ""))
+		}
+		return fkCycleKeys(entries, tableMap(s))
+	}
+	if got := cyclic(dwithFKs(
+		dtable("t", dcol("parent_id", "integer", true, 1)),
+		dfk([]string{"parent_id"}, "t", []string{"id"}),
+	)); len(got) != 0 {
+		t.Fatalf("自引用不该算环：%q", got)
+	}
+	if got := cyclic(
+		dwithFKs(dtable("a", dcol("b_id", "integer", true, 1)), dfk([]string{"b_id"}, "b", []string{"id"})),
+		dtable("b", dcol("id", "integer", false, 1)),
+	); len(got) != 0 {
+		t.Fatalf("单向链不该算环：%q", got)
+	}
+	if got := cyclic(
+		dwithFKs(dtable("a", dcol("x_id", "integer", true, 1)), dfk([]string{"x_id"}, "outside", []string{"id"})),
+		dtable("b", dcol("id", "integer", false, 1)),
+	); len(got) != 0 {
+		t.Fatalf("指向计划外的表不该算环：%q", got)
+	}
+	eqStrs(t, cyclic(
+		dwithFKs(dtable("a", dcol("b_id", "integer", true, 1)), dfk([]string{"b_id"}, "b", []string{"id"})),
+		dwithFKs(dtable("b", dcol("c_id", "integer", true, 1)), dfk([]string{"c_id"}, "c", []string{"id"})),
+		// 反向引用写成大写 A：环的判据走小写键，必须照样闭环
+		dwithFKs(dtable("c", dcol("a_id", "integer", true, 1)), dfk([]string{"a_id"}, "A", []string{"id"})),
+	), []string{"a", "b", "c"}, "三表环")
+}
+
+// TestCreateTablesOnAForeignKeyCycleAreWarned：环上的两条 CREATE TABLE 各挂一条成环警告；
+// 无环时一条都不许出。
+func TestCreateTablesOnAForeignKeyCycleAreWarned(t *testing.T) {
+	src := dsnap(protocol.DatabaseKindSQLite)
+	cyc := dsnap(protocol.DatabaseKindSQLite,
+		dwithFKs(
+			dtable("orders", dcol("id", "INTEGER", false, 1), dcol("user_id", "INTEGER", true, 2)),
+			dfk([]string{"user_id"}, "users", []string{"id"}),
+		),
+		dwithFKs(
+			dtable("users", dcol("id", "INTEGER", false, 1), dcol("order_id", "INTEGER", true, 2)),
+			dfk([]string{"order_id"}, "orders", []string{"id"}),
+		),
+	)
+	entries := []Entry{dentry(OpCreateTable, "users", ""), dentry(OpCreateTable, "orders", "")}
+	out := dgen(t, src, cyc, entries)
+	if len(out.Statements) != 2 {
+		t.Fatalf("应有两条建表语句：%q", sqls(out.Statements))
+	}
+	want := "外键依赖成环：2 个表（orders, users）互相引用，建表顺序无法保证父表在前（SQLite 到写入时才报错）"
+	for i := range out.Statements {
+		st := &out.Statements[i]
+		last := st.Warnings[len(st.Warnings)-1]
+		if last != want {
+			t.Fatalf("%s 的环警告不符\ngot  = %q\nwant = %q", st.Table, last, want)
+		}
+	}
+	acyclic := dsnap(protocol.DatabaseKindSQLite,
+		dwithFKs(dtable("orders", dcol("user_id", "INTEGER", true, 1)),
+			dfk([]string{"user_id"}, "users", []string{"id"})),
+		dtable("users", dcol("id", "INTEGER", false, 1)),
+	)
+	out2 := dgen(t, src, acyclic, entries)
+	for i := range out2.Statements {
+		for _, w := range out2.Statements[i].Warnings {
+			if strings.Contains(w, WFKCycle) {
+				t.Fatalf("%s 不该有成环警告：%q", out2.Statements[i].Table, w)
+			}
+		}
+	}
+}
+
+// TestCreateTableTopoOnCycleTerminatesAndIgnoresInputOrder：环上拓扑必须终止，且输出与
+// 快照数组顺序无关（确定性来自小写键升序 + DFS 到达序）。逐字输出另由共享语料 17 号对拍。
+func TestCreateTableTopoOnCycleTerminatesAndIgnoresInputOrder(t *testing.T) {
+	users := func() TableSnapshot {
+		return dwithFKs(dtable("users", dcol("id", "integer", false, 1)),
+			dfk([]string{"order_id"}, "orders", []string{"id"}))
+	}
+	orders := func() TableSnapshot {
+		return dwithFKs(dtable("orders", dcol("id", "integer", false, 1)),
+			dfk([]string{"user_id"}, "users", []string{"id"}))
+	}
+	plan := func(tables []TableSnapshot) []string {
+		src := dsnap(protocol.DatabaseKindPostgres)
+		tgt := dsnap(protocol.DatabaseKindPostgres, tables...)
+		out, err := Diff(src, tgt, &Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		names := make([]string, 0, len(out))
+		for i := range out {
+			names = append(names, out[i].Table)
+		}
+		return names
+	}
+	eqStrs(t, plan([]TableSnapshot{orders(), users()}), []string{"users", "orders"}, "先给 orders")
+	eqStrs(t, plan([]TableSnapshot{users(), orders()}), []string{"users", "orders"}, "先给 users")
+}

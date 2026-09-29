@@ -245,9 +245,9 @@ func TestSharedDDLVectorsCoverEveryOpAndWarning(t *testing.T) {
 			t.Fatalf("DDL 语料未覆盖告警：%s", w)
 		}
 	}
-	// 视图警告（E6.5）是带名字的动态文案，不能按常量逐字比 ⇒ 退一步锁它的两句话头，
-	// 完整的逐字一致性由 d24/d25 两份语料的 expected 兜住。
-	for _, needle := range []string{"DROP TABLE 不检查依赖", "重建经 RENAME"} {
+	// 视图警告（E6.5）与成环警告都是带名单的动态文案，不能按常量逐字比 ⇒ 退一步锁话头，
+	// 完整的逐字一致性由 d24/d25/d27 三份语料的 expected 兜住。
+	for _, needle := range []string{"DROP TABLE 不检查依赖", "重建经 RENAME", WFKCycle} {
 		hit := false
 		for w := range seen {
 			if strings.Contains(w, needle) {
@@ -255,7 +255,7 @@ func TestSharedDDLVectorsCoverEveryOpAndWarning(t *testing.T) {
 			}
 		}
 		if !hit {
-			t.Fatalf("DDL 语料未覆盖视图警告：%s", needle)
+			t.Fatalf("DDL 语料未覆盖动态警告：%s", needle)
 		}
 	}
 	if nr[true] == 0 || nr[false] == 0 {

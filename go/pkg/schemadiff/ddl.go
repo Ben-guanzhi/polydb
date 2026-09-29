@@ -34,6 +34,7 @@ package schemadiff
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -50,6 +51,8 @@ const (
 	WDropColumnCheck   = "该列若被 CHECK 约束引用，删除后约束会一并消失（快照不可见）"
 	WAddColumnLimits   = "SQLite 的 ADD COLUMN 只接受常量默认值，非空表上加 NOT NULL 且无默认值的列也会报错"
 	WRebuildNewNotNull = "重建只复制两侧同名列，新增的 NOT NULL 列若无默认值会让数据搬运 INSERT 报错"
+	// WFKCycle 是新建表之间的外键环警告（§14.4 的拓扑排序在环上只能按 DFS 到达序输出）。
+	WFKCycle = "外键依赖成环"
 )
 
 // viewWarnMax 是视图警告里的名单上限：再多只报数不报名（警告是给人扫一眼的）。
@@ -74,6 +77,79 @@ func wViewDrop(views []string) string {
 // 它会重解析依赖视图 ⇒ 整条重建直接报错）。文案与 Rust 侧逐字一致。
 func wViewRebuild(views []string) string {
 	return fmt.Sprintf("本库现有 %s：重建经 RENAME，而 SQLite 改名时会重解析依赖该表的视图 ⇒ 有视图引用它就整条重建报错", viewScope(views))
+}
+
+// tableScope 渲染「N 个表（a, b 等）」，名单按小写键升序、超过 5 个以「等」收尾。
+// 名单是参与环的表**小写键**：依赖图与拓扑都建在小写键上，报小写键才与判据同源。
+func tableScope(names []string) string {
+	head := strings.Join(names, ", ")
+	if len(names) > viewWarnMax {
+		head = strings.Join(names[:viewWarnMax], ", ") + " 等"
+	}
+	return fmt.Sprintf("%d 个表（%s）", len(names), head)
+}
+
+// wFkCycle 是建表成环的警告。SQLite 允许先建引用不存在父表的表（到**写入**时才报错），
+// 所以文案只说顺序不保证，不说语句会失败。文案与 Rust 侧逐字一致。
+func wFkCycle(names []string) string {
+	return fmt.Sprintf("%s：%s互相引用，建表顺序无法保证父表在前（SQLite 到写入时才报错）", WFKCycle, tableScope(names))
+}
+
+// fkCycleKeys 返回本次计划里位于任意外键环上的新建表（小写键，升序）。
+//
+// 依赖边与 topoCreateTables 同源（只认同批新建表、排除自引用）。判据用「从自己出发
+// 能否走回自己」而不是 Tarjan SCC：可达结果是一个集合，与遍历顺序无关 ⇒ 双端实现
+// 必然逐字一致，而 SCC 的低链值依赖 DFS 编号，跨语言对齐的风险更高。
+func fkCycleKeys(entries []Entry, tgt map[string]*TableSnapshot) []string {
+	built := map[string]bool{}
+	for i := range entries {
+		if entries[i].Op == OpCreateTable {
+			built[lowerASCII(entries[i].Table)] = true
+		}
+	}
+	if len(built) < 2 {
+		return nil
+	}
+	deps := map[string][]string{}
+	keys := sortedKeys(built)
+	for _, k := range keys {
+		t := tgt[k]
+		if t == nil {
+			continue
+		}
+		var d []string
+		for i := range t.ForeignKeys {
+			r := lowerASCII(t.ForeignKeys[i].ReferencedTable)
+			if built[r] && r != k {
+				d = append(d, r)
+			}
+		}
+		sort.Strings(d)
+		deps[k] = dedupSorted(d)
+	}
+	var cyclic []string
+	for _, k := range keys {
+		seen := map[string]bool{}
+		stack := append([]string(nil), deps[k]...)
+		backToSelf := false
+		for len(stack) > 0 {
+			n := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if n == k {
+				backToSelf = true
+				break
+			}
+			if seen[n] {
+				continue
+			}
+			seen[n] = true
+			stack = append(stack, deps[n]...)
+		}
+		if backToSelf {
+			cyclic = append(cyclic, k)
+		}
+	}
+	return cyclic
 }
 
 const (
@@ -580,7 +656,8 @@ func rebuildStatements(kind protocol.DatabaseKind, tgt, src *TableSnapshot, sn *
 }
 
 // directStatement 把直改动作翻成单条语句（规则 1）。views 是**被改那一侧**快照里的视图名。
-func directStatement(kind protocol.DatabaseKind, e *Entry, src, tgt *TableSnapshot, views []string) (Statement, error) {
+// cyclic 是本次计划里成环的表小写键（升序），只影响建表告警。
+func directStatement(kind protocol.DatabaseKind, e *Entry, src, tgt *TableSnapshot, views []string, cyclic []string) (Statement, error) {
 	one := []string{e.ID}
 	nr := entryNonReversible(e)
 	switch e.Op {
@@ -590,7 +667,11 @@ func directStatement(kind protocol.DatabaseKind, e *Entry, src, tgt *TableSnapsh
 			return Statement{}, err
 		}
 		sql := fmt.Sprintf("CREATE TABLE %s(%s);", quoteIdent(t.Name), createTableBody(kind, t))
-		return mkStmt(one, sql, e.Phase, e.Table, createWarnings(kind, t), nr), nil
+		warnings := createWarnings(kind, t)
+		if slices.Contains(cyclic, lowerASCII(e.Table)) {
+			warnings = append(warnings, wFkCycle(cyclic))
+		}
+		return mkStmt(one, sql, e.Phase, e.Table, warnings, nr), nil
 	case OpDropTable:
 		// 库里一个视图都没有 ⇒ 没什么可警告的，保持原有的空警告。
 		var warnings []string
@@ -702,6 +783,8 @@ func emitScript(kind protocol.DatabaseKind, source, target *Snapshot, entries []
 	}
 
 	// 3. 按条目顺序输出（E1 的计划顺序已含建表拓扑，这里不再重排）
+	//    环上的表要挂警告：拓扑在环上只能按 DFS 到达序出，顺序承诺不了父表在前。
+	cyclic := fkCycleKeys(entries, tgt)
 	out := []Statement{}
 	done := map[string]bool{}
 	for i := range entries {
@@ -723,7 +806,7 @@ func emitScript(kind protocol.DatabaseKind, source, target *Snapshot, entries []
 			out = append(out, rebuildStatements(kind, t, s, sn, g.ids, g.phase, g.nr)...)
 			continue
 		}
-		st, err := directStatement(kind, e, src[k], tgt[k], sn.views)
+		st, err := directStatement(kind, e, src[k], tgt[k], sn.views, cyclic)
 		if err != nil {
 			return nil, nil, err
 		}

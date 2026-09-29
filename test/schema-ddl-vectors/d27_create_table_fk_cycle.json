@@ -1,0 +1,95 @@
+{
+  "name": "d27_create_table_fk_cycle",
+  "note": "新建表互相引用（users↔orders）：拓扑在环上只能按 DFS 到达序出，故两条 CREATE TABLE 各挂一条成环告警；SQLite 允许先建引用不存在父表的表（写入时才报错），文案只说顺序不保证",
+  "options": { "ignore_defaults": false, "select_destructive": false },
+  "source": { "kind": "sqlite", "schema": "main", "tables": [] },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "orders",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1 },
+          { "name": "user_id", "data_type": "INTEGER", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [],
+        "foreign_keys": [
+          {
+            "name": "fk_orders_user",
+            "columns": ["user_id"],
+            "referenced_schema": "main",
+            "referenced_table": "users",
+            "referenced_columns": ["id"]
+          }
+        ]
+      },
+      {
+        "name": "users",
+        "type": "table",
+        "columns": [
+          { "name": "id", "data_type": "INTEGER", "nullable": false, "ordinal_position": 1 },
+          { "name": "order_id", "data_type": "INTEGER", "nullable": true, "ordinal_position": 2 }
+        ],
+        "indexes": [],
+        "foreign_keys": [
+          {
+            "name": "fk_users_order",
+            "columns": ["order_id"],
+            "referenced_schema": "main",
+            "referenced_table": "orders",
+            "referenced_columns": ["id"]
+          }
+        ]
+      }
+    ]
+  },
+  "selected": null,
+  "expected": {
+    "statements": [
+      {
+        "entry_ids": ["users//create_table"],
+        "sql": "CREATE TABLE \"users\"(\"id\" integer NOT NULL,\"order_id\" integer,FOREIGN KEY (\"order_id\") REFERENCES \"orders\"(\"id\"));",
+        "phase": 50,
+        "table": "users",
+        "warnings": [
+          "新建表只按快照里的列定义生成，不含 CHECK 约束、生成列与触发器",
+          "外键依赖成环：2 个表（orders, users）互相引用，建表顺序无法保证父表在前（SQLite 到写入时才报错）"
+        ],
+        "non_reversible": false
+      },
+      {
+        "entry_ids": ["orders//create_table"],
+        "sql": "CREATE TABLE \"orders\"(\"id\" integer NOT NULL,\"user_id\" integer,FOREIGN KEY (\"user_id\") REFERENCES \"users\"(\"id\"));",
+        "phase": 50,
+        "table": "orders",
+        "warnings": [
+          "新建表只按快照里的列定义生成，不含 CHECK 约束、生成列与触发器",
+          "外键依赖成环：2 个表（orders, users）互相引用，建表顺序无法保证父表在前（SQLite 到写入时才报错）"
+        ],
+        "non_reversible": false
+      }
+    ],
+    "rollback": [
+      {
+        "entry_ids": ["orders//drop_table"],
+        "sql": "DROP TABLE \"orders\";",
+        "phase": 40,
+        "table": "orders",
+        "non_reversible": true
+      },
+      {
+        "entry_ids": ["users//drop_table"],
+        "sql": "DROP TABLE \"users\";",
+        "phase": 40,
+        "table": "users",
+        "non_reversible": true
+      }
+    ],
+    "pragmas_outside_tx": false,
+    "ddl_in_tx": true
+  },
+  "error_code": "",
+  "error_message": ""
+}
