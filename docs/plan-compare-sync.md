@@ -203,10 +203,14 @@ E3 收口时 `check` 与 TS 重生成均零漂移（`web/src/api/index.ts` +37 �
 
 ## 7. 本机不可验证清单（先把话说在前面）
 
-- 本机**无 Docker、无监听中的** 5432/3306/6379/1433/1521 ⇒ PG/MySQL/MSSQL/Oracle/Redis 相关
+- 本机**无 Docker、无监听中的** 5432/6379/1433/1521 ⇒ PG/Redis/MSSQL/Oracle 相关
   分支只能 soft-skip（E6.6 刷新基线：契约 **23 个顶层测试 / 89 个 PASS 含子测试、0 FAIL、0 SKIP 标记**，
   方言与 Redis 分支只是"未打崩"而非"真跑"；E3 收口时同一口径记的是 66，差值是 E6 期间新增的子测试）。
-  **跨库 diff 的正确性、各方言 DDL 语法、`ddl_in_tx` 真值都无法在本机实测**。
+  **订正（F0.4，附录 A.27）**：**3306 其实有引擎**——WSL Ubuntu 里跑着 MySQL 8.0.46、听在 `0.0.0.0:3306`，
+  只是 **Windows 侧连不到**（WSL2 NAT，实测 `connectex … actively refused`）。所以 MySQL 一支的缺项
+  从"无引擎"改成了"无 Windows 直连 + WSL 内无 cargo/rustc"⇒ 跑法只能是 Windows 交叉编译、进 WSL 执行，
+  且这一支本批**只有 Go 单侧**取证。
+  **跨库 diff 的正确性、各方言 DDL 语法、`ddl_in_tx` 真值都无法在本机实测**（此句仍成立，但 MySQL 一支已进入"只差凭据"）。
 - E3 因此**只交付 SQLite**：4 种方言 + Redis 的 `NOT_SUPPORTED` 拒绝路径由语料 d16–d19/d20/d21
   （纯函数层，恒可跑）与两端错误码映射（`NOT_SUPPORTED → 501`）双重锁定，
   但**契约层的 501 响应本机从未真正打出过**（`/api/schema/ddl` 的方言分支同样 soft-skip）。
@@ -247,12 +251,16 @@ E3 收口时 `check` 与 TS 重生成均零漂移（`web/src/api/index.ts` +37 �
 - **E6 收口后仍然缺的证据**（2026-09-26 收敛后的清单，逐条都是**结构性**缺、不是"还没写"）：
   ① **契约层对两种执行分派的 HTTP 级断言**——单事务一支已由 A.17 经 `httptest` 真服务端跑到，
   `ddl_in_tx=false` 一支 SQLite **结构上产不出**（引擎 DDL 可在事务里，能力位恒 `true`），
-  只能等有真实 PG/MySQL/MSSQL/Oracle 实例时补；② GUI"按键灌进真窗口"的端到端（GPUI 无测试基建）；
+  PG 也产不出（它的 DDL 同样是事务化的，A.26 的 P1 判据正是"回滚后必须消失"）；
+  **→ F0.4 已把这一支的引擎找到了**（附录 A.27 M1）：MySQL 的 DDL 隐式提交是本机唯一能真跑出 `false` 的那一支，
+  Go 侧探测已就位，`POLYDB_TEST_MYSQL` 一给就跑；仍待的是凭据与"HTTP 级断言"那一层（Rust 侧要等有 Windows 直连）；
+  ② GUI"按键灌进真窗口"的端到端（GPUI 无测试基建）；
   ③ **B 档的依赖可见**：警告只能说"本库有这些视图、可能有破的"，判不出具体哪一个（§8-8 已明确不做，
   要做就得解析 SQL 猜——SQLite 无依赖目录）；④ 4 种方言 + Redis 的真跑，含**契约层的 501 从未打出**
   （**PG 一支已由 F0.1/F0.2 从"取不到证据"变成"只差引擎"**：Go 12 点 + Rust 6 点探测已就位，
-  `POLYDB_TEST_PG` 一给就跑，见附录 A.26；剩下的结构性缺口是 MySQL/MSSQL/Oracle/Redis
-  连取证点清单都没有，记 F0.4）；
+  `POLYDB_TEST_PG` 一给就跑，见附录 A.26；**MySQL 一支已由 F0.4 立清单并落了 Go 侧 13 点探测**，见附录 A.27
+  ——它的形态是"只差凭据"，代价是这一支**只有单侧**（WSL 内无 cargo/rustc）；
+  剩下的结构性缺口是 MSSQL/Oracle/Redis 连取证点清单都没有；
   ⑤ 触发器仍在盲区（A.11 G4：重建静默丢触发器，快照不含触发器，E6.5 A 档范围外）；
   ⑥ E6.5 两条新视图警告的**渲染未肉眼验证**（文案近 90 字，窄面板下换行靠通读）；
   ⑦ `golangci-lint` v2 本机未安装 ⇒ Go lint 步骤恒跳过（E6.6 复核：确实仍不在 PATH）。
@@ -271,6 +279,11 @@ E3 收口时 `check` 与 TS 重生成均零漂移（`web/src/api/index.ts` +37 �
    该项与 §8-7 绑定，等有可实测的方言实例再定。
    **→ F0.1/F0.2 已把"等"变成有抓手的等**（附录 A.26 P10）：PG 侧一份 14 种类型的 `format_type` 原始文本探测已就位，
    引擎到位跑一次就拿到定名表的输入。**仍待定**，但不再需要现场设计。
+   **→ F0.4 补了第二份输入**（附录 A.27 M10）：MySQL 侧 17 列（含 `BIGINT UNSIGNED` / `DECIMAL(10,2)` / `JSON` /
+   `ENUM` / STORED 生成列）的 `COLUMN_TYPE` 原文回读已就位，跑一次同时钉住"原文长什么样"与
+   "三个尺寸槽位是不是恒空"。已读代码确认**两端都不填** `MaxLength/Precision/Scale/GenericType/Comment`
+   （`go/pkg/dbmysql/dbmysql.go:190`、`rust/crates/db-mysql/src/lib.rs:405`）⇒ 类型收窄的判断目前
+   **没有数值依据，只能解析原文**；定名表因此要么带"原文拆解"这一列，要么先补 DTO 填充。
 4. ~~差异条目里"仅目标库存在"要不要包含**数据不可逆**提示~~ **已定（2026-09-26，E4 落地即此）**：
    `destructive` 条目红标 + 默认不勾选，勾选初值直接采用服务端回值（前端不自造规则）；
    另有「破坏性动作默认勾选」开关供显式放开。见附录 A.13。
@@ -287,6 +300,11 @@ E3 收口时 `check` 与 TS 重生成均零漂移（`web/src/api/index.ts` +37 �
    **→ F0.2 已备好 v1.1 的开工判据**（附录 A.26 P11，双端各一份探测）：PG 的 `list_tables` 读代码是
    `WHERE n.nspname = $1`，但"同库多 schema 可行"要**两头**成立——探测 schema 里查得到 **且** `public` 里查不到。
    本条从"没探"变成"跑一次就知道"。
+   **→ F0.4 同形补了 MySQL 一支**（附录 A.27 M11，Go 单侧）：SQL 里同样是 `WHERE TABLE_SCHEMA = ?`
+   （`go/pkg/dbmysql/dbmysql.go:149`、`rust/crates/db-mysql/src/lib.rs:368`），判据也照搬两头成立——
+   标记表在**自己的**库里查得到、在**对方的**库里查不到。MySQL 的 `schema` 就是 `database`，
+   所以这一支的答案天然是"多库并行是日常而非 exotic"，v1.1 若在 MySQL 上开工不需要新机制，需要的是**别把库当 schema 过滤掉**
+   （见 §8-7 的 D1：两端连"列哪些库"都不一致）。
 7. ~~**其余 4 个方言的 `on_update`/`on_delete` 与 `generic_type` 何时填**~~ **已定（2026-09-25）：随 E3 / 有实例环境一起补**。
    理由：本轮只补了 SQLite，因为 SQLite 有 bundled 真引擎可实测；PG/MySQL/MSSQL/Oracle 现在补只能凭文档盲填、
    契约测试全 soft-skip，等于"数字上已实现、实际未验证"。与 §8-3 的 `generic_type` 命名表定案绑定推进。
@@ -295,6 +313,12 @@ E3 收口时 `check` 与 TS 重生成均零漂移（`web/src/api/index.ts` +37 �
    ⇒ **缺的是读侧，不是引擎**（PG 目录肯定给得出）。补读 SQL 是十分钟的事，但按本条定案**仍然不做盲填**，
    等 P9 探测（双端各一份，已就位）在有引擎时确认回读形状，再一次性补两端 + 语料。
    **MySQL/MSSQL/Oracle 三家的取证点清单仍未立**（本批只立了 PG；MySQL 的结构差异见 A.26 末尾"为什么不做 MySQL"）。
+   **→ F0.4 已立 MySQL 清单，并确认这条债不是 PG 专属**（附录 A.27 M9 / 漂移表 D5）：MySQL 两端也**同样只查
+   `key_column_usage`**（`go/pkg/dbmysql/dbmysql.go:269`、`rust/crates/db-mysql/src/lib.rs:506`、`lib.rs:549` 的
+   `on_update: None`）⇒ 两端**同错**（不是漂移），而 `information_schema.REFERENTIAL_CONSTRAINTS` 里
+   `UPDATE_RULE/DELETE_RULE` 明摆在——M9 的判据就是"目录必须查得到"，查不到才要翻这条结论。
+   补读 SQL 因此是**两家方言一次做**的事，仍按本条定案等有引擎真值后再动（MySQL 只差凭据）。
+   **MSSQL/Oracle 两支的清单仍未立**（本机无引擎；Oracle 的 DDL 同样隐式提交，M1 那条判据届时要另立一份）。
 8. ~~**快照要不要让生成器"看见"视图？**~~ **已定（2026-09-26，E6.5 落地 A 档：名字可见 + 粗粒度警告）**。
    A.15 的 G13/G16/G17 是同一条盲区的三个面：重建被依赖视图挡住、删表静默留下破视图、临时名撞上同名视图。
    落地的三件事：① 采集层不再丢弃视图（快照只带**名字与类型**、列/索引/外键留空，**不发元数据查询**
@@ -302,6 +326,11 @@ E3 收口时 `check` 与 TS 重生成均零漂移（`web/src/api/index.ts` +37 �
    ③ `drop_table` 与重建组首条挂**粗粒度**视图警告，点名快照里的视图（升序、最多 5 个、超出以「等」收尾）。
    **明确不做 B 档**（快照携带视图定义文本 + 文本扫描启发式判定"谁依赖谁"）：SQLite 没有依赖目录，
    那是把猜测塞进双端逐字一致的规则层，收益不抵漂移面。
+   **→ F0.4 已备好"按方言分级"的判据**（附录 A.27 M13）：MySQL 的判据本体是
+   `information_schema` 里**查不到** `VIEW_TABLE_USAGE`/`DEPENDENCIES`/`OBJECT_DEPENDENCIES`/`DEPENDS_ON`
+   任何一张（即"没有 per-object 依赖目录"）——若真跑确认，则 B 档在 MySQL 上与 SQLite 同判死，
+   只有 PG（`pg_depend`，A.26 P12）一支谈得上"依赖可见"⇒ 本条应从"不做"改成**"按方言能力位分级"**。
+   MySQL 一支能拿到的只有 `VIEWS.VIEW_DEFINITION` 文本（M13 一并取），也就是"解析 SQL 猜"那条路的原材料。
    **订正一处原预估的事实错误**：原先写"只去掉采集层那一行过滤即可，DTO/线路/diff 规则零变更"——
    不够。`table_map` 为了「视图不参与比对」把非表项跳掉了，而 `taken` 正是从 `table_map` 播种的
    （G17 之 ②③），所以**必须**再加一次 `view_names()` 取名字并播种 `taken`。
@@ -1737,6 +1766,11 @@ MySQL 的取证点**不能复用 PG 那 12 条**——至少四处结构上不�
 自增只有 `AUTO_INCREMENT` 一种（P7 的 identity/serial 分野不存在）。
 照抄一份 12 点 MySQL 探测就是本文件反复回避的"数字上已实现、实际未验证"。⇒ 记 **F0.4：MySQL 取证点清单另立**，
 等 MySQL 引擎到位（或用户明确要盲写）再拍板。
+**→ F0.4 已拍板并开工（附录 A.27）**，两件事与本段预期不同：① 引擎**已经在机器上了**——WSL Ubuntu 里的
+MySQL 8.0.46（听 `0.0.0.0:3306`），只是 Windows 连不到，跑法改成交叉编译进 WSL 执行；
+② 上面"四处结构不同"恰恰是**要另立清单的理由而不是不立的理由**——尤其是 DDL 隐式提交那一支：
+PG 的 DDL 是事务化的，**PG 到位也产不出 `ddl_in_tx=false`**，本机只有 MySQL 产得出（A.27 的 M1 即为此设）。
+清单没有照抄 12 点，重立为 13 点（M1–M13）。
 
 **本批门禁**（2026-09-27，工作树 = 2 份新探测 + 1 份 dev-dependency + 本附录；规则层 / `spec/` / 三端前端零字节改动）：
 
@@ -1772,3 +1806,141 @@ MySQL 的取证点**不能复用 PG 那 12 条**——至少四处结构上不�
 `§8-6` v1.1 判据、`§8-8` B 档分级、A.11/A.15 的 G 项方言对照；④ 才轮到规则层动手：
 `ddl_in_tx` 从硬编码改成按方言取（P1）、重建触发条件加方言维度（P3–P6）、依赖目录进快照（P12）。
 顺序不能反：**先有真值，再改生成器**——反过来说就是 A.26 立这份清单的全部理由。
+
+### A.27 F0.4 MySQL 方言取证（2026-09-27，**零规则代码 / 零 spec 变更：只加 Go 侧探测 + 一份读侧漂移表**）
+
+A.26 末尾把 MySQL 判成"等引擎到位再拍板"。本批**翻这个案**，理由不是"多探一家总更好"，而是这条线索上
+**只有 MySQL 能产出要探的那一支**：§7 ① 说的是 `ddl_in_tx = false` 这一支 SQLite **结构上产不出**
+（引擎 DDL 可在事务里，能力位恒 `true`）——而 PG 的 DDL **也是事务化的**（A.26 的 P1 判据正是"回滚后必须消失"），
+所以 **PG 到位也产不出 false 那一支**。MySQL 的 DDL 隐式提交是本机唯一能把 `ddl_in_tx=false` 真跑出来的引擎，
+而 A.16 的"逐条执行"分派、G14 的"失败后数据困在临时表"至今**没有任何引擎背书**。
+量化过的引擎可得性：本机 5432 无监听（PG 仍缺），但 **WSL Ubuntu 里跑着 MySQL 8.0.46、听在 0.0.0.0:3306**。
+经拍板：① 本批目标＝用这台 MySQL 开 F0.4；② 跑法＝Windows 交叉编译、进 WSL 执行（零权限改动）。
+
+**13 点清单**（M1–M13，与 A.26 的 P1–P12 **不是同一张表**：M1/M6/M8/M10/M13 是 MySQL 特有形态
+——DDL 隐式提交、`ALGORITHM=INSTANT`、索引名的作用域、`COLUMN_TYPE` 原文、无 per-object 依赖目录；
+其余各点与 PG 那张表**同问不同答**，横向对照要等 PG 到位才做得了）：
+
+| 点 | 探什么 | 要钉进规则层的哪条口径 | 分档 | 回填去处 |
+|---|---|---|---|---|
+| M1 | 事务内 `CREATE TABLE`+`INSERT` 后回滚：表还在不在（**本批头牌**） | `Script.ddl_in_tx` 现**硬编码 true**（`ddl.go:851`、`ddl.rs:892`）；MySQL 若为 false ⇒ A.16 的"逐条执行"分派**第一次**有引擎可跑，G14 的中间态从推测定性为实测 | 引擎（判据：红了就是证据） | §7 ①；能力位矩阵；A.16 分派表 |
+| M2 | `DROP TABLE` 被依赖视图挡住，还是静默留破视图 | 对照 SQLite 的 G16（静默留破视图）；决定删表前要不要先发依赖对象 | 引擎，只记不赌；断言打在**目录自洽**（表没了视图还在 ⇒ 查它必须报错） | A.20 B 档可行性 |
+| M3 | `DROP COLUMN` 被视图引用的列挡不挡；对照项是**同表未被引用的列必须删得掉** | `drop_column` 在 MySQL 上要不要走整表重建（SQLite 靠重建绕过） | 引擎；对照项是判据（它红则"挡/不挡"这个问法不成立） | §8"哪些动作触发重建"的方言表 |
+| M4 | 整表重建四步（`CREATE tmp (LIKE)` → `INSERT SELECT` → `DROP` 原表 → `RENAME` 回原名）走不走得通 + 依赖视图存活 | A.11/A.15 的重建规则能否按方言放开（SQLite 上死在依赖，G13） | 引擎，只记不赌；断言打在"四步全 OK ⇒ 原名恢复且行数守恒" | 重建触发条件表 |
+| M5 | 类型收窄 `VARCHAR(10)→VARCHAR(3)`（存 10 字符）：报错还是静默截断；有依赖视图时 `MODIFY` 挡不挡 | 类型变更条目走直改还是重建；改完驱动必须读得出新形状（否则 diff 判"没变"） | 引擎；读回是形状不变式，`OBS[m5.value_after_narrow]` 的长度是**非可逆判定**的实测依据 | §8-3；A.11 第 5 条 |
+| M6 | 非空表 `ADD COLUMN NOT NULL DEFAULT`，**用 `ALGORITHM=INSTANT` 当"即时"的硬判据**（不量时间）；两对照：`NOT NULL` 无默认、可空列 | SQLite 的"NOT NULL 无默认 ⇒ 重建"在 MySQL 是否需要；`add_column` 要不要拆两支 | 引擎，只记不赌；既有 3 行必须读得到默认值是形状不变式 | §8-3；A.11 的 G 项对照 |
+| M7 | `AUTO_INCREMENT` vs `SERIAL` 的自增回读（目录 `EXTRA` 与驱动 `IsAutoIncrement` 同真同假） | `is_auto_increment` 填得出吗（SQLite 侧恒 false 是 A.11 G3 实测）；判不出自增 ⇒ 误生成重建 | 驱动 | §8-3；重建触发条件 |
+| M8 | 索引名跨表碰撞（两张同形表建同名二级索引）+ 主键索引是否恒名 `PRIMARY` 且每表恰一个 | diff 拿索引名当身份键（SQLite 是 `sqlite_autoindex_*`）；MySQL 的名字是**表内唯一**还是库内唯一，直接决定 A.5 匹配规则要不要加维度 | 驱动 | A.5 匹配规则的方言注 |
+| M9 | 外键动作：目录 `REFERENTIAL_CONSTRAINTS.UPDATE_RULE/DELETE_RULE` **给不给得出** + 驱动实际读回什么 | **§8-7 的债在 MySQL 一支的本体**。已确认缺的是读侧：两端都只查 `key_column_usage`，动作列一个都没 SELECT 进来 | 驱动（判据＝目录必须查得到，查不到才要翻案） | §8-7 → 补读 SQL + 双端填充 |
+| M10 | 17 列类型形状回读（含 `BIGINT UNSIGNED`/`DECIMAL(10,2)`/`JSON`/`ENUM`/STORED 生成列） | **§8-3 归一命名表的第二份输入**（PG 那份是 P10 的 `format_type`）；三个尺寸槽位是否恒空 ⇒ 收窄判断有没有数值依据 | 驱动 | §8-3 定案；两处 DTO 缺口（无 collation 槽、无 `is_generated` 槽）另计 |
+| M11 | `ListTables` 是否真尊重 `schema` 入参——**两头判据**（标记表在自己库查得到、在对方库查不到） | §8-6 v1.1。MySQL 的"同库多 schema"＝**多库**，所以这条不是 exotic 场景而是日常 | 驱动（判据） | §8-6 是否开工 |
+| M12 | 三处双实现读侧漂移的现值（库列表过滤 / 索引类型 / `SHOW CREATE TABLE` 标识符形态） | **双实现一致性红线本体**：AGENTS.md 第 7 条要求行为一致，这三处现在不一致 | 驱动，**本批只在 Go 侧取值**，Rust 侧由读代码定位（下表） | 下面的漂移表 → 待有 Windows 直连时补对拍 |
+| M13 | MySQL 有没有 per-object 依赖目录（`VIEW_TABLE_USAGE`/`DEPENDENCIES`/`OBJECT_DEPENDENCIES`/`DEPENDS_ON`）+ `VIEWS.VIEW_DEFINITION` 取不取到 + 有无物化视图 | **§8-8 B 档在 MySQL 上判死与否**：判据本体是"这些目录表**不存在**"，查到了才要改 §8-8 | 引擎（判据） | §8-8 补注：B 档按方言分级 |
+
+**两处形态差异（都是实情的披露，不是偷懒）**：
+
+1. **只探 Go 单侧**。A.26 的分档是"引擎事实探一次、驱动事实两端各探"；本批把"探一次"的实现选择从
+   "Go/Rust 任选"压成了"只能 Go"：这台引擎在 WSL 里，而 **Windows 连不到它**（WSL2 NAT，
+   实测 Windows 侧 `dial tcp 127.0.0.1:3306: connectex: No connection could be made…`），
+   WSL 内又**没有 cargo/rustc**（交叉编译 Rust 需要目标平台链接器）。⇒ 驱动事实先在 Go 侧取值，
+   Rust 侧差异**降级为"读代码定位到 file:line"这一级证据**，双端对拍等 Windows 上有可直连的 MySQL 再补。
+2. **探测现场是预建的两个库**（`polydb_probe` / `polydb_probe_b`），探测账号只拿到这两库的权限、
+   **不给 `CREATE DATABASE`** ⇒ 探测不建库不删库，清理靠每点自己的 `m<N>_` 前缀对象 + 开头 `DROP IF EXISTS`。
+   默认 DSN 也刻意**不**沿用 `test/contract` 的 `mysql://root@localhost:3306/mysql`——那会把探测对象建进 `mysql` 系统库。
+
+**读代码定下来的漂移表**（M12 的 Rust 一侧全部来自这里；证据等级列是这批最要紧的诚实）：
+
+| # | 漂移 | Go | Rust | 后果 | 证据等级 |
+|---|---|---|---|---|---|
+| D1 | 库列表不过滤系统库 | `dbmysql.go:128` 有 `WHERE schema_name NOT IN ('mysql','information_schema','performance_schema','sys')` | `db-mysql/src/lib.rs:353` **无 WHERE** | 同一实例两端元数据树差 N 项（`OBS[m12.schemas]` 现算差值），契约一旦真跑 `list_schemas` 必差 | Go 实测 + 读代码 |
+| D2 | 索引类型 | `dbmysql.go:228` 的 SELECT 里**没有 `INDEX_TYPE`** ⇒ `IndexInfo.Type` 恒空 | `lib.rs:444` 取了 `INDEX_TYPE` 并映射 btree/hash/fulltext/spatial | 三端显示与 diff 匹配若用 `Type`，两端一个有值一个空 | Go 实测（空槽计数）+ 读代码 |
+| D3 | `SHOW CREATE TABLE` 标识符形态 | `dbmysql.go:317` 反引号拼 `schema`.`table` | `lib.rs:557` 把 `format!("{schema}.{table}")` **整串**当**一个**标识符绑进 `??` ⇒ 反引号会包住含点的整个名字 | 取不回 DDL ⇒ Rust 侧「复制 DDL」/ 目标侧展示坏 | **只读代码**（Go 侧仅证明自己的路径通得过） |
+| D4 | 事务隔离级别语句 | 零 `TxMode` ⇒ `dbcore/tx.go:25` 造空 `TxOptions`，**不发**隔离级别语句 | `lib.rs:138-151` 四种级别**全部**返回 `Some` ⇒ 恒发 `BEGIN ISOLATION LEVEL READ COMMITTED` | 同一份默认脚本 Go 走 MySQL 默认 `REPEATABLE READ`、Rust 走 `READ COMMITTED` ⇒ 快照/应用环路的可见性语义两端不同 | **只读代码** + `OBS[m1.tx_isolation]` 取 Go 侧真值 |
+| D5 | 外键动作（**不是漂移，是两端同错**） | `dbmysql.go:269` 只查 `key_column_usage` | `lib.rs:506`、`lib.rs:549` 同，`on_update: None` | §8-7 的债**不是 PG 专属**：MySQL 两端同样恒空，而 `REFERENTIAL_CONSTRAINTS` 里 `UPDATE_RULE/DELETE_RULE` 明摆着 | 判据待真跑（M9） |
+
+**另两处 DTO 缺口**（记为发现——补它们要动 `spec/`，不是免费的）：`ColumnInfo` 没有字符集/排序规则字段（MySQL 字符列的
+`COLLATION_NAME` 有值而无处可放，diff 因此看不见 collation 差异），也没有 `is_generated`
+（STORED 生成列被当普通列 ⇒ 生成器可能给出一条会 3105 的 `ADD COLUMN`）。两者都在 M10 里取现值。
+
+**落点与形态**：
+
+| 文件 | 内容 | 规模 |
+|---|---|---|
+| `go/pkg/dbmysql/probe_test.go` | M1–M13 全 13 点，`package dbmysql`（要读驱动私有形状，只能是包内测试） | 新文件 798 行 |
+
+这是 `pkg/dbmysql` **第一份测试文件**（Go 全量门禁因此从 14 包变 15 包）。Rust 侧本批零文件——不是遗漏，是上面形态差异 ①。
+
+**断言只打三类东西**（沿用 A.26 的设计）：① 形状不变式（M2 目录自洽、M4 行数守恒、M6 既有行带默认值、
+M7 目录与驱动同说自增、M10 列数/列序/`DataType` 非空、M12 Go 侧不吐系统库）；② 判据本体
+（M1 回滚后必须仍在、M3 的未引用列对照项、M9 目录必须给得出、M11 两头、M13 目录必须不存在）；
+③ 纯两可分支只记不赌（M2/M4/M5/M6 的"挡与不挡 / INSTANT 收不收"——两支各决定一条不同的生成器规则）。
+
+**跑法（唯一可行通路，已实测）**——Windows 交叉编译，WSL 里执行：
+
+```bash
+# 1. 一次性建现场。注意：WSL 里的 root **不能免密进 mysql**（实测 `mysql -e` ⇒ `ERROR 1045 … 'root'@'localhost' (using password: NO)`），
+#    所以这条必须是**交互式**输入 root 口令——密码只进用户自己的键盘，不经命令行、不经我、不落文件。
+wsl -d Ubuntu -u root -- mysql -u root -p        # 进去后执行下面 5 条
+#   CREATE DATABASE IF NOT EXISTS polydb_probe, polydb_probe_b;
+#   CREATE USER IF NOT EXISTS 'polydb_probe'@'localhost' IDENTIFIED BY '用户自定的密码';
+#   GRANT ALL ON polydb_probe.*   TO 'polydb_probe'@'localhost';
+#   GRANT ALL ON polydb_probe_b.* TO 'polydb_probe'@'localhost';
+#   FLUSH PRIVILEGES;
+
+# 2. Windows 侧交叉编译（静态、免 cgo）
+cd go && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -o /d/tmp/mprobe_linux ./pkg/dbmysql/
+
+# 3. 进 WSL 真跑，一次收 13 点真值（MSYS_NO_PATHCONV 必需，见坑 ③）
+export POLYDB_TEST_MYSQL='polydb_probe:你定的密码@tcp(127.0.0.1:3306)/polydb_probe'   # 经典形态，见坑 ②
+MSYS_NO_PATHCONV=1 wsl -d Ubuntu -- env POLYDB_TEST_MYSQL="$POLYDB_TEST_MYSQL" \
+  /mnt/d/tmp/mprobe_linux -test.v 2>&1 | grep -o 'OBS\[.*'
+```
+
+**本批踩到 / 立此存照的四处坑**：
+
+① **前置条件第一版写成了 `SELECT 1 FROM information_schema.DUAL`**——那张表不存在，后果是**引擎健康也恒 SKIP**，
+是这类探测最坏的一种坏（永远静默、永远像"没缺引擎"）。跑前自查改成"两个探测库在不在权限范围内"的计数，
+且仍用 `Skipf` 不用 `Fatalf`：引擎在、只是现场没搭齐，报红会把"缺凭据"和"缺引擎"混成一类。
+② **DSN 形态**：第一版沿用 `test/contract` 的 URI 形态 `mysql://…`，go-sql-driver **把 scheme 名解析成用户名**
+（发过去的是 `mysql`），于是密码给对也 1045。改回经典形态 `user@tcp(host:port)/db` 后错误里名字变成
+`polydb_probe`、且带 `(using password: NO)`——这一条同时**证明了 TCP 通路是通的**，缺的只是凭据。
+③ **Git Bash 会把 `/mnt/d/...` 改写成 `D:/tools/Git/mnt/d/...`** 再交给 wsl ⇒ `No such file or directory`；
+必须 `MSYS_NO_PATHCONV=1`（或整个命令塞进 `wsl -- bash -c '…'`）。
+④ **A.26 那句"本机 5432/3306 无监听（`netstat` 无一行命中）"是站在 Windows 一侧量的**——WSL2 是 NAT 拓扑，
+VM 里的监听**不会出现在宿主 `netstat` 里**。所以 3306 从头到尾都有引擎，缺的是"从哪个网络命名空间去看"。
+教训：**"本机有没有引擎"这个问题必须按 network namespace 问**，否则会把"有引擎但连不到"误记成"没有引擎"，
+而这两者的下一步动作完全不同（前者是换跑法，后者是等用户装）。§7 首条已按此订正。
+
+**本批门禁**（2026-09-27，工作树 = 1 份新探测 + 本附录；规则层 / `spec/` / Rust / 三端前端零字节改动）：
+
+| 项 | 命令 | 结果 |
+|---|---|---|
+| Go 格式 | 剥 CR 后与 `gofmt` 输出比对（A.21 口径；本文件本就是 LF，`grep -c $'\r'` = 0） | 通过（仍禁 `gofmt -w`） |
+| Go 编译/静态 | `go build ./...`、`go vet ./pkg/dbmysql/` | 均 exit 0、无输出 |
+| Go 探测（Windows） | `go test -count=1 -v ./pkg/dbmysql/` | **13 份 `--- SKIP`、0 FAIL**，理由 `connectex … actively refused` ⇒ 真值 0 条 |
+| Go 探测（WSL 通路） | `CGO_ENABLED=0 GOOS=linux … go test -c` → 9 810 596 B 静态二进制 → `wsl -- /mnt/d/tmp/mprobe_linux -test.v` | **13 SKIP，理由 `Error 1045 … Access denied for user 'polydb_probe'@'localhost' (using password: NO)`** ⇒ TCP 到得了 mysqld，只差凭据 |
+| Go 全量 | `go test -count=1 ./...` | **15 包全 ok、0 FAIL**（A.26 基线 14 ⇒ `+1` 正是 `pkg/dbmysql` 首次有测试文件） |
+| Rust | 本批零改动 ⇒ 无 cargo 门禁可跑 | **形态退化项**，见上面差异 ① |
+| 协议漂移 | `go run . check` / `go run . ts --check` | `protocol check OK: 64 spec types vs rust + go` / `TS types up to date` ⇒ 零 spec 变更 |
+| 契约对拍 | `cd test/contract && go test -count=1 ./...` | 整包 **ok / 240.7 s / 0 FAIL**（A.26 265.2 s、A.25 261.7 s）⇒ 与基线一致。诚实记一笔：这轮我**误启了两次重叠运行**，两次都 ok（292.0 s 与 240.7 s），Rust 二进制沿用 A.26 所建的 `target/debug/polydb-server.exe`（本批 Rust 侧零字节改动） |
+| `golangci-lint` v2 | 不在 PATH | 恒跳过（§7 ⑦ 原样成立） |
+
+**本批未取/未验证项（照例标出）**：
+① **13 个取证点一条真值都没拿到**——缺的是账号不是引擎（通路已由 1045 证明），这是本批既定结果不是意外；
+所有 `OBS[…]` 行仍未打印过一次，探测代码本身**只经过编译、vet、gofmt 检验，没经过引擎检验**，
+真跑第一遍很可能红在若干条上（MySQL 版本号相关的语法、`LIKE` 是否带约束、`ALGORITHM=INSTANT` 的支持范围），
+**那是设计好的第一次真跑**；
+② **Rust 侧 MySQL 探测一条都没建**，D1–D4 只是"读代码定位"级证据，**不等于实测**——把 Go 侧取值当成双端结论是本批最容易误读的地方；
+③ 清单里四处"只记不赌"的分支（M2/M4/M5/M6）即便真跑也要**人工读 OBS**才能定案，探测不会替谁下结论；
+④ `golangci-lint` v2 仍不在 PATH；⑤ Web/TUI/GUI 三端零改动，未跑未看；
+⑥ 与 PG 那 12 点的**横向对照**（同一支判据两家引擎分别怎么说）要等 PG 到位才做得了——MySQL 一支先行的代价就是
+现在只能钉住"这一支在 MySQL 上是什么"，钉不住"两方言差在哪"。
+
+**净账**（本批代码一笔，落笔时仍在工作树；`git diff --numstat HEAD` 实测）：**1 个文件 +798 / −0**——
+`go/pkg/dbmysql/probe_test.go`。规则层（`ddl.go`/`ddl.rs`/`schemadiff.go`/`diff.rs`）、`spec/`、
+Rust 全仓、三端前端**零字节改动**。
+
+**下一步（F0.5，按 A.26 同一条顺序）**：① 用户建好账号跑上面第 3 条，一次收 13 点；
+② 观测转固定断言；③ 回填 §7 ①、§8-3、§8-6、§8-7、§8-8 与 A.11/A.15/A.16 的方言对照；
+④ 才轮到规则层：`ddl_in_tx` 去硬编码（M1）、重建触发条件加方言维度（M3–M6）、
+外键动作补读 SQL（M9/D5）。**顺序不能反**：先有真值，再改生成器。

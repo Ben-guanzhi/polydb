@@ -15,6 +15,7 @@
 mod normalize;
 
 pub mod ddl;
+pub mod ops_gen;
 
 pub use ddl::{
     generate, select_entries, Script, Statement, W_ADD_COLUMN_LIMITS, W_AUTOINCREMENT,
@@ -62,26 +63,14 @@ impl Op {
     }
 
     /// 执行相位：数值小的先执行，用于保证「先解除依赖再删、先建表再加约束」。
+    /// 取值单一来源自 spec/schemas/schemadiff-ops.json（见 `ops_gen::OP_ROWS`）。
     pub fn phase(self) -> u8 {
-        match self {
-            Self::DropForeignKey => 10,
-            Self::DropIndex => 20,
-            Self::DropColumn => 30,
-            Self::DropTable => 40,
-            Self::CreateTable => 50,
-            Self::AddColumn => 60,
-            Self::AlterColumn => 70,
-            Self::AddIndex => 80,
-            Self::AddForeignKey => 90,
-        }
+        ops_gen::lookup_op_row(self).map(|r| r.phase).unwrap_or(0)
     }
 
     /// 破坏性动作：删表/删列/删索引/删外键（默认不勾选，见 `docs/plan-compare-sync.md` D4）。
     pub fn destructive(self) -> bool {
-        matches!(
-            self,
-            Self::DropTable | Self::DropColumn | Self::DropIndex | Self::DropForeignKey
-        )
+        ops_gen::lookup_op_row(self).map(|r| r.destructive).unwrap_or(false)
     }
 
     /// 线路名 → op（`as_str` 的逆）；未知串返回 `None`，供回滚镜像等场景使用。

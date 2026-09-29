@@ -811,17 +811,7 @@ fn emit_script(
 }
 
 fn inverse_op(op: Op) -> Op {
-    match op {
-        Op::CreateTable => Op::DropTable,
-        Op::DropTable => Op::CreateTable,
-        Op::AddColumn => Op::DropColumn,
-        Op::DropColumn => Op::AddColumn,
-        Op::AlterColumn => Op::AlterColumn,
-        Op::AddIndex => Op::DropIndex,
-        Op::DropIndex => Op::AddIndex,
-        Op::AddForeignKey => Op::DropForeignKey,
-        Op::DropForeignKey => Op::AddForeignKey,
-    }
+    crate::ops_gen::lookup_op_row(op).map(|r| r.inverse).unwrap_or(op)
 }
 
 /// 正向条目 id → 反向条目 id：只替换最后一段 op。
@@ -852,10 +842,11 @@ fn check_kind(source: &Snapshot, target: &Snapshot) -> CoreResult<DatabaseKind> 
             source.kind, target.kind
         )));
     }
-    if source.kind != DatabaseKind::Sqlite {
+    if !crate::ops_gen::ddl_supported(&source.kind.to_string()) {
         return Err(CoreError::NotSupported(format!(
-            "{} 方言的 DDL 生成在 v1 未实现（当前只生成 sqlite）",
-            source.kind
+            "{} 方言的 DDL 生成在 v1 未实现（当前只生成 {}）",
+            source.kind,
+            crate::ops_gen::OP_DDL_DIALECTS.join("/")
         )));
     }
     Ok(source.kind)

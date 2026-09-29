@@ -24,13 +24,22 @@ func main() {
 	flag.Parse()
 
 	cmd := flag.Arg(0)
+	check := false
+	rest := flag.Args()[1:]
+	for _, a := range rest {
+		if a == "--check" {
+			check = true
+		}
+	}
 	switch cmd {
 	case "ts":
-		runTS(specDir, tsFile, flag.Args()[1:]...)
+		runTS(specDir, tsFile, rest...)
 	case "check":
 		runCheck(*specDir, *rustDir, *goDir)
+	case "ops":
+		runOps(repo, *specDir, check)
 	default:
-		fmt.Fprintln(os.Stderr, "usage: genprotocol ts [--check] | genprotocol check")
+		fmt.Fprintln(os.Stderr, "usage: genprotocol ts [--check] | genprotocol check | genprotocol ops [--check]")
 		os.Exit(2)
 	}
 }

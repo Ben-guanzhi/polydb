@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"net/url"
+	"os"
+	"strings"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -16,7 +19,33 @@ import (
 const wsServerVersion = "0.1.0"
 
 var wsUpgrader = websocket.Upgrader{
-	CheckOrigin: func(*http.Request) bool { return true },
+	CheckOrigin: checkWSOrigin,
+}
+
+// checkWSOrigin 防浏览器跨站 WebSocket 劫持（CSWSH）：
+//   - 无 Origin 头（TUI/CLI 等非浏览器客户端）放行；
+//   - 同源（Origin 的 host 与请求 Host 一致，覆盖服务端自托管 Web 前端）放行；
+//   - POLYDB_ALLOWED_ORIGINS（逗号分隔）显式白名单放行（vite dev 等跨源前端）。
+//
+// 其余一律拒绝。
+func checkWSOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	if strings.EqualFold(u.Host, r.Host) {
+		return true
+	}
+	for _, allowed := range strings.Split(os.Getenv("POLYDB_ALLOWED_ORIGINS"), ",") {
+		if allowed = strings.TrimSpace(allowed); allowed != "" && strings.EqualFold(allowed, origin) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
@@ -53,6 +82,7 @@ type wsSession struct {
 	app      *appcore.AppCore
 	token    string
 	connID   string
+	authed   bool
 	inFlight map[string]chan struct{}
 	writeCh  chan []byte
 	shutdown chan struct{}
@@ -145,6 +175,7 @@ func (s *wsSession) handleHello(msg protocol.ClientMessage) {
 		return
 	}
 	s.connID = msg.ConnectionID
+	s.authed = true
 	s.send(&protocol.ServerMessage{
 		Type:          protocol.ServerMsgHelloAck,
 		ServerVersion: wsServerVersion,
@@ -152,6 +183,17 @@ func (s *wsSession) handleHello(msg protocol.ClientMessage) {
 }
 
 func (s *wsSession) handleQuery(msg protocol.ClientMessage) {
+	// behavior.md §12.2：启用 token 时，未通过认证 hello 之前拒绝一切 query，
+	// 防止客户端跳过 hello 直接携带 connection_id 执行 SQL。
+	if s.token != "" && !s.authed {
+		s.send(&protocol.ServerMessage{
+			Type:    protocol.ServerMsgQueryError,
+			QueryID: msg.QueryID,
+			Error:   &protocol.PolyDBError{Code: protocol.ErrUnauthorized, Message: "query requires authenticated hello first"},
+		})
+		s.stop()
+		return
+	}
 	if msg.QueryID == "" {
 		s.send(&protocol.ServerMessage{
 			Type:  protocol.ServerMsgQueryError,

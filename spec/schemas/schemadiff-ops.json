@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Schemadiff op registry",
+  "description": "Single source of truth for the schemadiff op table: which ops exist and their execution phase, destructiveness, inverse op, and the DDL dialects the generator targets. `genprotocol ops` emits this table into BOTH the Go engine (go/pkg/schemadiff/ops_gen.go) and the Rust engine (rust/crates/schema-diff/src/ops_gen.rs) so the registry cannot drift between the two languages. The op *membership* (the ids below) is separately drift-checked by `genprotocol check` against `SchemaDiffOp` in metadata.json; this file owns the per-op properties (phase/destructive/inverse/dialects) that check does not cover. Values MUST match the engines' current behavior — the shared vector corpus (test/schema-diff-vectors) is the regression guard.",
+  "ddl_dialects": ["sqlite"],
+  "ops": [
+    { "id": "create_table",    "phase": 50, "destructive": false, "inverse": "drop_table" },
+    { "id": "drop_table",      "phase": 40, "destructive": true,  "inverse": "create_table" },
+    { "id": "add_column",      "phase": 60, "destructive": false, "inverse": "drop_column" },
+    { "id": "drop_column",     "phase": 30, "destructive": true,  "inverse": "add_column" },
+    { "id": "alter_column",    "phase": 70, "destructive": false, "inverse": "alter_column" },
+    { "id": "add_index",       "phase": 80, "destructive": false, "inverse": "drop_index" },
+    { "id": "drop_index",      "phase": 20, "destructive": true,  "inverse": "add_index" },
+    { "id": "add_foreign_key", "phase": 90, "destructive": false, "inverse": "drop_foreign_key" },
+    { "id": "drop_foreign_key","phase": 10, "destructive": true,  "inverse": "add_foreign_key" }
+  ]
+}

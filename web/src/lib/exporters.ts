@@ -6,7 +6,8 @@ import type { DatabaseKind } from '../api';
 
 type Cell = unknown;
 
-function csvEscape(v: Cell): string {
+/** RFC 4180 CSV 单元格转义：值含引号/逗号/换行时加引号并把内部 " 翻倍（null/undefined → 空串）。 */
+export function csvEscape(v: Cell): string {
   if (v === null || v === undefined) return '';
   const s = String(v);
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;

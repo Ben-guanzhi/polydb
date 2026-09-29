@@ -90,14 +90,17 @@ cd test/contract && go test -count=1 ./...
 | M13 | 导出/复制增强：CSV/JSON/NDJSON/Markdown/SQL INSERT/IN 子句 | ✓ |
 | M14 | 编辑器工作台增强（查询参数 UI、EXPLAIN 可视化、历史全文搜索——核实既有实现已覆盖） | ✓ |
 | M15 | 应用级暗色主题 + 连接分组/颜色（双实现 + Web UI） | ✓ |
+| M16 | 结构编辑器 + ER 图（TableStructureEditor / ERDiagram，Web UI） | ✓ |
+| M17 | AI 面板 + MCP 工具（AIPanel / polydb-mcp） | ✓ |
 
-完整优化路线与后续可选项（M16 结构编辑器/ER 图、M17 AI/MCP）见 [docs/plan-tablepro-parity.md](./docs/plan-tablepro-parity.md)。
+后续可选项（含未启用的 Arrow IPC / 大字段旁路）见 [docs/plan-tablepro-parity.md](./docs/plan-tablepro-parity.md)。
 
 ## 门禁
 
 ```bash
 # 协议防漂移（spec ↔ rust ↔ go ↔ ts，新增/变更 spec 后必须跑）
-make check-protocol        # 或 cd tools/genprotocol && go run . ts --check && go run . check
+make check-protocol        # 或 cd tools/genprotocol && go run . ts --check && go run . check && go run . ops --check
+make gen-ops               # 改 spec/schemas/schemadiff-ops.json 后重新生成 Go/Rust op 表
 
 # Rust
 cd rust && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace

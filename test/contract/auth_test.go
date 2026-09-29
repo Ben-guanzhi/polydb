@@ -139,7 +139,8 @@ func TestContractReadOnlyConnection(t *testing.T) {
 			r.step("get ro conn", "GET", "/api/connections/"+id, nil, 200,
 				map[string]any{"read_only": true}, keep("read_only"))
 
-			// 写语句全部拦截（含前导注释剥离后仍判为写的形态，§11+§12.3）
+			// 写语句全部拦截（含前导注释剥离后仍判为写的形态，§11+§12.3；
+			// 数据修改 CTE 与 TRUNCATE/GRANT 等此前归入 select/other 的写型语句）
 			for _, tc := range []struct {
 				name string
 				sql  string
@@ -149,6 +150,9 @@ func TestContractReadOnlyConnection(t *testing.T) {
 				{"delete blocked", "DELETE FROM t"},
 				{"ddl blocked", "CREATE TABLE t(a INTEGER)"},
 				{"commented write blocked", "-- migrate\nCREATE TABLE t(a INTEGER)"},
+				{"dml cte blocked", "WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d"},
+				{"truncate blocked", "TRUNCATE TABLE t"},
+				{"grant blocked", "GRANT SELECT ON t TO u"},
 			} {
 				status, got, err := c.Do("POST", "/api/connections/"+id+"/query", map[string]any{"sql": tc.sql})
 				if err != nil {

@@ -602,6 +602,148 @@ func TestWSQueryBeforeHello(t *testing.T) {
 	}
 }
 
+// authedCreateSQLiteConn 在启用 token 的服务上创建 SQLite 连接（HTTP 端点仍需 Bearer 头）。
+func authedCreateSQLiteConn(t *testing.T, srv *httptest.Server, token string) string {
+	t.Helper()
+	body, err := msgpack.Marshal(map[string]any{"name": "srv-test", "kind": "sqlite", "database": ":memory:"})
+	if err != nil {
+		t.Fatalf("marshal create conn: %v", err)
+	}
+	req, err := http.NewRequest("POST", srv.URL+"/api/connections", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("new create conn request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/msgpack")
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("create conn: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil || resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create conn: status=%d body=%q err=%v", resp.StatusCode, raw, err)
+	}
+	var out map[string]any
+	if err := msgpack.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("decode create conn: %v", err)
+	}
+	id, _ := out["id"].(string)
+	if id == "" {
+		t.Fatalf("create conn: missing id: %v", out)
+	}
+	return id
+}
+
+// 启用 token 时，跳过 hello 直接带 connection_id 发 query 必须被拒绝并关闭连接
+//（behavior.md §12.2）。镜像 Rust crates/server/src/tests.rs 的 ws_auth_gate 用例。
+func TestWSQueryWithoutAuthHelloRejected(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "polydb.db"))
+	if err != nil {
+		t.Fatalf("open storage: %v", err)
+	}
+	defer db.Close()
+	kr, err := keyring.NewFileKeyring(t.TempDir(), "ws-auth-test")
+	if err != nil {
+		t.Fatalf("open keyring: %v", err)
+	}
+	srv := httptest.NewServer(NewWithToken(appcore.New(db, kr), "secret-token").Handler())
+	t.Cleanup(srv.Close)
+
+	id := authedCreateSQLiteConn(t, srv, "secret-token")
+
+	w := wsDial(t, srv)
+	defer w.close()
+	w.send(map[string]any{
+		"type":          "query",
+		"query_id":      "11111111-2222-3333-4444-555555555555",
+		"connection_id": id,
+		"sql":           "SELECT 1",
+	})
+	typ, msg := w.recv(3 * time.Second)
+	if typ != "query_error" {
+		t.Fatalf("expected query_error without auth hello, got %q: %v", typ, msg)
+	}
+	if err := msg["error"].(map[string]any); err["code"] != "POLYDB_ERR_UNAUTHORIZED" {
+		t.Fatalf("expected UNAUTHORIZED, got %v", err)
+	}
+	// 服务端在拒绝后关闭连接：下一次读取应得到错误而非继续收消息。
+	_ = w.c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, _, err := w.c.ReadMessage(); err == nil {
+		t.Fatalf("connection should be closed after unauthorized query")
+	}
+}
+
+// 启用 token 时，携带正确 token 的完整 hello 之后 query 正常执行。
+func TestWSAuthHelloThenQuery(t *testing.T) {
+	db, err := storage.Open(filepath.Join(t.TempDir(), "polydb.db"))
+	if err != nil {
+		t.Fatalf("open storage: %v", err)
+	}
+	defer db.Close()
+	kr, err := keyring.NewFileKeyring(t.TempDir(), "ws-auth-ok")
+	if err != nil {
+		t.Fatalf("open keyring: %v", err)
+	}
+	srv := httptest.NewServer(NewWithToken(appcore.New(db, kr), "secret-token").Handler())
+	t.Cleanup(srv.Close)
+
+	id := authedCreateSQLiteConn(t, srv, "secret-token")
+
+	w := wsDial(t, srv)
+	defer w.close()
+	w.send(map[string]any{
+		"type":           "hello",
+		"connection_id":  id,
+		"client_version": "0.1.0",
+		"auth":           map[string]any{"token": "secret-token"},
+	})
+	typ, msg := w.recv(3 * time.Second)
+	if typ != "hello_ack" {
+		t.Fatalf("expected hello_ack, got %q: %v", typ, msg)
+	}
+
+	w.send(map[string]any{
+		"type":     "query",
+		"query_id": "11111111-2222-3333-4444-555555555555",
+		"sql":      "SELECT 1",
+	})
+	typ, _ = w.recv(3 * time.Second)
+	if typ != "query_started" {
+		t.Fatalf("expected query_started after auth hello, got %q", typ)
+	}
+	typ, _ = w.recv(3 * time.Second)
+	if typ != "query_result" {
+		t.Fatalf("expected query_result after auth hello, got %q", typ)
+	}
+}
+
+// CheckOrigin（behavior.md §12.2）：跨源且不在白名单的浏览器握手被拒绝。
+func TestWSCheckOriginRejectsCrossSite(t *testing.T) {
+	srv := newTestServer(t)
+	t.Cleanup(srv.Close)
+
+	url := strings.Replace(srv.URL, "http", "ws", 1) + "/ws"
+	header := http.Header{}
+	header.Set("Origin", "https://evil.example.com")
+	if _, _, err := websocket.DefaultDialer.Dial(url, header); err == nil {
+		t.Fatalf("cross-site origin handshake should be rejected")
+	}
+
+	// 同源放行。
+	header = http.Header{}
+	header.Set("Origin", srv.URL)
+	if c, _, err := websocket.DefaultDialer.Dial(url, header); err != nil {
+		t.Fatalf("same-origin handshake should pass: %v", err)
+	} else {
+		_ = c.Close()
+	}
+
+	// 无 Origin（非浏览器客户端）放行。
+	w := wsDial(t, srv)
+	w.close()
+}
+
 // ─── 结构比对（Compare & Sync E2，behavior.md §14）───────────
 // 与 Rust crates/server/src/tests.rs 的 diff_schema_* 用例逐条镜像。
 

@@ -225,11 +225,12 @@ func (a *AppCore) isReadOnly(id string) bool {
 }
 
 // rejectWriteOnReadOnly 按 behavior.md §12.3 拦截只读连接上的写语句：
-// insert / update / delete / ddl 返回 POLYDB_ERR_READ_ONLY；select / other 放行。
+// 对整条语句（含 WITH 子树与多语句）做变更关键字扫描（dbcore.MutatesData），
+// 命中即返回 POLYDB_ERR_READ_ONLY。不再复用 DetectStatementType 的判型——
+// 数据修改 CTE（WITH…DELETE/UPDATE/INSERT）与 TRUNCATE/GRANT/CALL 等会被
+// 判成 select/other 而漏拦。
 func rejectWriteOnReadOnly(sqlText string) error {
-	switch dbcore.DetectStatementType(sqlText) {
-	case protocol.StatementTypeInsert, protocol.StatementTypeUpdate,
-		protocol.StatementTypeDelete, protocol.StatementTypeDDL:
+	if dbcore.MutatesData(sqlText) {
 		return &protocol.PolyDBError{Code: protocol.ErrReadOnly, Message: "connection is read-only: write statements are rejected"}
 	}
 	return nil

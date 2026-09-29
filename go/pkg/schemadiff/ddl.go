@@ -742,28 +742,10 @@ func emitScript(kind protocol.DatabaseKind, source, target *Snapshot, entries []
 }
 
 func inverseOp(op Op) Op {
-	switch op {
-	case OpCreateTable:
-		return OpDropTable
-	case OpDropTable:
-		return OpCreateTable
-	case OpAddColumn:
-		return OpDropColumn
-	case OpDropColumn:
-		return OpAddColumn
-	case OpAlterColumn:
-		return OpAlterColumn
-	case OpAddIndex:
-		return OpDropIndex
-	case OpDropIndex:
-		return OpAddIndex
-	case OpAddForeignKey:
-		return OpDropForeignKey
-	case OpDropForeignKey:
-		return OpAddForeignKey
-	default:
-		return op
+	if r, ok := lookupOpRow(op); ok {
+		return r.Inverse
 	}
+	return op
 }
 
 // mirrorID 是正向条目 id → 反向条目 id：只替换最后一段 op。
@@ -783,13 +765,8 @@ func mirrorID(id string) string {
 }
 
 func isKnownOp(s string) bool {
-	switch Op(s) {
-	case OpCreateTable, OpDropTable, OpAddColumn, OpDropColumn, OpAlterColumn,
-		OpAddIndex, OpDropIndex, OpAddForeignKey, OpDropForeignKey:
-		return true
-	default:
-		return false
-	}
+	_, ok := lookupOpRow(Op(s))
+	return ok
 }
 
 func checkKind(source, target *Snapshot) (protocol.DatabaseKind, error) {
@@ -802,8 +779,9 @@ func checkKind(source, target *Snapshot) (protocol.DatabaseKind, error) {
 		return "", notSupported(fmt.Sprintf("跨种类比对未支持：%s vs %s（v1 只比同一种数据库）",
 			source.Kind, target.Kind))
 	}
-	if source.Kind != protocol.DatabaseKindSQLite {
-		return "", notSupported(fmt.Sprintf("%s 方言的 DDL 生成在 v1 未实现（当前只生成 sqlite）", source.Kind))
+	if !OpDDLsContain(string(source.Kind)) {
+		return "", notSupported(fmt.Sprintf("%s 方言的 DDL 生成在 v1 未实现（当前只生成 %s）",
+			source.Kind, strings.Join(OpDDLs, "/")))
 	}
 	return source.Kind, nil
 }

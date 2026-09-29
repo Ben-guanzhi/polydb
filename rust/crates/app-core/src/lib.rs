@@ -304,19 +304,13 @@ impl AppCore {
             .unwrap_or(false)
     }
 
-    /// 只读连接上的写语句拦截：insert/update/delete/ddl 返回 POLYDB_ERR_READ_ONLY。
+    /// 只读连接上的写语句拦截：对整条语句（含 WITH 子树与多语句）做变更关键字
+    /// 扫描（db_core::mutates_data），命中返回 POLYDB_ERR_READ_ONLY。不复用
+    /// detect_statement_type——数据修改 CTE（WITH…DELETE/UPDATE/INSERT）与
+    /// TRUNCATE/GRANT/CALL 等会被判成 select/other 而漏拦。
     fn reject_write_on_read_only(&self, id: &ConnectionId, sql: &str) -> CoreResult<()> {
-        use polydb_db_core::detect_statement_type;
-        use polydb_protocol::StatementType;
-        if self.is_read_only(id)
-            && matches!(
-                detect_statement_type(sql),
-                StatementType::Insert
-                    | StatementType::Update
-                    | StatementType::Delete
-                    | StatementType::Ddl
-            )
-        {
+        use polydb_db_core::mutates_data;
+        if self.is_read_only(id) && mutates_data(sql) {
             return Err(polydb_protocol::PolyDBError::new(
                 polydb_protocol::error::codes::READ_ONLY,
                 "connection is read-only: write statements are rejected",

@@ -28,11 +28,23 @@ import {
   sqlLiteral,
 } from '../lib/importDisplay';
 import {
-  classifyDiffItem, FIX_STACK_MAX_BYTES, DIFF_EMPTY_MARKS, diffGroupColor, diffItemColor, diffItemIcon,
+  classifyDiffItem, FIX_STACK_MAX_BYTES, diffGroupColor, diffItemColor, diffItemIcon,
   diffItemLabel, diffKeywordColor, splitDiffSearchKeywords, splitDiffSearchParts,
   buildUndoDiff as buildUndoDiffLib, copyAllItems, copyDiffSummary, densityAlpha, groupDiffItems,
   filterDiffGroups as filterDiffGroupsLib,
 } from '../lib/importDiff';
+import { computeItemRiskScore as computeItemRiskScoreLib } from '../lib/importRisk';
+import {
+  backupPreviewFiltered as backupPreviewFilteredLib,
+  backupPreviewGroupOrderMap as backupPreviewGroupOrderMapLib,
+  backupPreviewSorted as backupPreviewSortedLib,
+  diffCountOf as diffCountOfLib,
+  riskScoreOf as riskScoreOfLib,
+} from '../lib/importBackupPreview';
+import {
+  applySingleItemUndo as applySingleItemUndoLib,
+  canRevertSingleItem as canRevertSingleItemLib,
+} from '../lib/importUndo';
 import {
   buildRiskWhitelistExport, loadRiskWhitelist, mergeWhitelistItems, parseRiskWhitelistCsv,
   parseRiskWhitelistJson, persistRiskWhitelist, RISK_WHITELIST_KEY, removeExpiredWhitelist,
@@ -425,42 +437,8 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
     } catch { /* 隐私模式 / quota 满时静默 */ }
   }, [backupCollapsedGroups]);
   // M30.156 D 备份预检项综合风险评分：diff 数 + 审计状态 + 跨连接三因素合成
-  // 输出 {score, level, color, icon, title} 供每行 chip 使用
-  const computeItemRiskScore = (i: BackupPreviewItem): {
-    score: number;
-    level: 'low' | 'mid' | 'high';
-    color: string;
-    bg: string;
-    icon: string;
-    label: string;
-    parts: string[];
-  } => {
-    const parts: string[] = [];
-    let score = 0;
-    const diffTotal = i.kind === 'preset' && i.diff && !i.diff.aligned ? i.diff.total : 0;
-    if (diffTotal >= 11) { score += 50; parts.push(`diff=${diffTotal}(大)`); }
-    else if (diffTotal >= 4) { score += 30; parts.push(`diff=${diffTotal}(中)`); }
-    else if (diffTotal > 0) { score += 15; parts.push(`diff=${diffTotal}(小)`); }
-    const srcConn = i.key.split('::')[0];
-    const crossConn = !!srcConn && srcConn !== connId;
-    if (crossConn) { score += 25; parts.push('跨连接'); }
-    if (i.action === 'overwrite') { score += 10; parts.push('覆盖'); }
-    const audit = i.kind === 'preset' && backupItemAudit ? backupItemAudit[i.key] : null;
-    if (audit === 'dead') { score += 60; parts.push('审计失效'); }
-    else if (audit === 'ok') { parts.push('存活'); }
-    if (i.kind === 'snapshot' && i.snapshotCount > 0) {
-      if (i.snapshotCount >= 10) { score += 10; parts.push(`快照=${i.snapshotCount}(多)`); }
-    }
-    score = Math.min(100, score);
-    const level: 'low' | 'mid' | 'high' = score >= 50 ? 'high' : score >= 20 ? 'mid' : 'low';
-    const colorMap = {
-      low: { color: 'var(--success, #10b981)', bg: 'rgba(16,185,129,0.12)', icon: '🟢', label: '低风险' },
-      mid: { color: 'var(--warn, #d97706)', bg: 'rgba(217,119,6,0.14)', icon: '🟡', label: '中风险' },
-      high: { color: 'var(--danger, #dc2626)', bg: 'rgba(220,38,38,0.14)', icon: '🔴', label: '高风险' },
-    } as const;
-    const c = colorMap[level];
-    return { score, level, color: c.color, bg: c.bg, icon: c.icon, label: c.label, parts };
-  };
+  // 输出 {score, level, color, icon, title} 供每行 chip 使用（纯评分已下沉 lib/importRisk）
+  const computeItemRiskScore = (i: BackupPreviewItem) => computeItemRiskScoreLib(i, connId, backupItemAudit);
   // M30.149 D 分组 diff 导出：每个分组记录上次导出格式，点击 📥 循环 json→csv→md
   const [backupGroupExportFmt, setBackupGroupExportFmt] = useState<Record<string, 'json' | 'csv' | 'md'>>({});
   // M30.147 C 备份应用后自动审计汇总：{applied, ok, dead}
@@ -2620,176 +2598,33 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
   };
 
   // 单项撤销：把 diff 面板中某个字段从"before"（当前 opts 值）恢复到"after"（target snapshot 值）
-  // 生成合成 FixEntry 压入栈，供后续 Ctrl+Z 撤销这次撤销
+  // 生成合成 FixEntry 压入栈，供后续 Ctrl+Z 撤销这次撤销（纯变换已下沉 lib/importUndo）
   // 支持：mode / strictValidation / emptyAsNull / batchSize / transforms / nullPolicies / validations / 行过滤
   // 不支持（fallback）：validation 的"非空"目标（正则/enum 因显示截断不可逆），返回 null 由调用方提示用户改用全撤销
-  const extractColIdx = (subLabel: string): number | null => {
-    const hashIdx = subLabel.indexOf('#');
-    if (hashIdx >= 0) {
-      const numStr = subLabel.slice(hashIdx + 1).split(/\s/)[0];
-      const n = parseInt(numStr, 10);
-      if (!isNaN(n)) return n;
-    }
-    const csvName = subLabel.split(' → ')[0].trim();
-    const m = mappings.find((mm) => mm.csvName === csvName);
-    return m ? mappings.indexOf(m) : null;
-  };
-  const isDisplayEmptyStr = (s: string) => s === '' || DIFF_EMPTY_MARKS.has(s);
-
-  // 单项撤销可行性预判（不 clone opts，用于 diff 面板灰化 ↩ 按钮）
   const canRevertSingleItem = (
     item: { field: string; before: string; after: string },
     targetSnap: ImportOptions,
-  ): boolean => {
-    const spaceIdx = item.field.indexOf(' ');
-    const head = spaceIdx > 0 ? item.field.slice(0, spaceIdx) : item.field;
-    const sub = spaceIdx > 0 ? item.field.slice(spaceIdx + 1) : '';
-    switch (head) {
-      case '模式':
-        return ['insert', 'update', 'upsert'].includes(targetSnap.mode);
-      case '严格校验': case '空串视为 null': case '行过滤':
-        return true;
-      case '批大小':
-        return Number.isFinite(targetSnap.batchSize);
-      case '转换': case '空值策略': {
-        const idx = extractColIdx(sub);
-        if (idx === null) return false;
-        if (isDisplayEmptyStr(item.after)) return !isDisplayEmptyStr(item.before);
-        return true;
-      }
-      case '校验': {
-        const idx = extractColIdx(sub);
-        if (idx === null) return false;
-        if (isDisplayEmptyStr(item.after)) return !isDisplayEmptyStr(item.before);
-        const tv = targetSnap.validations?.[idx];
-        if (tv) return hasAnyValidation(tv);
-        const after = item.after;
-        const geIdx = after.indexOf('≥');
-        const leIdx = after.indexOf('≤');
-        const enumIdx = after.indexOf('enum:[');
-        return after.includes('必填') || geIdx >= 0 || leIdx >= 0 || enumIdx >= 0;
-      }
-      default:
-        return false;
-    }
-  };
-
-  const revertSingleItem = (
-    item: { field: string; before: string; after: string },
-    targetSnap: ImportOptions,
-  ): ImportOptions | null => {
-    const next = JSON.parse(JSON.stringify(opts)) as ImportOptions;
-    const spaceIdx = item.field.indexOf(' ');
-    const head = spaceIdx > 0 ? item.field.slice(0, spaceIdx) : item.field;
-    const sub = spaceIdx > 0 ? item.field.slice(spaceIdx + 1) : '';
-    const isDisplayEmpty = isDisplayEmptyStr;
-    switch (head) {
-      case '模式': {
-        if (!['insert', 'update', 'upsert'].includes(targetSnap.mode)) return null;
-        next.mode = targetSnap.mode;
-        return next;
-      }
-      case '严格校验': { next.strictValidation = targetSnap.strictValidation; return next; }
-      case '空串视为 null': { next.emptyAsNull = targetSnap.emptyAsNull; return next; }
-      case '批大小': {
-        if (!Number.isFinite(targetSnap.batchSize)) return null;
-        next.batchSize = targetSnap.batchSize;
-        return next;
-      }
-      case '转换': {
-        const idx = extractColIdx(sub);
-        if (idx === null) return null;
-        const map = { ...(next.transforms ?? {}) };
-        if (isDisplayEmpty(item.after)) {
-          // 目标是"空"：删除当前值（若当前非空）
-          if (!isDisplayEmpty(item.before)) delete map[idx];
-        } else {
-          // 目标是非空：写入 target 快照里的值（显示字符串即真实值）
-          map[idx] = targetSnap.transforms?.[idx] ?? item.after;
-        }
-        next.transforms = map;
-        return next;
-      }
-      case '空值策略': {
-        const idx = extractColIdx(sub);
-        if (idx === null) return null;
-        const map = { ...(next.nullPolicies ?? {}) };
-        if (isDisplayEmpty(item.after)) {
-          if (!isDisplayEmpty(item.before)) delete map[idx];
-        } else {
-          map[idx] = targetSnap.nullPolicies?.[idx] ?? item.after;
-        }
-        next.nullPolicies = map;
-        return next;
-      }
-      case '校验': {
-        const idx = extractColIdx(sub);
-        if (idx === null) return null;
-        const map = { ...(next.validations ?? {}) };
-        if (isDisplayEmpty(item.after)) {
-          // 目标是"空/删除"：只要当前非空就删
-          if (!isDisplayEmpty(item.before)) delete map[idx];
-        } else {
-          // 目标是非空：从 target 快照取真实值；若快照缺失则从 after 显示字符串 fallback 解析
-          const tv = targetSnap.validations?.[idx];
-          if (tv) {
-            map[idx] = JSON.parse(JSON.stringify(tv));
-          } else {
-            const after = item.after;
-            const v: ColumnValidation = { required: after.includes('必填'), regex: '', minValue: '', maxValue: '', enum: '' };
-            const geIdx = after.indexOf('≥');
-            if (geIdx >= 0) v.minValue = after.slice(geIdx + 1).split(' · ')[0];
-            const leIdx = after.indexOf('≤');
-            if (leIdx >= 0) v.maxValue = after.slice(leIdx + 1).split(' · ')[0];
-            const enumIdx = after.indexOf('enum:[');
-            if (enumIdx >= 0) {
-              const end = after.indexOf(']', enumIdx);
-              const raw = end > 0 ? after.slice(enumIdx + 6, end) : after.slice(enumIdx + 6);
-              const trimmed = raw.endsWith('...]') ? raw.slice(0, -3) : raw;
-              v.enum = trimmed;
-            }
-            if (!hasAnyValidation(v)) return null;
-            map[idx] = v;
-          }
-        }
-        next.validations = map;
-        return next;
-      }
-      case '行过滤': {
-        if (targetSnap.filterColumn === null) {
-          next.filterColumn = null;
-          next.filterValue = '';
-        } else {
-          next.filterColumn = targetSnap.filterColumn;
-          next.filterOp = targetSnap.filterOp;
-          next.filterValue = targetSnap.filterValue;
-        }
-        return next;
-      }
-      default:
-        return null;
-    }
-  };
+  ): boolean => canRevertSingleItemLib(item, targetSnap, mappings);
 
   // 执行单项撤销：把当前 opts 中该字段与目标 snapshot 的差异恢复，生成合成 FixEntry 压栈
   const applySingleItemUndo = (
     item: { field: string; before: string; after: string },
     targetSnap: ImportOptions,
   ) => {
-    const next = revertSingleItem(item, targetSnap);
-    if (!next) {
+    const r = applySingleItemUndoLib(item, targetSnap, opts, mappings);
+    if (r.status === 'impossible') {
       publishEditorStatus({
         message: `↩️ 无法单项撤销「${item.field}」（复杂字段回退需全撤销）`,
         messageAt: Date.now(),
       });
       return;
     }
-    if (JSON.stringify(next) === JSON.stringify(opts)) {
+    if (r.status === 'already') {
       publishEditorStatus({ message: `↩️ 「${item.field}」已是目标值，无需撤销`, messageAt: Date.now() });
       return;
     }
     const prev = JSON.parse(JSON.stringify(opts)) as ImportOptions;
-    setOpts(next);
+    setOpts(r.next);
     const msg = `${item.before || '∅'} → ${item.after || '∅'}`;
     pushFix({ key: 'single-item', label: `单项撤销：${item.field}`, icon: '↩️', snapshot: prev, msg, at: Date.now() });
   };
@@ -3414,120 +3249,30 @@ export default function ImportModal({ connId, kind: kindProp, contextSchema, con
   const curStepIdx = STEP_ORDER.indexOf(step);
   // M30.142 备份预检排序：diff 大改动前置（降序），schema 字典序；stable 保原顺序在并列值下
   // M30.146 D：加 'risk' 风险排序（dead > 其他连接 > 变更数降序 > overwrite > schema）
-  const diffCountOf = (i: BackupPreviewItem): number => {
-    if (i.action !== 'overwrite' || !i.diff) return 0;
-    const d = i.diff;
-    return d.scalarDiffs.length + d.removedTargets.length + d.addedTargets.length
-      + Object.keys(d.removedCols).length + Object.keys(d.addedCols).length;
-  };
-  const riskScoreOf = (i: BackupPreviewItem): number => {
-    // 数值越大越靠前
-    let s = 0;
-    if (i.kind === 'preset' && backupItemAudit && backupItemAudit[i.key] === 'dead') s += 10000;
-    const parts = i.key.split('::');
-    const srcConn = parts[0];
-    if (srcConn && srcConn !== connId) s += 5000;
-    s += diffCountOf(i) * 10;
-    if (i.action === 'overwrite') s += 5;
-    return s;
-  };
-  const backupPreviewSorted = backupPending ? [...backupPending.items].sort((a, b) => {
-    if (backupSortBy === 'risk') {
-      const ra = riskScoreOf(a);
-      const rb = riskScoreOf(b);
-      if (rb !== ra) return rb - ra;
-      return `${a.schema}.${a.table}`.localeCompare(`${b.schema}.${b.table}`);
-    }
-    if (backupSortBy === 'diff') {
-      const da = diffCountOf(a);
-      const db = diffCountOf(b);
-      if (db !== da) return db - da;
-      // 稳定 tiebreaker：overwrite 前置，再按 schema.table 字典序
-      if ((a.action === 'overwrite') !== (b.action === 'overwrite')) return a.action === 'overwrite' ? -1 : 1;
-      return `${a.schema}.${a.table}`.localeCompare(`${b.schema}.${b.table}`);
-    }
-    return `${a.schema}.${a.table}`.localeCompare(`${b.schema}.${b.table}`);
-  }) : [];
+  // （排序/分组/过滤链为纯变换，已下沉 lib/importBackupPreview）
+  const backupRiskCtx = { connId, audit: backupItemAudit };
+  const diffCountOf = (i: BackupPreviewItem): number => diffCountOfLib(i);
+  const riskScoreOf = (i: BackupPreviewItem): number => riskScoreOfLib(i, backupRiskCtx);
+  const backupPreviewSorted = backupPending
+    ? backupPreviewSortedLib(backupPending.items, backupSortBy, backupRiskCtx)
+    : [];
   // M30.152 D：按表分组模式下，把可见项按「所在分组顺序（复用 M30.151 组排序）→ 组内变更数降序」重排
-  const backupPreviewGroupOrderMap: Record<string, number> = (() => {
-    if (!backupPending || !backupGroupBy) return {};
-    const groups = new Set<string>();
-    for (const i of backupPending.items) groups.add(`${i.schema}::${i.table}`);
-    const arr = Array.from(groups);
-    const diffOf = (gk: string) => {
-      let s = 0;
-      for (const i of backupPending.items) {
-        if (`${i.schema}::${i.table}` !== gk) continue;
-        if (i.action !== 'overwrite' || !i.diff || i.kind !== 'preset') continue;
-        const d = i.diff;
-        s += d.scalarDiffs.length + d.removedTargets.length + d.addedTargets.length
-          + Object.keys(d.removedCols).length + Object.keys(d.addedCols).length;
-      }
-      return s;
-    };
-    // M30.164 C 组内平均风险分（导出分组顺序与 UI 排序一致）
-    const riskAvgOf = (gk: string) => {
-      let s = 0, n = 0;
-      for (const i of backupPending.items) {
-        if (`${i.schema}::${i.table}` !== gk) continue;
-        s += computeItemRiskScore(i).score; n += 1;
-      }
-      return n === 0 ? 0 : s / n;
-    };
-    arr.sort((a, b) => {
-      if (backupGroupSort === 'diff') {
-        const da = diffOf(a);
-        const db = diffOf(b);
-        if (db !== da) return db - da;
-        return a.localeCompare(b);
-      }
-      if (backupGroupSort === 'risk') {
-        const ra = riskAvgOf(a);
-        const rb = riskAvgOf(b);
-        if (rb !== ra) return rb - ra;
-        return a.localeCompare(b);
-      }
-      return a.localeCompare(b);
-    });
-    const map: Record<string, number> = {};
-    arr.forEach((g, idx) => { map[g] = idx; });
-    return map;
-  })();
+  const backupPreviewGroupOrderMap = backupPreviewGroupOrderMapLib(backupPending?.items ?? [], {
+    enabled: !!backupPending && backupGroupBy,
+    groupSort: backupGroupSort,
+    ...backupRiskCtx,
+  });
   // M30.144 A/B/D 键盘导航用：把 sorted 再走一遍与 UI 相同的 filter 链，产出用户可见列表
-  const backupPreviewFiltered = (() => {
-    if (!backupPending) return [] as BackupPreviewItem[];
-    const q = backupPreviewSearch.trim().toLowerCase();
-    // M30.154 B 环形图分档点击筛选：非 'all' 时只保留 overwrite preset 且落在对应分档的项
-    const binMatch = (i: BackupPreviewItem): boolean => {
-      if (backupDiffBinFilter === 'all') return true;
-      if (i.action !== 'overwrite' || i.kind !== 'preset' || !i.diff) return false;
-      const dc = diffCountOf(i);
-      const bin = dc === 0 ? '0' : dc <= 3 ? '1' : dc <= 10 ? '2' : '3';
-      return bin === backupDiffBinFilter;
-    };
-    const visible = backupPreviewSorted.filter((i) => {
-      if (backupPreviewFilter !== 'all' && i.action !== backupPreviewFilter) return false;
-      if (backupPreviewKindFilter !== 'all' && i.kind !== backupPreviewKindFilter) return false;
-      if (!binMatch(i)) return false;
-      if (q && !i.schema.toLowerCase().includes(q) && !i.table.toLowerCase().includes(q)) return false;
-      if (backupGroupBy && backupCollapsedGroups.has(`${i.schema}::${i.table}`)) return false;
-      // M30.158 A 风险级别过滤：'all' 全部通过；否则只保留匹配 level 的项
-      if (backupRiskLevelFilter !== 'all' && computeItemRiskScore(i).level !== backupRiskLevelFilter) return false;
-      // M30.161 C 风险阈值滑块：只保留 score >= threshold
-      if (backupRiskThreshold > 0 && computeItemRiskScore(i).score < backupRiskThreshold) return false;
-      return true;
-    });
-    if (!backupGroupBy) return visible;
-    return visible.slice().sort((a, b) => {
-      const ga = backupPreviewGroupOrderMap[`${a.schema}::${a.table}`] ?? Number.MAX_SAFE_INTEGER;
-      const gb = backupPreviewGroupOrderMap[`${b.schema}::${b.table}`] ?? Number.MAX_SAFE_INTEGER;
-      if (ga !== gb) return ga - gb;
-      const da = diffCountOf(a);
-      const db = diffCountOf(b);
-      if (db !== da) return db - da;
-      return a.key.localeCompare(b.key);
-    });
-  })();
+  const backupPreviewFiltered = backupPreviewFilteredLib(backupPreviewSorted, {
+    search: backupPreviewSearch,
+    actionFilter: backupPreviewFilter,
+    kindFilter: backupPreviewKindFilter,
+    diffBinFilter: backupDiffBinFilter,
+    groupBy: backupGroupBy,
+    collapsedGroups: backupCollapsedGroups,
+    riskLevelFilter: backupRiskLevelFilter,
+    riskThreshold: backupRiskThreshold,
+  }, backupRiskCtx, backupPreviewGroupOrderMap);
 
   // M30.142 备份预检确认/取消：提到组件顶层让键盘 useEffect 可见
   // M30.143 D：apply 前先取快照，成功后置 pendingBackupUndo 并启动 5s 倒计时

@@ -232,15 +232,27 @@
 
 - 服务端启用 token 时，客户端 `hello` 必须携带 `auth: { token }`；缺失或不匹配：服务端发送
   `query_error`（`POLYDB_ERR_UNAUTHORIZED`）后**关闭连接**，不发送 `hello_ack`。
+- 启用 token 时，完成认证 `hello` **之前**的一切 `query` 消息一律返回
+  `query_error`（`POLYDB_ERR_UNAUTHORIZED`）并关闭连接——防止跳过 hello 直接携带
+  `connection_id` 执行 SQL。未启用 token 时保持历史行为（query 可带显式 connection_id 先于 hello）。
+- WebSocket 握手做 Origin 校验防跨站 WebSocket 劫持（CSWSH）：无 `Origin` 头（TUI/CLI 等
+  非浏览器客户端）放行；`Origin` 的 host 与请求 Host 一致（同源，覆盖服务端自托管 Web 前端）
+  放行；命中 `POLYDB_ALLOWED_ORIGINS`（逗号分隔，环境变量）白名单放行（vite dev 等跨源前端）；
+  其余拒绝（HTTP 403 / 握手失败）。
 - 未启用 token 时忽略 `auth` 字段（non-breaking）。
 
 ### 12.3 连接级只读（read_only）
 
 - `ConnectionConfig.read_only = true`（默认 false）的连接，服务端在 **app-core 执行层**拒绝写操作
   （UI 禁用只是第一道，服务端拦截才是保证）：
-  - SQL：`execute` / `execute_in_transaction` / batch 中语句按 §11 判型，`insert` / `update` /
-    `delete` / `ddl` 返回 **409** `POLYDB_ERR_READ_ONLY`；`select` / `other` 放行
-    （`PRAGMA` 等写型 `other` 语句不在 M10 拦截范围，文档如实标注）。
+  - SQL：`execute` / `execute_in_transaction` / batch 中语句做**整句变更关键字扫描**
+    （不再复用 §11 判型）：剥离 `--` / `/* */` 注释与 `'…'` / `"…"` / `` `…` `` / `[…]`
+    字面量后，整词命中 `INSERT` / `UPDATE` / `DELETE` / `MERGE` / `REPLACE` / `TRUNCATE` /
+    `GRANT` / `REVOKE` / `CREATE` / `ALTER` / `DROP` / `CALL` / `EXEC` / `EXECUTE` / `COPY` /
+    `VACUUM` / `REINDEX` / `CLUSTER` / `LOCK` / `COMMENT` 即返回 **409** `POLYDB_ERR_READ_ONLY`。
+    扫整句使数据修改 CTE（`WITH … DELETE/UPDATE/INSERT`）与 `TRUNCATE` / `GRANT` / `CALL`
+    等此前归入 `select` / `other` 的写型语句同样被拦；注释/字符串中的同名词不误判。
+    `PRAGMA` 等写型 `other` 语句仍不在拦截范围，文档如实标注。
   - KV：`kv/keys/{key}` PUT（SetValue）与 `kv/exec`（ExecCommand）一律返回 409 `POLYDB_ERR_READ_ONLY`；
     GET / scan / select db 不受限。
 - 事务内语句同样拦截（按事务所属连接判定）。

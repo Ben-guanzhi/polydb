@@ -716,3 +716,176 @@ async fn garbage_msgpack_body_returns_unknown() {
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(value["code"], "POLYDB_ERR_UNKNOWN");
 }
+
+// ─── WebSocket 鉴权门（behavior.md §12.2，与 Go 侧 ws_auth 用例对拍）────────
+
+use futures_util::{SinkExt, StreamExt};
+use polydb_core::protocol::ws::{ClientMessage, ServerMessage, WsAuth};
+use polydb_core::protocol::QueryRequest;
+use serde::Serialize;
+use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+use crate::router_with_token;
+
+fn new_test_router_with_token(token: &str) -> Router {
+    let dir = std::env::temp_dir().join(format!("polydb-srv-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(dir.join("polydb.db").to_str().unwrap()).unwrap();
+    let kr: Arc<dyn Keyring> =
+        Arc::new(FileKeyring::open(dir.to_str().unwrap(), "test-master").unwrap());
+    router_with_token(
+        Arc::new(AppCore::with_keyring(storage, kr)),
+        Some(token.to_string()),
+    )
+}
+
+/// 启用 token 的服务上创建 SQLite 连接（HTTP 端点需 Bearer 头）。
+async fn authed_create_sqlite_conn(router: &Router, name: &str, token: &str) -> String {
+    let bytes = serde_json::to_vec(&json!({
+        "name": name,
+        "kind": "sqlite",
+        "database": ":memory:"
+    }))
+    .unwrap();
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/connections")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {token}"))
+        .body(axum::body::Body::from(bytes))
+        .unwrap();
+    let resp = router.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let raw = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    // 响应为 msgpack（服务端默认），与 do_req 的解码方式一致。
+    let mut de = rmp_serde::Deserializer::new(raw.as_ref()).with_human_readable();
+    let value = Value::deserialize(&mut de).unwrap();
+    value["id"].as_str().unwrap().to_string()
+}
+
+async fn spawn_ws_server(router: Router) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    format!("ws://{addr}/ws")
+}
+
+fn ws_encode(msg: &ClientMessage) -> Vec<u8> {
+    let mut buf = Vec::new();
+    msg.serialize(
+        &mut rmp_serde::Serializer::new(&mut buf)
+            .with_struct_map()
+            .with_human_readable(),
+    )
+    .unwrap();
+    buf
+}
+
+async fn ws_recv(ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>) -> ServerMessage {
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+        .await
+        .expect("ws recv timeout")
+        .expect("ws stream ended")
+        .expect("ws error");
+    match msg {
+        WsMessage::Binary(b) => {
+            let mut de = rmp_serde::Deserializer::new(b.as_ref()).with_human_readable();
+            ServerMessage::deserialize(&mut de).unwrap()
+        }
+        other => panic!("unexpected ws message: {other:?}"),
+    }
+}
+
+fn ws_query(conn_id: uuid::Uuid) -> ClientMessage {
+    ClientMessage::Query {
+        query_id: uuid::Uuid::new_v4(),
+        request: QueryRequest {
+            sql: "SELECT 1".into(),
+            params: vec![],
+            connection_id: Some(conn_id),
+            query_id: None,
+            schema: None,
+            pagination: None,
+            timeout_ms: None,
+            max_rows: None,
+        },
+    }
+}
+
+#[tokio::test]
+async fn ws_query_without_auth_hello_rejected() {
+    let router = new_test_router_with_token("secret-token");
+    let id = authed_create_sqlite_conn(&router, "ws-auth-gate", "secret-token").await;
+    let url = spawn_ws_server(router).await;
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+    // 跳过 hello 直接带 connection_id 发 query：必须收到 UNAUTHORIZED 并被断开。
+    ws.send(WsMessage::Binary(ws_encode(&ws_query(id.parse().unwrap())).into()))
+        .await
+        .unwrap();
+    match ws_recv(&mut ws).await {
+        ServerMessage::QueryError { error, .. } => {
+            assert_eq!(error.code, "POLYDB_ERR_UNAUTHORIZED", "got: {error:?}");
+        }
+        other => panic!("expected query_error, got {other:?}"),
+    }
+    // 服务端拒绝后关闭连接：下一次读取应以 Close/EOF 收场。
+    let next = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next()).await;
+    match next {
+        Err(_) => panic!("ws should close after unauthorized query"),
+        Ok(None) | Ok(Some(Err(_))) | Ok(Some(Ok(WsMessage::Close(_)))) => {}
+        Ok(Some(Ok(other))) => panic!("expected close, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn ws_auth_hello_then_query_succeeds() {
+    let router = new_test_router_with_token("secret-token");
+    let id = authed_create_sqlite_conn(&router, "ws-auth-ok", "secret-token").await;
+    let url = spawn_ws_server(router).await;
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+    let hello = ClientMessage::Hello {
+        connection_id: id.parse().unwrap(),
+        client_version: Some("0.1.0".into()),
+        auth: Some(WsAuth {
+            token: Some("secret-token".into()),
+        }),
+    };
+    ws.send(WsMessage::Binary(ws_encode(&hello).into())).await.unwrap();
+    assert!(matches!(ws_recv(&mut ws).await, ServerMessage::HelloAck { .. }));
+
+    ws.send(WsMessage::Binary(ws_encode(&ws_query(id.parse().unwrap())).into()))
+        .await
+        .unwrap();
+    assert!(matches!(
+        ws_recv(&mut ws).await,
+        ServerMessage::QueryStarted { .. }
+    ));
+    assert!(matches!(
+        ws_recv(&mut ws).await,
+        ServerMessage::QueryResult { .. }
+    ));
+}
+
+#[tokio::test]
+async fn ws_cross_origin_handshake_rejected() {
+    let router = new_test_router_with_token("secret-token");
+    let url = spawn_ws_server(router).await;
+
+    let req = tokio_tungstenite::tungstenite::http::Request::builder()
+        .uri(&url)
+        .header("Origin", "https://evil.example.com")
+        .body(())
+        .unwrap();
+    assert!(
+        tokio_tungstenite::connect_async(req).await.is_err(),
+        "cross-origin handshake must be rejected"
+    );
+}

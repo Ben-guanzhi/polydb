@@ -1,4 +1,6 @@
-import type { Value } from '../api';
+import type { Value, DatabaseKind } from '../api';
+import { ApiError } from './api';
+import type { ImportFormat } from './importData';
 
 export type FailCategoryKey = 'not-null' | 'fk' | 'dup' | 'type' | 'validation' | 'no-affected' | 'other';
 
@@ -59,4 +61,126 @@ export function fmtCacheAgeForAudit(t: number): string {
   if (diff < 60 * 60 * 1000) return `${Math.floor(diff / (60 * 1000))} 分钟前`;
   if (diff < day) return `${Math.floor(diff / (60 * 60 * 1000))} 小时前`;
   return `${Math.floor(diff / day)} 天前`;
+}
+
+// ─── 导入向导展示/格式化纯函数（自 components/ImportModalParts.tsx 下沉，无 JSX、无 React 依赖）───
+
+export function formatValue(v: Value): string {
+  if (v === null) return 'NULL';
+  if (typeof v === 'string') return `'${v.replace(/'/g, "''")}'`;
+  if (typeof v === 'boolean') return v ? 'true' : 'false';
+  if (typeof v === 'number') return String(v);
+  if (Array.isArray(v)) return `[${v.map(formatValue).join(', ')}]`;
+  if (typeof v === 'object') return JSON.stringify(v);
+  return String(v);
+}
+
+export function typeBadgeColor(t: 'string' | 'integer' | 'float' | 'boolean' | 'date' | 'null'): string {
+  switch (t) {
+    case 'integer': return '#3b82f6';
+    case 'float': return '#06b6d4';
+    case 'boolean': return '#10b981';
+    case 'date': return '#eab308';
+    case 'null': return 'var(--muted)';
+    case 'string':
+    default: return 'var(--muted)';
+  }
+}
+
+export function qualityScoreColor(score: number): string {
+  if (score >= 80) return 'var(--ok, #10b981)';
+  if (score >= 60) return '#eab308';
+  if (score >= 40) return 'var(--warn, #d97706)';
+  return 'var(--danger, #dc2626)';
+}
+
+export function colDtypeColor(dtype: string): string {
+  const d = dtype.toLowerCase();
+  if (/\b(int|integer|bigint|smallint|tinyint|serial|bit|number|numeric|decimal)\b/.test(d)) return '#3b82f6';
+  if (/\b(float|double|real|float)\b/.test(d)) return '#06b6d4';
+  if (/\b(bool|boolean)\b/.test(d)) return '#10b981';
+  if (/\b(date|time|timestamp|datetime)\b/.test(d)) return '#eab308';
+  if (/\b(char|varchar|text|clob|nchar|nvarchar|string|uuid|json)\b/.test(d)) return 'var(--accent, #3b82f6)';
+  if (/\b(blob|bytea|binary|varbinary|image)\b/.test(d)) return 'var(--muted)';
+  return 'var(--muted)';
+}
+
+export function toMsg(e: unknown): string {
+  if (e instanceof ApiError) return `${e.code}: ${e.message}`;
+  if (e instanceof Error) return e.message;
+  return String(e);
+}
+
+export function formatTime(at: number): string {
+  const d = new Date(at);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+export function historyStatusBadge(status: 'success' | 'partial' | 'failed' | 'cancelled'): string {
+  switch (status) {
+    case 'success': return '✓ 成功';
+    case 'partial': return '◐ 部分';
+    case 'failed': return '✕ 失败';
+    case 'cancelled': return '⏹ 取消';
+  }
+}
+
+// M30 示例数据：各数据库方言的 CSV / JSON 样例（Step 1 占位/填充用）
+const SAMPLE_CSV: Record<string, { title: string; csv: string; json: string }> = {
+  sqlite: {
+    title: 'SQLite 示例',
+    csv: `id,name,email,score,active
+1,Alice,alice@example.com,95.5,true
+2,Bob,bob@example.com,82.0,false
+3,Charlie,charlie@example.com,77.75,true`,
+    json: `{"id":1,"name":"Alice","email":"alice@example.com","score":95.5,"active":true}
+{"id":2,"name":"Bob","email":"bob@example.com","score":82.0,"active":false}
+{"id":3,"name":"Charlie","email":"charlie@example.com","score":77.75,"active":true}`,
+  },
+  postgres: {
+    title: 'PostgreSQL 示例',
+    csv: `id,name,email,score,active,born_at
+1,Alice,alice@example.com,95.5,true,2024-03-15 10:30:00
+2,Bob,bob@example.com,82.0,false,2024-05-20
+3,Charlie,charlie@example.com,77.75,true,2025-01-05 09:00:00`,
+    json: `{"id":1,"name":"Alice","email":"alice@example.com","score":95.5,"active":true,"born_at":"2024-03-15 10:30:00"}
+{"id":2,"name":"Bob","email":"bob@example.com","score":82.0,"active":false,"born_at":"2024-05-20"}
+{"id":3,"name":"Charlie","email":"charlie@example.com","score":77.75,"active":true,"born_at":"2025-01-05 09:00:00"}`,
+  },
+  mysql: {
+    title: 'MySQL 示例',
+    csv: `id,name,email,score,active,created_at
+1,Alice,alice@example.com,95.5,1,'2024-03-15 10:30:00'
+2,Bob,bob@example.com,82.0,0,'2024-05-20 08:00:00'
+3,Charlie,charlie@example.com,77.75,1,'2025-01-05 09:00:00'`,
+    json: `{"id":1,"name":"Alice","email":"alice@example.com","score":95.5,"active":1,"created_at":"2024-03-15 10:30:00"}
+{"id":2,"name":"Bob","email":"bob@example.com","score":82.0,"active":0,"created_at":"2024-05-20 08:00:00"}
+{"id":3,"name":"Charlie","email":"charlie@example.com","score":77.75,"active":1,"created_at":"2025-01-05 09:00:00"}`,
+  },
+  mssql: {
+    title: 'MSSQL 示例',
+    csv: `id,name,email,score,active,created_date
+1,Alice,alice@example.com,95.5,1,2024-03-15
+2,Bob,bob@example.com,82.0,0,2024-05-20
+3,Charlie,charlie@example.com,77.75,1,2025-01-05`,
+    json: `{"id":1,"name":"Alice","email":"alice@example.com","score":95.5,"active":1,"created_date":"2024-03-15"}
+{"id":2,"name":"Bob","email":"bob@example.com","score":82.0,"active":0,"created_date":"2024-05-20"}
+{"id":3,"name":"Charlie","email":"charlie@example.com","score":77.75,"active":1,"created_date":"2025-01-05"}`,
+  },
+  oracle: {
+    title: 'Oracle 示例',
+    csv: `id,name,email,score,active,created_date
+1,Alice,alice@example.com,95.5,1,2024-03-15
+2,Bob,bob@example.com,82.0,0,2024-05-20
+3,Charlie,charlie@example.com,77.75,1,2025-01-05`,
+    json: `{"id":1,"name":"Alice","email":"alice@example.com","score":95.5,"active":1,"created_date":"2024-03-15"}
+{"id":2,"name":"Bob","email":"bob@example.com","score":82.0,"active":0,"created_date":"2024-05-20"}
+{"id":3,"name":"Charlie","email":"charlie@example.com","score":77.75,"active":1,"created_date":"2025-01-05"}`,
+  },
+};
+
+export function sampleForKind(kind: DatabaseKind | null, format: ImportFormat): { title: string; text: string } {
+  const s = (kind && SAMPLE_CSV[kind]) ?? SAMPLE_CSV.sqlite;
+  return { title: s.title, text: format === 'jsonl' ? s.json : s.csv };
 }

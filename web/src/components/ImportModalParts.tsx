@@ -1,8 +1,10 @@
 import { Fragment } from 'react';
 import * as api from '../lib/api';
 import type { CSSProperties, MutableRefObject, Dispatch, SetStateAction, ReactNode } from 'react';
-import { ApiError } from '../lib/api';
-import { classifyFailReason, failCategoryMeta, fmtCacheAgeForAudit } from '../lib/importDisplay';
+import {
+  classifyFailReason, colDtypeColor, failCategoryMeta, fmtCacheAgeForAudit, formatTime, formatValue,
+  historyStatusBadge, qualityScoreColor, sampleForKind, toMsg, typeBadgeColor,
+} from '../lib/importDisplay';
 import {
   addDeletedPresetTombstone, applyPreset, clearAuditCache, deletePreset, diffPreset, exportPresetsBackup,
   getPreset, listDeletedPresets, listPresets, listSnapshots, loadAuditCache, previewBackup, presetKey,
@@ -23,7 +25,16 @@ import { type LintResult, severityLabel } from '../lib/sqlLint';
 import { type DataQualityReport, type QualityTransformSuggestion, suggestTransforms } from '../lib/dataQuality';
 import { type ImportHistoryEntry } from '../lib/importHistory';
 import { publishEditorStatus } from '../lib/statusBus';
+import { csvEscape, download as downloadFile } from '../lib/exporters';
+import { styles } from './importStyles';
 import type { ColumnInfo, DatabaseKind, SchemaInfo, TableInfo, Value } from '../api';
+
+// 展示/格式化纯函数已下沉 lib/importDisplay、样式常量已下沉 ./importStyles；
+// 此处 re-export 保持既有导入路径（ImportModal / CompareSyncWizard 等）兼容。
+export {
+  colDtypeColor, formatTime, formatValue, historyStatusBadge, qualityScoreColor, sampleForKind, toMsg, typeBadgeColor,
+};
+export { styles };
 
 // Step 3（列映射 & 转换）专用类型/常量（原 ImportModal 组件体内，现上移为模块级供 Step3Map 复用）
 export type MappingFilter = 'all' | 'mapped' | 'unmapped' | 'low-health' | 'critical-health';
@@ -64,6 +75,13 @@ export interface DelPresetRestoreState {
 }
 
 export type Step = 'input' | 'table' | 'map' | 'preview' | 'done';
+
+// PresetManager 导出文件名时间戳：YYYYMMDD-HHMMSS（原在三处下载 onClick 内各写一份 pad+拼接）
+const backupFileStamp = (d: Date): string => {
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+};
+
 
 export const STEP_LABEL: Record<Step, string> = {
   input: '1 · 粘贴或选择数据',
@@ -191,65 +209,6 @@ export function StepBar({ step, curStepIdx, stepWarnFlags, stepFlash, parse, sel
       >⌨</button>
     </div>
   );
-}
-
-// M30 示例数据：各数据库方言的 CSV / JSON 样例（Step 1 占位/填充用）
-const SAMPLE_CSV: Record<string, { title: string; csv: string; json: string }> = {
-  sqlite: {
-    title: 'SQLite 示例',
-    csv: `id,name,email,score,active
-1,Alice,alice@example.com,95.5,true
-2,Bob,bob@example.com,82.0,false
-3,Charlie,charlie@example.com,77.75,true`,
-    json: `{"id":1,"name":"Alice","email":"alice@example.com","score":95.5,"active":true}
-{"id":2,"name":"Bob","email":"bob@example.com","score":82.0,"active":false}
-{"id":3,"name":"Charlie","email":"charlie@example.com","score":77.75,"active":true}`,
-  },
-  postgres: {
-    title: 'PostgreSQL 示例',
-    csv: `id,name,email,score,active,born_at
-1,Alice,alice@example.com,95.5,true,2024-03-15 10:30:00
-2,Bob,bob@example.com,82.0,false,2024-05-20
-3,Charlie,charlie@example.com,77.75,true,2025-01-05 09:00:00`,
-    json: `{"id":1,"name":"Alice","email":"alice@example.com","score":95.5,"active":true,"born_at":"2024-03-15 10:30:00"}
-{"id":2,"name":"Bob","email":"bob@example.com","score":82.0,"active":false,"born_at":"2024-05-20"}
-{"id":3,"name":"Charlie","email":"charlie@example.com","score":77.75,"active":true,"born_at":"2025-01-05 09:00:00"}`,
-  },
-  mysql: {
-    title: 'MySQL 示例',
-    csv: `id,name,email,score,active,created_at
-1,Alice,alice@example.com,95.5,1,'2024-03-15 10:30:00'
-2,Bob,bob@example.com,82.0,0,'2024-05-20 08:00:00'
-3,Charlie,charlie@example.com,77.75,1,'2025-01-05 09:00:00'`,
-    json: `{"id":1,"name":"Alice","email":"alice@example.com","score":95.5,"active":1,"created_at":"2024-03-15 10:30:00"}
-{"id":2,"name":"Bob","email":"bob@example.com","score":82.0,"active":0,"created_at":"2024-05-20 08:00:00"}
-{"id":3,"name":"Charlie","email":"charlie@example.com","score":77.75,"active":1,"created_at":"2025-01-05 09:00:00"}`,
-  },
-  mssql: {
-    title: 'MSSQL 示例',
-    csv: `id,name,email,score,active,created_date
-1,Alice,alice@example.com,95.5,1,2024-03-15
-2,Bob,bob@example.com,82.0,0,2024-05-20
-3,Charlie,charlie@example.com,77.75,1,2025-01-05`,
-    json: `{"id":1,"name":"Alice","email":"alice@example.com","score":95.5,"active":1,"created_date":"2024-03-15"}
-{"id":2,"name":"Bob","email":"bob@example.com","score":82.0,"active":0,"created_date":"2024-05-20"}
-{"id":3,"name":"Charlie","email":"charlie@example.com","score":77.75,"active":1,"created_date":"2025-01-05"}`,
-  },
-  oracle: {
-    title: 'Oracle 示例',
-    csv: `id,name,email,score,active,created_date
-1,Alice,alice@example.com,95.5,1,2024-03-15
-2,Bob,bob@example.com,82.0,0,2024-05-20
-3,Charlie,charlie@example.com,77.75,1,2025-01-05`,
-    json: `{"id":1,"name":"Alice","email":"alice@example.com","score":95.5,"active":1,"created_date":"2024-03-15"}
-{"id":2,"name":"Bob","email":"bob@example.com","score":82.0,"active":0,"created_date":"2024-05-20"}
-{"id":3,"name":"Charlie","email":"charlie@example.com","score":77.75,"active":1,"created_date":"2025-01-05"}`,
-  },
-};
-
-function sampleForKind(kind: DatabaseKind | null, format: ImportFormat): { title: string; text: string } {
-  const s = (kind && SAMPLE_CSV[kind]) ?? SAMPLE_CSV.sqlite;
-  return { title: s.title, text: format === 'jsonl' ? s.json : s.csv };
 }
 
 // M30.02 粘贴/选择数据步（Step 1）：格式/分隔符/表头/编码 + 内容粘贴 + 文件队列
@@ -2871,58 +2830,6 @@ export function StepDone({ inputFormat, statements, insertedCount, failedRows, f
   );
 }
 
-export function formatValue(v: Value): string {
-  if (v === null) return 'NULL';
-  if (typeof v === 'string') return `'${v.replace(/'/g, "''")}'`;
-  if (typeof v === 'boolean') return v ? 'true' : 'false';
-  if (typeof v === 'number') return String(v);
-  if (Array.isArray(v)) return `[${v.map(formatValue).join(', ')}]`;
-  if (typeof v === 'object') return JSON.stringify(v);
-  return String(v);
-}
-
-export function typeBadgeColor(t: 'string' | 'integer' | 'float' | 'boolean' | 'date' | 'null'): string {
-  switch (t) {
-    case 'integer': return '#3b82f6';
-    case 'float': return '#06b6d4';
-    case 'boolean': return '#10b981';
-    case 'date': return '#eab308';
-    case 'null': return 'var(--muted)';
-    case 'string':
-    default: return 'var(--muted)';
-  }
-}
-
-export function qualityScoreColor(score: number): string {
-  if (score >= 80) return 'var(--ok, #10b981)';
-  if (score >= 60) return '#eab308';
-  if (score >= 40) return 'var(--warn, #d97706)';
-  return 'var(--danger, #dc2626)';
-}
-
-export function colDtypeColor(dtype: string): string {
-  const d = dtype.toLowerCase();
-  if (/\b(int|integer|bigint|smallint|tinyint|serial|bit|number|numeric|decimal)\b/.test(d)) return '#3b82f6';
-  if (/\b(float|double|real|float)\b/.test(d)) return '#06b6d4';
-  if (/\b(bool|boolean)\b/.test(d)) return '#10b981';
-  if (/\b(date|time|timestamp|datetime)\b/.test(d)) return '#eab308';
-  if (/\b(char|varchar|text|clob|nchar|nvarchar|string|uuid|json)\b/.test(d)) return 'var(--accent, #3b82f6)';
-  if (/\b(blob|bytea|binary|varbinary|image)\b/.test(d)) return 'var(--muted)';
-  return 'var(--muted)';
-}
-
-export function toMsg(e: unknown): string {
-  if (e instanceof ApiError) return `${e.code}: ${e.message}`;
-  if (e instanceof Error) return e.message;
-  return String(e);
-}
-
-export function formatTime(at: number): string {
-  const d = new Date(at);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
 // M30.127 三态审计徽章：ok=绿 / warn=橙 / dead=红；label 供区分「归档预设」/「目标预设」等上下文
 // M30.128 stale 视觉提示：缓存年龄超过 AUDIT_STALE_MS（TTL 一半）时加半透明+"⚠️ stale"标签
 // M30.130 busy 态：重审进行中按钮变 ⏳ + disabled，防误连点；age 徽章在 busy 时也置灰表示"刷新中"
@@ -2977,355 +2884,6 @@ export const AuditBadge = ({ a, cachedAtMs, age, label, onReAudit, busy }: {
       {age && <span style={{ color: 'var(--muted)', fontSize: 8, marginLeft: 'auto', opacity: busy ? 0.5 : 1 }}>{busy ? '🔍 刷新中…' : `🕐 ${age}`}</span>}
     </div>
   );
-};
-
-export function historyStatusBadge(status: 'success' | 'partial' | 'failed' | 'cancelled'): string {
-  switch (status) {
-    case 'success': return '✓ 成功';
-    case 'partial': return '◐ 部分';
-    case 'failed': return '✕ 失败';
-    case 'cancelled': return '⏹ 取消';
-  }
-}
-
-export const styles: Record<string, CSSProperties> = {
-  overlay: {
-    position: 'fixed', inset: 0,
-    background: 'rgba(0,0,0,0.45)',
-    display: 'flex', alignItems: 'center', justifyContent: 'center',
-    zIndex: 100, padding: 20,
-  },
-  panel: {
-    background: 'var(--bg)',
-    border: '1px solid var(--border)',
-    borderRadius: 6,
-    boxShadow: '0 12px 40px rgba(0,0,0,0.35)',
-    width: 900, maxWidth: '95vw',
-    height: '85vh', maxHeight: 720,
-    display: 'flex', flexDirection: 'column',
-    overflow: 'hidden',
-  },
-  header: {
-    display: 'flex', alignItems: 'center',
-    padding: '10px 14px',
-    borderBottom: '1px solid var(--border)',
-    gap: 10,
-  },
-  title: { fontWeight: 700, fontSize: 14, flex: 1 },
-  closeBtn: {
-    background: 'transparent', border: 'none',
-    color: 'var(--muted)', fontSize: 20,
-    cursor: 'pointer', lineHeight: 1, padding: '0 6px',
-  },
-  stepBar: {
-    display: 'flex', padding: '6px 14px', gap: 6,
-    borderBottom: '1px solid var(--border)',
-    fontFamily: 'monospace', fontSize: 11,
-    color: 'var(--muted)', flexWrap: 'wrap',
-  },
-  stepItem: {
-    padding: '2px 8px', borderRadius: 3,
-    background: 'var(--panel)',
-    border: '1px solid var(--border)',
-  },
-  stepItemActive: {
-    background: 'var(--accent-dim, var(--accent))',
-    color: 'var(--fg)', fontWeight: 700,
-  },
-  stepItemDone: {
-    color: 'var(--ok)', borderColor: 'var(--ok)',
-  },
-  body: {
-    flex: 1, padding: 14, overflow: 'auto',
-    display: 'flex', flexDirection: 'column', gap: 10,
-  },
-  col: {
-    display: 'flex', flexDirection: 'column',
-    gap: 10, height: '100%',
-  },
-  row2col: { display: 'flex', gap: 12, flexWrap: 'wrap' },
-  field: {
-    display: 'flex', flexDirection: 'column', gap: 4,
-    flex: 1, minWidth: 160,
-  },
-  label: {
-    fontSize: 11, color: 'var(--muted)',
-    textTransform: 'uppercase', letterSpacing: '0.05em',
-    fontWeight: 600,
-  },
-  select: {
-    padding: '6px 8px', fontSize: 13,
-    background: 'var(--input-bg, var(--bg))',
-    color: 'var(--fg)',
-    border: '1px solid var(--border)',
-    borderRadius: 4, outline: 'none',
-    width: '100%', boxSizing: 'border-box',
-  },
-  selectSm: {
-    padding: '4px 6px', fontSize: 12,
-    background: 'var(--input-bg, var(--bg))',
-    color: 'var(--fg)',
-    border: '1px solid var(--border)',
-    borderRadius: 4, outline: 'none',
-    width: '100%', boxSizing: 'border-box',
-    fontFamily: 'monospace',
-  },
-  textarea: {
-    width: '100%', height: 160, padding: 10,
-    fontSize: 13, fontFamily: 'monospace',
-    background: 'var(--input-bg, var(--bg))',
-    color: 'var(--fg)',
-    border: '1px solid var(--border)',
-    borderRadius: 4, resize: 'vertical',
-    boxSizing: 'border-box', outline: 'none',
-  },
-  inputSm: {
-    padding: '4px 6px', fontSize: 12,
-    background: 'var(--input-bg, var(--bg))',
-    color: 'var(--fg)',
-    border: '1px solid var(--border)',
-    borderRadius: 4, outline: 'none',
-    width: '100%', boxSizing: 'border-box',
-  },
-  inputNum: {
-    padding: '6px 8px', fontSize: 13,
-    background: 'var(--input-bg, var(--bg))',
-    color: 'var(--fg)',
-    border: '1px solid var(--border)',
-    borderRadius: 4, outline: 'none',
-    width: '100%', boxSizing: 'border-box',
-  },
-  check: {
-    display: 'flex', alignItems: 'center', gap: 6,
-    fontSize: 13, color: 'var(--fg)', cursor: 'pointer',
-  },
-  btn: {
-    padding: '8px 12px', fontSize: 13,
-    background: 'var(--panel)', color: 'var(--fg)',
-    border: '1px solid var(--border)',
-    borderRadius: 4, cursor: 'pointer',
-  },
-  btnGhost: {
-    padding: '8px 12px', fontSize: 13,
-    background: 'transparent', color: 'var(--muted)',
-    border: '1px solid var(--border)',
-    borderRadius: 4, cursor: 'pointer',
-  },
-  btnPrimary: {
-    padding: '8px 14px', fontSize: 13,
-    background: 'var(--accent)', color: '#fff',
-    border: 'none', borderRadius: 4,
-    cursor: 'pointer', fontWeight: 600,
-  },
-  btnSm: {
-    padding: '2px 8px', fontSize: 11,
-    background: 'var(--panel)', color: 'var(--accent, #3b82f6)',
-    border: '1px solid var(--accent, #3b82f6)',
-    borderRadius: 3, cursor: 'pointer',
-    fontFamily: 'monospace',
-  },
-  footer: {
-    display: 'flex', alignItems: 'center',
-    gap: 8, marginTop: 'auto',
-    padding: '8px 0 0',
-    borderTop: '1px solid var(--border)',
-  },
-  spacer: { flex: 1 },
-  muted: { fontSize: 11, color: 'var(--muted)' },
-  mutedCenter: { fontSize: 11, color: 'var(--muted)', textAlign: 'center' },
-  mutedBox: {
-    fontSize: 12, color: 'var(--muted)',
-    padding: '8px 10px',
-    background: 'var(--panel)',
-    border: '1px solid var(--border)',
-    borderRadius: 4,
-  },
-  errorBox: {
-    fontSize: 13, color: 'var(--danger, #dc2626)',
-    padding: '8px 10px',
-    background: 'rgba(220,38,38,0.08)',
-    border: '1px solid var(--danger, #dc2626)',
-    borderRadius: 4,
-  },
-  mapGrid: {
-    display: 'flex', flexDirection: 'column', gap: 4,
-    maxHeight: 380, overflow: 'auto',
-    padding: 4,
-    background: 'var(--panel)',
-    border: '1px solid var(--border)',
-    borderRadius: 4,
-  },
-  mapRow: {
-    display: 'grid',
-    gridTemplateColumns: '1fr 24px 1.4fr',
-    gap: 6, alignItems: 'center',
-  },
-  mapCell: {
-    display: 'flex', gap: 6, alignItems: 'center',
-    fontSize: 13,
-  },
-  arrow: { textAlign: 'center', color: 'var(--muted)' },
-  summary: {
-    cursor: 'pointer', fontSize: 12,
-    color: 'var(--accent)', userSelect: 'none',
-  },
-  pre: {
-    background: 'var(--panel)',
-    border: '1px solid var(--border)',
-    borderRadius: 4, padding: 8,
-    fontFamily: 'monospace', fontSize: 12,
-    overflow: 'auto', maxHeight: 180,
-    whiteSpace: 'pre-wrap', wordBreak: 'break-all',
-    margin: 0,
-  },
-  progressOuter: {
-    width: '100%', height: 8,
-    background: 'var(--panel)',
-    borderRadius: 4, overflow: 'hidden',
-    border: '1px solid var(--border)',
-  },
-  progressInner: {
-    height: '100%', background: 'var(--accent)',
-    transition: 'width 0.15s',
-  },
-  doneIcon: {
-    fontSize: 44, textAlign: 'center',
-    color: 'var(--ok)', marginTop: 20,
-  },
-  doneText: { fontSize: 16, textAlign: 'center' },
-  previewWrap: {
-    maxHeight: 260, overflow: 'auto',
-    border: '1px solid var(--border)',
-    borderRadius: 4,
-    background: 'var(--panel)',
-  },
-  previewTable: {
-    width: '100%', borderCollapse: 'collapse',
-    fontSize: 12, fontFamily: 'monospace',
-  },
-  previewTh: {
-    padding: '6px 8px',
-    textAlign: 'left',
-    borderBottom: '1px solid var(--border)',
-    background: 'var(--bg)',
-    position: 'sticky', top: 0,
-    whiteSpace: 'nowrap',
-  },
-  previewThInner: {
-    display: 'flex', alignItems: 'center', gap: 6,
-  },
-  previewThSub: {
-    fontSize: 10, color: 'var(--muted)',
-    fontFamily: 'inherit',
-  },
-  previewTd: {
-    padding: '4px 8px',
-    borderRight: '1px dashed var(--border)',
-    borderBottom: '1px dashed var(--border)',
-    whiteSpace: 'nowrap', overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    maxWidth: 200,
-  },
-  previewTdMuted: {
-    color: 'var(--muted)',
-    width: 32, textAlign: 'right',
-    borderBottom: '1px solid var(--border)',
-  },
-  previewTdNull: {
-    color: 'var(--muted)',
-    fontStyle: 'italic',
-  },
-  typeBadge: {
-    display: 'inline-block',
-    padding: '1px 5px',
-    fontSize: 10, borderRadius: 3,
-    background: 'rgba(0,0,0,0.06)',
-    border: '1px solid currentColor',
-    fontFamily: 'monospace',
-    fontWeight: 600,
-    textTransform: 'lowercase',
-  },
-  warnText: {
-    fontSize: 11,
-    color: 'var(--warn, #d97706)',
-    background: 'rgba(217,119,6,0.08)',
-    border: '1px solid var(--warn, #d97706)',
-    borderRadius: 3,
-    padding: '1px 4px',
-    maxWidth: '100%', overflow: 'hidden',
-    textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-  },
-  selectWarn: {
-    borderColor: 'var(--warn, #d97706)',
-    background: 'rgba(217,119,6,0.05)',
-  },
-  failedWrap: {
-    maxHeight: 220, overflow: 'auto',
-    border: '1px solid var(--warn, #d97706)',
-    borderRadius: 4,
-    background: 'rgba(217,119,6,0.04)',
-  },
-  failedTable: {
-    width: '100%', borderCollapse: 'collapse',
-    fontSize: 12, fontFamily: 'monospace',
-  },
-  failedTh: {
-    padding: '6px 8px', textAlign: 'left',
-    borderBottom: '1px solid var(--border)',
-    background: 'var(--bg)',
-    position: 'sticky', top: 0,
-    whiteSpace: 'nowrap',
-  },
-  failedTd: {
-    padding: '4px 8px',
-    borderBottom: '1px dashed var(--border)',
-    whiteSpace: 'nowrap', overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    maxWidth: 260,
-  },
-  dragHint: {
-    position: 'fixed', inset: 0,
-    pointerEvents: 'none',
-    display: 'flex', alignItems: 'center', justifyContent: 'center',
-    background: 'rgba(59,130,246,0.08)',
-    border: '4px dashed var(--accent)',
-    zIndex: 200,
-    fontSize: 20,
-    color: 'var(--accent)',
-    fontWeight: 700,
-  },
-  historyPanel: {
-    background: 'var(--panel)',
-    border: '1px solid var(--border)',
-    borderRadius: 4,
-    padding: 10,
-  },
-  historyWrap: {
-    maxHeight: 300,
-    overflow: 'auto',
-    border: '1px solid var(--border)',
-    borderRadius: 4,
-  },
-  historyTable: {
-    width: '100%', borderCollapse: 'collapse',
-    fontSize: 11, fontFamily: 'monospace',
-  },
-  historyTh: {
-    padding: '6px 8px',
-    textAlign: 'left',
-    borderBottom: '1px solid var(--border)',
-    background: 'var(--bg)',
-    position: 'sticky', top: 0,
-    whiteSpace: 'nowrap',
-    fontSize: 11,
-  },
-  historyTd: {
-    padding: '4px 8px',
-    borderBottom: '1px dashed var(--border)',
-    whiteSpace: 'nowrap', overflow: 'hidden',
-    textOverflow: 'ellipsis',
-    maxWidth: 200,
-  },
 };
 
 // M30.04 预览 & 执行步（Step 4）：SQL 预览、行数/体积、质量门禁、批量执行进度（待提取 props，占位签名）
@@ -7356,12 +6914,7 @@ export function PresetManager(p: PresetManagerProps) {
                           const now = new Date();
                           const ts = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}${String(now.getSeconds()).padStart(2,'0')}`;
                           const download = (content: string, mime: string, name: string) => {
-                            const blob = new Blob([content], { type: mime });
-                            const url = URL.createObjectURL(blob);
-                            const a = document.createElement('a');
-                            a.href = url; a.download = name;
-                            document.body.appendChild(a); a.click(); document.body.removeChild(a);
-                            setTimeout(() => URL.revokeObjectURL(url), 1000);
+                            downloadFile(name, mime, content);
                             setPresetManagerMsg({ kind: 'ok', text: `📊 已导出应用后 diff 报告 ${name}` });
                           };
                           const fmtTs = (t: number) => new Date(t).toISOString();
@@ -7379,11 +6932,10 @@ export function PresetManager(p: PresetManagerProps) {
                           }
                           if (fmt === 'csv') {
                             const rows: string[] = ['kind,category,key,prevUpdatedAt,nowUpdatedAt'];
-                            const esc = (v: string) => /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
-                            for (const k of impact.presetsRemovedKeys) rows.push(`preset,removed,${esc(k)},,`);
-                            for (const x of impact.presetsRestoredKeys) rows.push(`preset,restored,${esc(x.key)},${x.prevUpdatedAt},${x.nowUpdatedAt}`);
-                            for (const k of impact.snapshotsRemovedKeys) rows.push(`snapshot,removed,${esc(k)},,`);
-                            for (const k of impact.snapshotsRestoredKeys) rows.push(`snapshot,restored,${esc(k)},,`);
+                            for (const k of impact.presetsRemovedKeys) rows.push(`preset,removed,${csvEscape(k)},,`);
+                            for (const x of impact.presetsRestoredKeys) rows.push(`preset,restored,${csvEscape(x.key)},${x.prevUpdatedAt},${x.nowUpdatedAt}`);
+                            for (const k of impact.snapshotsRemovedKeys) rows.push(`snapshot,removed,${csvEscape(k)},,`);
+                            for (const k of impact.snapshotsRestoredKeys) rows.push(`snapshot,restored,${csvEscape(k)},,`);
                             download(rows.join('\n') + '\n', 'text/csv', `polydb-apply-diff-${ts}.csv`);
                             return;
                           }
@@ -8024,8 +7576,7 @@ export function PresetManager(p: PresetManagerProps) {
                   const isFocus = focusIdx === backupDetailFocusIdx;
                   const downloadSectionJson = () => {
                     const ts = new Date();
-                    const pad = (n: number) => n.toString().padStart(2, '0');
-                    const stamp = `${ts.getFullYear()}${pad(ts.getMonth() + 1)}${pad(ts.getDate())}-${pad(ts.getHours())}${pad(ts.getMinutes())}${pad(ts.getSeconds())}`;
+                    const stamp = backupFileStamp(ts);
                     const filename = `backup-applied-${sd.sectionId}-${stamp}.json`;
                     const payload = {
                       section: sd.sectionId,
@@ -8175,9 +7726,7 @@ export function PresetManager(p: PresetManagerProps) {
                           type="button"
                           onClick={() => {
                             // M30.163 D apply 变更清单 JSON 下载：把 lastBackupAppliedDetail 序列化为独立快照
-                            const ts = new Date();
-                            const pad = (n: number) => n.toString().padStart(2, '0');
-                            const stamp = `${ts.getFullYear()}${pad(ts.getMonth() + 1)}${pad(ts.getDate())}-${pad(ts.getHours())}${pad(ts.getMinutes())}${pad(ts.getSeconds())}`;
+                            const stamp = backupFileStamp(new Date());
                             const filename = `backup-applied-detail-${stamp}.json`;
                             const text = JSON.stringify({ ...lastBackupAppliedDetail, exportedAt: new Date().toISOString() }, null, 2);
                             const blob = new Blob([text], { type: 'application/json;charset=utf-8' });
@@ -8198,9 +7747,7 @@ export function PresetManager(p: PresetManagerProps) {
                           type="button"
                           onClick={() => {
                             // M30.164 B apply 变更清单 CSV 下载：section,key 两列扁平表，工单表格附件友好
-                            const ts = new Date();
-                            const pad = (n: number) => n.toString().padStart(2, '0');
-                            const stamp = `${ts.getFullYear()}${pad(ts.getMonth() + 1)}${pad(ts.getDate())}-${pad(ts.getHours())}${pad(ts.getMinutes())}${pad(ts.getSeconds())}`;
+                            const stamp = backupFileStamp(new Date());
                             const filename = `backup-applied-detail-${stamp}.csv`;
                             const esc = (s: string) => `"${s.replace(/"/g, '""')}"`;
                             const lines: string[] = ['section,key'];
@@ -8934,12 +8481,7 @@ export function PresetManager(p: PresetManagerProps) {
                     auditDead: items.filter((i) => audit[i.key] === 'dead').length,
                   };
                   const download = (content: string, mime: string, name: string) => {
-                    const blob = new Blob([content], { type: mime });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url; a.download = name;
-                    document.body.appendChild(a); a.click(); document.body.removeChild(a);
-                    setTimeout(() => URL.revokeObjectURL(url), 1000);
+                    downloadFile(name, mime, content);
                     setPresetManagerMsg({ kind: 'ok', text: `📊 已导出预检报告 ${name}（${rows.length} 项）` });
                   };
                   if (fmt === 'json') {
@@ -8947,13 +8489,8 @@ export function PresetManager(p: PresetManagerProps) {
                     return;
                   }
                   if (fmt === 'csv') {
-                    const csvEsc = (v: unknown) => {
-                      const s = String(v ?? '');
-                      if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
-                      return s;
-                    };
                     const head = ['key','kind','action','schema','table','selected','auditStatus','diffCount','riskScore'].join(',');
-                    const body = rows.map((r) => [r.key,r.kind,r.action,r.schema,r.table,r.selected,r.auditStatus,r.diffCount,r.riskScore].map(csvEsc).join(',')).join('\n');
+                    const body = rows.map((r) => [r.key,r.kind,r.action,r.schema,r.table,r.selected,r.auditStatus,r.diffCount,r.riskScore].map(csvEscape).join(',')).join('\n');
                     download(`${head}\n${body}\n`, 'text/csv', `polydb-backup-report-${ts}.csv`);
                     return;
                   }
@@ -8996,12 +8533,8 @@ export function PresetManager(p: PresetManagerProps) {
                       const auditedOk = items.filter((i) => audit[i.key] === 'ok').length;
                       const auditedDead = items.filter((i) => audit[i.key] === 'dead').length;
                       const audited = auditedOk + auditedDead;
-                      const fmtExpAt = (() => {
-                        if (!expAt) return '—';
-                        const d = new Date(expAt);
-                        const pad = (n: number) => String(n).padStart(2, '0');
-                        return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-                      })();
+                      // 与 lib/importDisplay 的 formatTime 同一格式（原为本地重复实现）
+                      const fmtExpAt = expAt ? formatTime(expAt) : '—';
                       const srcConns = Array.from(new Set(items.map((i) => i.key.split('::')[0]).filter(Boolean)));
                       return (
                         <div style={{
@@ -9893,12 +9426,7 @@ export function PresetManager(p: PresetManagerProps) {
                                         const ts = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}${String(now.getSeconds()).padStart(2,'0')}`;
                                         const safe = `${parts[0]}_${parts[1]}`.replace(/[^\w-]+/g, '_');
                                         const download = (content: string, mime: string, name: string) => {
-                                          const blob = new Blob([content], { type: mime });
-                                          const url = URL.createObjectURL(blob);
-                                          const a = document.createElement('a');
-                                          a.href = url; a.download = name;
-                                          document.body.appendChild(a); a.click(); document.body.removeChild(a);
-                                          setTimeout(() => URL.revokeObjectURL(url), 1000);
+                                          downloadFile(name, mime, content);
                                           setPresetManagerMsg({ kind: 'ok', text: `📥 已导出组 ${parts[0]}.${parts[1]} diff ${fmtLabel}（${diffItems.length} 项）` });
                                         };
                                         if (fmt === 'json') {
@@ -9908,7 +9436,6 @@ export function PresetManager(p: PresetManagerProps) {
                                         }
                                         if (fmt === 'csv') {
                                           const rows: string[] = ['key,schema,table,diffCount,scalarDiffs,removedTargets,addedTargets,removedCols,addedCols'];
-                                          const esc = (v: string) => /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
                                           for (const x of diffItems) {
                                             const d = x.diff!;
                                             const bits: string[] = [];
@@ -9917,7 +9444,7 @@ export function PresetManager(p: PresetManagerProps) {
                                             for (const t of d.addedTargets) bits.push(`+目标 ${t}`);
                                             for (const [f, arr2] of Object.entries(d.removedCols)) for (const s of arr2) bits.push(`-${f} ${s}`);
                                             for (const [f, arr2] of Object.entries(d.addedCols)) for (const s of arr2) bits.push(`+${f} ${s}`);
-                                            rows.push([x.key, x.schema, x.table, String(d.total), esc(bits.join(' | '))].map((v) => esc(v)).join(','));
+                                            rows.push([x.key, x.schema, x.table, String(d.total), csvEscape(bits.join(' | '))].map((v) => csvEscape(v)).join(','));
                                           }
                                           download(rows.join('\n') + '\n', 'text/csv', `polydb-group-${safe}-${ts}.csv`);
                                           return;
@@ -11024,11 +10551,8 @@ export function PresetManager(p: PresetManagerProps) {
                     </div>
                   );
                 }
-                const fmtDate = (t: number) => {
-                  const d = new Date(t);
-                  const pad = (n: number) => String(n).padStart(2, '0');
-                  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-                };
+                // 与 lib/importDisplay 的 formatTime 同一格式（原为本地重复实现 fmtDate）
+                const fmtDate = formatTime;
                 return (
                   <div style={{ marginTop: 12 }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>

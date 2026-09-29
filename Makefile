@@ -5,12 +5,17 @@ all: check-protocol check-rust check-go
 # ─── Protocol Generation ──────────────────────────────────
 # ts        —— spec/ → web/src/api/index.ts（--check 仅校验不写回）
 # check     —— spec ↔ Rust ↔ Go wire 形态比对，漂移即失败
+# ops       —— spec/schemas/schemadiff-ops.json → Go/Rust op 表（--check 仅校验不写回）
 gen-protocol:
 	cd tools/genprotocol && go run . ts
+
+gen-ops:
+	cd tools/genprotocol && go run . ops
 
 check-protocol:
 	cd tools/genprotocol && go run . ts --check
 	cd tools/genprotocol && go run . check
+	cd tools/genprotocol && go run . ops --check
 
 # ─── Rust ─────────────────────────────────────────────────
 check-rust:
@@ -63,6 +68,7 @@ build-web:
 
 # ─── Contract Tests ───────────────────────────────────────
 contract-test: build-rust
+	cd tools/genprotocol && go run . ops --check
 	cd test/contract && go test -v ./...
 
 # ─── Docker（M7）───────────────────────────────────────────

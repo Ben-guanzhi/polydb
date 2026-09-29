@@ -32,39 +32,18 @@ const (
 )
 
 // Phase 是执行相位：数值小的先执行，保证「先解除依赖再删、先建表再加约束」。
+// 取值单一来源自 spec/schemas/schemadiff-ops.json（见 ops_gen.go 的 OpRows）。
 func (o Op) Phase() int {
-	switch o {
-	case OpDropForeignKey:
-		return 10
-	case OpDropIndex:
-		return 20
-	case OpDropColumn:
-		return 30
-	case OpDropTable:
-		return 40
-	case OpCreateTable:
-		return 50
-	case OpAddColumn:
-		return 60
-	case OpAlterColumn:
-		return 70
-	case OpAddIndex:
-		return 80
-	case OpAddForeignKey:
-		return 90
-	default:
-		return 0
+	if r, ok := lookupOpRow(o); ok {
+		return r.Phase
 	}
+	return 0
 }
 
 // Destructive 报告该动作是否破坏数据（删表/删列/删索引/删外键）。
 func (o Op) Destructive() bool {
-	switch o {
-	case OpDropTable, OpDropColumn, OpDropIndex, OpDropForeignKey:
-		return true
-	default:
-		return false
-	}
+	r, ok := lookupOpRow(o)
+	return ok && r.Destructive
 }
 
 // ColumnFlag 是 alter_column 的改变维度（供 UI 分行展示与选择性勾选）。

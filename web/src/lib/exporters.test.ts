@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  toCsv, toTsv, toJson, toNdjson, toMarkdown, toSqlInsert, toInClause,
+  csvEscape, toCsv, toTsv, toJson, toNdjson, toMarkdown, toSqlInsert, toInClause,
 } from './exporters';
 
 describe('exporters', () => {
@@ -56,5 +56,16 @@ describe('exporters', () => {
   it('in clause dedupes and quotes', () => {
     const out = toInClause('postgres', 'name', ["a", "a", "b'c", null] as unknown[]);
     expect(out).toBe('WHERE "name" IN (\'a\', \'b\'\'c\', NULL)');
+  });
+
+  it('csvEscape quotes only when needed and maps null to empty', () => {
+    expect(csvEscape('plain')).toBe('plain');
+    expect(csvEscape('a,b')).toBe('"a,b"');
+    expect(csvEscape('say "hi"')).toBe('"say ""hi"""');
+    expect(csvEscape('line\nbreak')).toBe('"line\nbreak"');
+    expect(csvEscape(null)).toBe('');
+    expect(csvEscape(undefined)).toBe('');
+    expect(csvEscape(false)).toBe('false');
+    expect(csvEscape(0)).toBe('0');
   });
 });

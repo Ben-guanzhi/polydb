@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::response::Response;
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
 use polydb_app_core::AppCore;
 use polydb_core::protocol::error::codes;
@@ -21,10 +22,63 @@ type AppRef = Arc<AppCore>;
 
 const SERVER_VERSION: &str = "0.1.0";
 
-pub async fn ws_upgrade(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
+pub async fn ws_upgrade(State(state): State<AppState>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+    // 防浏览器跨站 WebSocket 劫持（CSWSH），契约同 Go 侧 checkWSOrigin：
+    // 无 Origin（非浏览器）、同源、POLYDB_ALLOWED_ORIGINS 白名单放行，其余拒绝。
+    if !check_origin(&headers) {
+        return (
+            StatusCode::FORBIDDEN,
+            "cross-origin websocket handshake rejected",
+        )
+            .into_response();
+    }
     let app = state.app.clone();
     let token = state.token.clone();
     ws.on_upgrade(move |socket| session(app, token, socket))
+}
+
+/// Origin 校验（behavior.md §12.2）：无 Origin 头放行（TUI/CLI 等非浏览器客户端）；
+/// Origin host 与请求 Host 一致（同源，覆盖服务端自托管 Web 前端）放行；
+/// 命中 POLYDB_ALLOWED_ORIGINS（逗号分隔）白名单放行；其余拒绝。
+fn check_origin(headers: &HeaderMap) -> bool {
+    let origin = match headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+        Some(o) if !o.is_empty() => o,
+        _ => return true,
+    };
+    if let Some(allowed) = std::env::var("POLYDB_ALLOWED_ORIGINS")
+        .ok()
+        .filter(|v| !v.is_empty())
+    {
+        if allowed
+            .split(',')
+            .any(|a| a.trim().eq_ignore_ascii_case(origin))
+        {
+            return true;
+        }
+    }
+    let origin_host = match origin_host(origin) {
+        Some(h) => h,
+        None => return false,
+    };
+    headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|host| host.eq_ignore_ascii_case(origin_host))
+}
+
+/// 取 Origin 的 host[:port] 部分：剥离 `scheme://` 前缀，其余即 host。
+/// Origin 规范上不含路径/查询，多余部分会导致与 Host 不匹配而被拒，可接受。
+fn origin_host(origin: &str) -> Option<&str> {
+    let after_scheme = origin
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(origin);
+    let host = after_scheme.split(['/', '?', '#']).next()?;
+    if host.is_empty() {
+        None
+    } else {
+        Some(host)
+    }
 }
 
 async fn session(app: AppRef, token: Option<String>, socket: WebSocket) {
@@ -36,6 +90,7 @@ async fn session(app: AppRef, token: Option<String>, socket: WebSocket) {
         token,
         tx: tx.clone(),
         connection_id: None,
+        authed: false,
         in_flight: HashMap::new(),
     };
 
@@ -53,13 +108,15 @@ async fn session(app: AppRef, token: Option<String>, socket: WebSocket) {
 
     tokio::select! {
         _ = &mut send => {},
-        _ = receive_loop(&mut session, &mut ws_rx) => {
-            drop(tx);
-            let _ = send.await;
-        }
+        _ = receive_loop(&mut session, &mut ws_rx) => {}
     }
 
     session.cancel_all();
+    // 先丢掉 session（内含 tx 的克隆）再 drop 原始 tx：否则 rx.recv() 永不返回
+    // None，outbound 任务收不了尾，连接在协议要求"关闭"时（如鉴权失败）保持悬挂。
+    drop(session);
+    drop(tx);
+    let _ = send.await;
 }
 
 struct Session {
@@ -67,6 +124,7 @@ struct Session {
     token: Option<String>,
     tx: mpsc::UnboundedSender<ServerMessage>,
     connection_id: Option<ConnectionId>,
+    authed: bool,
     in_flight: HashMap<Uuid, Arc<Notify>>,
 }
 
@@ -125,6 +183,18 @@ async fn receive_loop(
                 }
             }
             ClientMessage::Query { query_id, request } => {
+                // behavior.md §12.2：启用 token 时，未通过认证 hello 之前拒绝一切 query，
+                // 防止跳过 hello 直接携带 connection_id 执行 SQL。拒绝后关闭连接。
+                if session.token.is_some() && !session.authed {
+                    let _ = session.send(ServerMessage::QueryError {
+                        query_id,
+                        error: PolyDBError::new(
+                            codes::UNAUTHORIZED,
+                            "query requires authenticated hello first",
+                        ),
+                    });
+                    return;
+                }
                 session.handle_query(query_id, request);
             }
             ClientMessage::QueryCancel { query_id } => {
@@ -143,6 +213,7 @@ impl Session {
         match self.app.get_connection_info(connection_id) {
             Ok(Some(_info)) => {
                 self.connection_id = Some(connection_id);
+                self.authed = true;
                 let _ = self.send(ServerMessage::HelloAck {
                     server_version: SERVER_VERSION.to_string(),
                     db_version: None,
@@ -260,4 +331,53 @@ fn encode(v: &ServerMessage) -> Result<Vec<u8>, Box<dyn std::error::Error + Send
 fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, String> {
     let mut de = rmp_serde::Deserializer::new(bytes).with_human_readable();
     T::deserialize(&mut de).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderMap;
+
+    fn headers(origin: Option<&str>, host: Option<&str>) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        if let Some(o) = origin {
+            h.insert(header::ORIGIN, o.parse().unwrap());
+        }
+        if let Some(hv) = host {
+            h.insert(header::HOST, hv.parse().unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn origin_absent_is_allowed() {
+        assert!(check_origin(&headers(None, Some("127.0.0.1:8080"))));
+    }
+
+    #[test]
+    fn same_origin_is_allowed() {
+        assert!(check_origin(&headers(Some("http://127.0.0.1:8080"), Some("127.0.0.1:8080"))));
+    }
+
+    #[test]
+    fn cross_origin_is_rejected() {
+        assert!(!check_origin(&headers(
+            Some("https://evil.example.com"),
+            Some("127.0.0.1:8080")
+        )));
+    }
+
+    #[test]
+    fn malformed_origin_is_rejected() {
+        assert!(!check_origin(&headers(Some("not-a-url"), Some("127.0.0.1:8080"))));
+        assert!(!check_origin(&headers(Some("https://"), Some("127.0.0.1:8080"))));
+    }
+
+    #[test]
+    fn origin_host_strips_scheme_and_suffixes() {
+        assert_eq!(origin_host("http://127.0.0.1:8080"), Some("127.0.0.1:8080"));
+        assert_eq!(origin_host("https://example.com"), Some("example.com"));
+        assert_eq!(origin_host("example.com"), Some("example.com"));
+        assert_eq!(origin_host("https://"), None);
+    }
 }

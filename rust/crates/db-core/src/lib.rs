@@ -11,6 +11,6 @@ pub use browse::{
     DIALECT_MSSQL, DIALECT_MYSQL, DIALECT_ORACLE, DIALECT_SQLITE,
 };
 pub use connection::*;
-pub use detect::{detect_statement_type, strip_leading_comments};
+pub use detect::{detect_statement_type, mutates_data, strip_leading_comments};
 pub use driver::*;
 pub use tx::*;
