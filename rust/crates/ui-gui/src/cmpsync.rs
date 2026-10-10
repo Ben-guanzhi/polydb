@@ -146,13 +146,16 @@ where
 }
 
 /// 本次计划里「大概率进重建路径」的表，用于提示整组勾选（按首次出现顺序去重）。
+/// 归一化键 + HashSet 判重（SICP ch2 集合表示选择：linear scan → O(1) 成员判定，
+/// 与 same_table 的 eq_ignore_ascii_case 完全等价），保序仍由 Vec 承担。
 pub(crate) fn rebuild_likely_tables(entries: &[SchemaDiffEntry]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for e in entries {
         if !always_rebuild(e.op) {
             continue;
         }
-        if !out.iter().any(|t| same_table(t, &e.table)) {
+        if seen.insert(e.table.to_ascii_lowercase()) {
             out.push(e.table.clone());
         }
     }
@@ -169,18 +172,20 @@ pub(crate) struct GroupGap {
 /// 提前算出缺口：这种勾选集提交给服务端一定 400（§15.5 第二条守卫），
 /// 呈现层有责任在生成脚本前把它显示出来。
 pub(crate) fn group_gaps(entries: &[SchemaDiffEntry], sel: &[String]) -> Vec<GroupGap> {
+    // 预构建勾选集成员表（SICP ch2 集合表示选择）：成员判定 O(1)，不再 Θ(k) 线性扫。
+    let sel_set: std::collections::HashSet<&String> = sel.iter().collect();
     let mut gaps = Vec::new();
     for table in rebuild_likely_tables(entries) {
         let group = entries_of_table(entries, &table);
         let hit = group
             .iter()
-            .any(|e| always_rebuild(e.op) && sel.iter().any(|s| s == &e.id));
+            .any(|e| always_rebuild(e.op) && sel_set.contains(&e.id));
         if !hit {
             continue;
         }
         let missing: Vec<String> = group
             .iter()
-            .filter(|e| !sel.iter().any(|s| s == &e.id))
+            .filter(|e| !sel_set.contains(&e.id))
             .map(|e| e.id.clone())
             .collect();
         if !missing.is_empty() {
@@ -214,6 +219,7 @@ pub(crate) fn summarize_script(stmts: &[DdlStatement]) -> ScriptSummary {
         total: stmts.len(),
         ..Default::default()
     };
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for s in stmts {
         if s.non_reversible {
             out.non_reversible += 1;
@@ -224,7 +230,7 @@ pub(crate) fn summarize_script(stmts: &[DdlStatement]) -> ScriptSummary {
         if s.table.is_empty() {
             continue;
         }
-        if !out.tables.iter().any(|t| same_table(t, &s.table)) {
+        if seen.insert(s.table.to_ascii_lowercase()) {
             out.tables.push(s.table.clone());
         }
     }
