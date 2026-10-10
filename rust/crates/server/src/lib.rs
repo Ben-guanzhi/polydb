@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::extract::{Path, State};
-use axum::http::header::CONTENT_TYPE;
+use axum::http::header::{ACCEPT_RANGES, CONTENT_RANGE, CONTENT_TYPE, RANGE};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -139,6 +139,7 @@ pub fn router_with_token(app: Arc<AppCore>, token: Option<String>) -> Router {
             get(kv_get_value).put(kv_set_value),
         )
         .route("/api/connections/{id}/kv/exec", post(kv_exec_command))
+        .route("/api/connections/{id}/blobs/{blob_id}", get(get_blob))
         .route("/api/queries/{query_id}/cancel", post(cancel_query))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -208,6 +209,7 @@ fn error_response(e: CoreError) -> Response {
         codes::INVALID_PARAM => StatusCode::BAD_REQUEST,
         "POLYDB_ERR_TRANSACTION_NOT_FOUND" => StatusCode::NOT_FOUND,
         codes::QUERY_NOT_FOUND => StatusCode::NOT_FOUND,
+        codes::BLOB_NOT_FOUND => StatusCode::NOT_FOUND,
         // 408：取消与超时都属"请求未在预期时间内完成"（与 Go 侧 errToStatus 一致）。
         codes::CANCELLED | codes::TIMEOUT => StatusCode::REQUEST_TIMEOUT,
         codes::UNAUTHORIZED => StatusCode::UNAUTHORIZED,
@@ -256,6 +258,158 @@ async fn health() -> Response {
         StatusCode::OK,
         serde_json::json!({"status": "ok", "version": "0.1.0"}),
     )
+}
+
+// ─── 大字段（spec/encoding.md §5.2 旁路 Range 取回）────────────
+
+/// [`parse_byte_range`] 结果状态：0 全量（200）、1 部分（206）、2 不可满足（416）。
+/// 与 Go `server.parseByteRange` 的 iota 常量同序对拍。
+const RANGE_FULL: u8 = 0;
+const RANGE_PARTIAL: u8 = 1;
+const RANGE_UNSATISFIABLE: u8 = 2;
+
+/// 解析单段 `Range: bytes=` 头（spec/encoding.md §5.2 取回表），与 Go
+/// `server.parseByteRange` 同表对拍：非 bytes= 前缀、多段（含逗号）、
+/// 语法错误、a > b 一律忽略（全量）；a ≥ size 或 `bytes=-0` 不可满足；
+/// b 超界钳到 size-1；`bytes=-N` 取末 N 字节，N ≥ size 回全量 206。
+/// 返回 `(start, end, mode)`；全量时 end 无消费者（size=0 下 Rust 报 0，
+/// Go 报 -1），长度调用方按 mode 计算。
+fn parse_byte_range(h: &str, size: u64) -> (u64, u64, u8) {
+    let full = || (0u64, size.saturating_sub(1), RANGE_FULL);
+    if h.is_empty() {
+        return full();
+    }
+    let Some(spec) = h.strip_prefix("bytes=") else {
+        return full();
+    };
+    if spec.contains(',') {
+        return full();
+    }
+    if let Some(n_str) = spec.strip_prefix('-') {
+        let Ok(n) = n_str.parse::<u64>() else {
+            return full();
+        };
+        if n == 0 || size == 0 {
+            return (0, 0, RANGE_UNSATISFIABLE);
+        }
+        if n >= size {
+            return (0, size - 1, RANGE_PARTIAL);
+        }
+        return (size - n, size - 1, RANGE_PARTIAL);
+    }
+    let Some(dash) = spec.find('-') else {
+        return full();
+    };
+    let Ok(a) = spec[..dash].parse::<u64>() else {
+        return full();
+    };
+    if a >= size {
+        return (0, 0, RANGE_UNSATISFIABLE);
+    }
+    let b_str = &spec[dash + 1..];
+    if b_str.is_empty() {
+        return (a, size - 1, RANGE_PARTIAL);
+    }
+    let Ok(b) = b_str.parse::<u64>() else {
+        return full();
+    };
+    if b < a {
+        return full();
+    }
+    (a, b.min(size - 1), RANGE_PARTIAL)
+}
+
+/// GET /api/connections/{id}/blobs/{blob_id}：旁路大字段取回（§5.2）。
+/// 连接 id 按既有约定只校验格式；blob_id 须为合法 UUID（非法 400），
+/// 未知/过期 404 BLOB_NOT_FOUND；单段 Range 按 §5.2 表格，无 Range 全量。
+async fn get_blob(
+    State(state): State<AppState>,
+    Path((id, blob_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(res) = parse_conn_id(id) {
+        return *res;
+    }
+    if Uuid::parse_str(&blob_id).is_err() {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            PolyDBError::new(codes::INVALID_PARAM, format!("invalid blob id: {blob_id}")),
+        );
+    }
+    let store = state.app.blob_store();
+    let size = match store.size(&blob_id) {
+        Ok(s) => s,
+        Err(e) => return error_response(e),
+    };
+    let range = headers
+        .get(RANGE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let (start, end, mode) = parse_byte_range(range, size);
+
+    if mode == RANGE_UNSATISFIABLE {
+        // Go 侧先设 Accept-Ranges / octet-stream 再 writeJSON 覆盖类型，
+        // 净效果即以下头部组合。
+        let mut resp = json_response(
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            PolyDBError::new(codes::INVALID_PARAM, "requested range not satisfiable"),
+        );
+        resp.headers_mut()
+            .insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+        resp.headers_mut().insert(
+            CONTENT_RANGE,
+            format!("bytes */{size}").parse::<HeaderValue>().unwrap(),
+        );
+        return resp;
+    }
+
+    let length = if mode == RANGE_FULL {
+        size
+    } else {
+        end - start + 1
+    };
+    let data = match store.read_range(&blob_id, start, length) {
+        Ok(d) => d,
+        Err(e) => return error_response(e),
+    };
+    let status = if mode == RANGE_PARTIAL {
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    };
+    if mode == RANGE_PARTIAL {
+        (
+            status,
+            [
+                (ACCEPT_RANGES, HeaderValue::from_static("bytes")),
+                (
+                    CONTENT_TYPE,
+                    HeaderValue::from_static("application/octet-stream"),
+                ),
+                (
+                    CONTENT_RANGE,
+                    format!("bytes {start}-{end}/{size}")
+                        .parse::<HeaderValue>()
+                        .unwrap(),
+                ),
+            ],
+            data,
+        )
+            .into_response()
+    } else {
+        (
+            status,
+            [
+                (ACCEPT_RANGES, HeaderValue::from_static("bytes")),
+                (
+                    CONTENT_TYPE,
+                    HeaderValue::from_static("application/octet-stream"),
+                ),
+            ],
+            data,
+        )
+            .into_response()
+    }
 }
 
 // ─── connections ────────────────────────────────────────────

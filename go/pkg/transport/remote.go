@@ -100,6 +100,38 @@ func (r *Remote) do(ctx context.Context, method, path string, body any, out any)
 	return json.Unmarshal(raw, out)
 }
 
+// GetBlob GET /api/connections/{conn}/blobs/{blob}（spec/encoding.md §5.2）：
+// 二进制内容原样返回（octet-stream，不做 msgpack/JSON 解码）；404/416 等错误
+// 与 do 同路解码为 *protocol.PolyDBError，保持两端错误码一致。
+func (r *Remote) GetBlob(ctx context.Context, connID, blobID string) ([]byte, error) {
+	path := "/api/connections/" + url.PathEscape(connID) + "/blobs/" + url.PathEscape(blobID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.base+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/octet-stream")
+	if r.token != "" {
+		req.Header.Set("Authorization", "Bearer "+r.token)
+	}
+	resp, err := r.hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		return nil, fmt.Errorf("transport: read response: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		var pe protocol.PolyDBError
+		if err := json.Unmarshal(raw, &pe); err != nil {
+			pe = protocol.PolyDBError{Code: protocol.ErrUnknown, Message: fmt.Sprintf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))}
+		}
+		return nil, &pe
+	}
+	return raw, nil
+}
+
 func (r *Remote) markConnected(id string, connected bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

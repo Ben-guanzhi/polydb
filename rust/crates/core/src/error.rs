@@ -11,6 +11,9 @@ pub enum CoreError {
     #[error("transaction not found: {0}")]
     TransactionNotFound(String),
 
+    #[error("blob not found: {0}")]
+    BlobNotFound(String),
+
     #[error("driver error: {0}")]
     Driver(String),
 
@@ -51,6 +54,9 @@ impl CoreError {
                 "POLYDB_ERR_TRANSACTION_NOT_FOUND",
                 format!("transaction not found: {id}"),
             ),
+            Self::BlobNotFound(id) => {
+                PolyDBError::new("POLYDB_ERR_BLOB_NOT_FOUND", format!("blob not found: {id}"))
+            }
             Self::Driver(msg) => PolyDBError::new("POLYDB_ERR_QUERY_FAILED", msg.clone()),
             Self::Connection(msg) => {
                 PolyDBError::new("POLYDB_ERR_CONNECTION_FAILED", msg.clone()).retryable()

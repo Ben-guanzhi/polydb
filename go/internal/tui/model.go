@@ -107,6 +107,10 @@ type model struct {
 	queryErr    error
 	querySQL    string
 
+	// 结果表格的列宽测量缓存（按 queryResult 身份复用；resultsView 与 queryView 共用一份，
+	// 因为缓存的是「未按 maxWidth 缩放」的列宽，两处 maxWidth/maxRows 不同也能命中）。
+	resWidths widthCache
+
 	// 在途查询取消（T4.1）：cancel 非空表示有查询在跑，queryID 供远程 cancel 端点关联，
 	// queryCancelled 记录「本轮结果是被 F8 取消的」——驱动取消错误会被包成
 	// POLYDB_ERR_QUERY_FAILED 且协议结构不带 error 链，只能靠自身状态判定。
@@ -130,12 +134,21 @@ type model struct {
 	resCol   int
 	cellFull bool
 
+	// 完整值面板的 §5.2 旁路取回：blobKey 是当前取回目标（引用 UUID），仅当面板
+	// 单元格引用与之相等时展示结果/错误；loading/data/err 单槽缓存，换格回落
+	//「按 g 取回」，同一目标可 g 重试。
+	blobKey     string
+	blobLoading bool
+	blobData    []byte
+	blobErr     string
+
 	// 数据浏览（viewBrowse）：F7 服务端分页浏览表数据。
 	brSchema string
 	brTable  string
 	brOffset uint64
 	brLimit  uint32
 	brRes    *protocol.TableRowsResult
+	brWidths widthCache // 浏览页列宽测量缓存（键＝brRes 指针）
 	brErr    error
 	brRow    int
 	brCol    int
@@ -464,6 +477,16 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.view = viewQuery
 		return m, nil
+	case blobFetchedMsg:
+		// 单槽缓存：只接收当前取回目标的结果，过期回包直接丢弃。
+		if m.blobKey == msg.id {
+			m.blobLoading = false
+			m.blobData, m.blobErr = msg.data, ""
+			if msg.err != nil {
+				m.blobData = nil
+				m.blobErr = blobFetchErrText(msg.err)
+			}
+		}
 	case cancelAckMsg:
 		if msg.err != nil {
 			m.status = "取消请求失败: " + msg.err.Error()
@@ -1109,6 +1132,15 @@ func (m *model) resultsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.KeyEnter:
 		m.cellFull = true
+	case tea.KeyRunes:
+		// 完整值面板 · 旁路引用取回（encoding.md §5.2）：g 取回当前单元格大字段。
+		if m.cellFull && !m.blobLoading && string(msg.Runes) == "g" &&
+			m.resRow < len(r.Rows) && m.resCol < len(r.Rows[m.resRow]) {
+			if _, id, ok := blobRefOf(r.Rows[m.resRow][m.resCol]); ok {
+				m.blobKey, m.blobLoading, m.blobData, m.blobErr = id, true, nil, ""
+				return m, getBlobCmd(m.app, m.selectedID, id)
+			}
+		}
 	case tea.KeyUp:
 		if m.resRow > 0 {
 			m.resRow--
@@ -1142,15 +1174,15 @@ func (m *model) resultsView() string {
 		start = max(0, len(r.Rows)-maxRows)
 	}
 	col := r.Columns[m.resCol]
-	b.WriteString(fmt.Sprintf("行 %d/%d · 列 %s (%s)\n", m.resRow+1, len(r.Rows), col.Name, col.DataType))
-	b.WriteString(renderTable(r.Columns, r.Rows, max(m.width-4, 20), maxRows, start, m.resRow, m.resCol))
+	fmt.Fprintf(&b, "行 %d/%d · 列 %s (%s)\n", m.resRow+1, len(r.Rows), col.Name, col.DataType)
+	b.WriteString(renderTableDecoratedCached(&m.resWidths, r, r.Columns, r.Rows, max(m.width-4, 20), maxRows, start, m.resRow, m.resCol, nil))
 	b.WriteString("\n")
 	if m.cellFull {
 		var v protocol.Value
 		if m.resRow < len(r.Rows) && m.resCol < len(r.Rows[m.resRow]) {
 			v = r.Rows[m.resRow][m.resCol]
 		}
-		text := cellFullText(v)
+		text := cellFullText(v) + m.blobFetchBlock(v)
 		lines := strings.Split(text, "\n")
 		capN := max(3, m.height-28)
 		if len(lines) > capN {
@@ -1326,6 +1358,17 @@ func (m *model) browseKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.toggleSortCurrentColumn()
 		case "p":
 			return m.cyclePageSize()
+		case "g":
+			// 完整值面板 · 旁路引用取回（encoding.md §5.2），与结果导航视图同键。
+			if m.brFull && !m.blobLoading && r != nil && len(r.Columns) > 0 && m.brRow < len(r.Rows) {
+				col := min(m.brCol, len(r.Columns)-1)
+				if col >= 0 && col < len(r.Rows[m.brRow]) {
+					if _, id, ok := blobRefOf(r.Rows[m.brRow][col]); ok {
+						m.blobKey, m.blobLoading, m.blobData, m.blobErr = id, true, nil, ""
+						return m, getBlobCmd(m.app, m.selectedID, id)
+					}
+				}
+			}
 		case "e":
 			return m.enterCellEdit()
 		case "u":
@@ -1373,11 +1416,6 @@ func (m *model) browseFilterFields() []int {
 		fs = append(fs, 4)
 	}
 	return fs
-}
-
-// browseFilterFieldCount 当前草稿的可编辑字段数。
-func (m *model) browseFilterFieldCount() int {
-	return len(m.browseFilterFields())
 }
 
 // browseFieldFocus 在可用字段列表里前后巡览，并在值字段间同步 textinput 内容。
@@ -1648,20 +1686,20 @@ func (m *model) browseView() string {
 	b.WriteString(hdr + "\n")
 	b.WriteString(m.browseFilterBar() + "\n")
 	b.WriteString(m.browseEditBar() + "\n")
-	b.WriteString(renderTableDecorated(r.Columns, r.Rows, max(m.width-4, 20), maxRows, start, m.brRow, m.brCol, m.dirtyDecorator()))
+	b.WriteString(renderTableDecoratedCached(&m.brWidths, r, r.Columns, r.Rows, max(m.width-4, 20), maxRows, start, m.brRow, m.brCol, m.dirtyDecorator()))
 	if m.brFull && len(r.Columns) > 0 && m.brRow < len(r.Rows) {
 		col := min(m.brCol, len(r.Columns)-1)
 		var v protocol.Value
 		if col < len(r.Rows[m.brRow]) {
 			v = r.Rows[m.brRow][col]
 		}
-		text := cellFullText(v)
+		text := cellFullText(v) + m.blobFetchBlock(v)
 		lines := strings.Split(text, "\n")
 		capN := max(3, m.height-28)
 		if len(lines) > capN {
 			lines = append(lines[:capN], "…（内容过长，已截断显示）")
 		}
-		b.WriteString(fmt.Sprintf("\n── 完整值 · 列 %s (%s) ─────────\n", r.Columns[col].Name, r.Columns[col].DataType))
+		fmt.Fprintf(&b, "\n── 完整值 · 列 %s (%s) ─────────\n", r.Columns[col].Name, r.Columns[col].DataType)
 		b.WriteString(strings.Join(lines, "\n"))
 	}
 	return b.String()
@@ -2419,7 +2457,7 @@ func (m *model) quickOpenView() string {
 		return b.String()
 	}
 	total := len(m.qoAll)
-	b.WriteString(fmt.Sprintf("匹配 %d / 共 %d 张表\n", len(m.qoFiltered), total))
+	fmt.Fprintf(&b, "匹配 %d / 共 %d 张表\n", len(m.qoFiltered), total)
 	// 候选视口：预留输入 1 + 统计 1 + 提示 2 行。
 	start, end := listWindow(len(m.qoFiltered), m.qoCur, m.contentLines()-2)
 	if start > 0 {
@@ -2531,7 +2569,7 @@ func (m *model) queryView() string {
 		b.WriteString(meta + "\n")
 		if len(r.Columns) > 0 {
 			maxRows := max(3, m.height-16)
-			table := resultTable(r.Columns, r.Rows, max(m.width-4, 20), maxRows)
+			table := renderTableDecoratedCached(&m.resWidths, r, r.Columns, r.Rows, max(m.width-4, 20), maxRows, 0, -1, -1, nil)
 			b.WriteString(table + "\n")
 		} else {
 			b.WriteString("（无结果集）\n")

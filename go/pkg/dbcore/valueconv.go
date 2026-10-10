@@ -17,13 +17,22 @@ import (
 const MaxInlineBlobBytes = 1024 * 1024
 
 // BlobValue 按 spec/encoding.md §5 约定编码二进制单元格：
-// {"$blob": {"len": N, "base64": "..."}}；超过阈值时省略 base64。
-// 用既有 Object 承载，msgpack / JSON 通道都能无损往返，与 Rust blob_value 对齐。
+// ≤阈值 {"$blob": {"len": N, "base64": "..."}}；超过阈值且进程启用旁路
+// 存储（§5.2）时落盘并改发引用 {"len": N, "ref": "$polydb_blob:<uuid>"}，
+// 旁路不可用（无 sink / 写失败）回落仅 len 占位。ref 与 base64 互斥，
+// 阈值单点判定。用既有 Object 承载，msgpack / JSON 通道都能无损往返，
+// 与 Rust db_core::blob_value 对齐。
 func BlobValue(bytes []byte) protocol.Value {
-	inner := map[string]any{"len": len(bytes)}
-	if len(bytes) <= MaxInlineBlobBytes {
-		inner["base64"] = base64.StdEncoding.EncodeToString(bytes)
+	if len(bytes) > MaxInlineBlobBytes {
+		inner := map[string]any{"len": len(bytes)}
+		if sink := currentBlobSink(); sink != nil {
+			if ref, err := sink.PutBlob(bytes); err == nil && ref != "" {
+				inner["ref"] = ref
+			}
+		}
+		return protocol.NewObjectValue(map[string]any{"$blob": inner})
 	}
+	inner := map[string]any{"len": len(bytes), "base64": base64.StdEncoding.EncodeToString(bytes)}
 	return protocol.NewObjectValue(map[string]any{"$blob": inner})
 }
 

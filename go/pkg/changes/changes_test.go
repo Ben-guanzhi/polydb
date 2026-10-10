@@ -93,7 +93,7 @@ func TestOrdersStatementsByUserSequence(t *testing.T) {
 	if all[0].Type != Delete || all[1].Type != Insert {
 		t.Fatalf("order wrong: %v then %v", all[0].Type, all[1].Type)
 	}
-	if !(all[1].Sequence > all[0].Sequence) {
+	if all[1].Sequence <= all[0].Sequence {
 		t.Fatalf("sequence not increasing: %d,%d", all[0].Sequence, all[1].Sequence)
 	}
 }

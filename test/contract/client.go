@@ -28,6 +28,28 @@ func (c *Client) WithToken(token string) *Client {
 	return &cp
 }
 
+// DoRaw 发送无体请求并返回原始响应（二进制端点如 blobs 取回用，msgpack 解码不适用）。
+// hdr 为附加请求头（如 Range）。返回值：HTTP 状态码、响应头、原始响应体。
+func (c *Client) DoRaw(method, path string, hdr map[string]string) (int, http.Header, []byte, error) {
+	req, err := http.NewRequest(method, c.base+path, nil)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	for k, v := range hdr {
+		req.Header.Set(k, v)
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	return resp.StatusCode, resp.Header, raw, err
+}
+
 // Do 发送请求；body 为 nil 时不携带请求体。返回值：HTTP 状态码与解码后的响应体。
 func (c *Client) Do(method, path string, body any) (int, any, error) {
 	var reader io.Reader

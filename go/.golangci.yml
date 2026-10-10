@@ -14,3 +14,6 @@ linters:
         - "(*github.com/sijms/go-ora/v2).Connection.Close"
         - "(net/http.ResponseWriter).Write"
         - "(*encoding/json.Encoder).Encode"
+        - "(*os.File).Close"
+        - "(net.Conn).Close"
+        - "(io.ReadCloser).Close"

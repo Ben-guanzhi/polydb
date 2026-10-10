@@ -49,6 +49,12 @@ func normalize(v any) any {
 			return int64(t)
 		}
 		return t
+	case uint8:
+		return int64(t)
+	case uint16:
+		return int64(t)
+	case uint32:
+		return int64(t)
 	case int8:
 		return int64(t)
 	case int16:

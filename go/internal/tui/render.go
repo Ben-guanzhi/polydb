@@ -4,7 +4,9 @@ package tui
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -97,6 +99,77 @@ func cellFullText(v protocol.Value) string {
 	return buf.String()
 }
 
+// blobRefOf 识别 spec/encoding.md §5.2 旁路引用值：返回长度与引用 UUID。
+// 非 $blob、无 ref、前缀不符一律 ok=false（内联 base64 形状走 cellFullText 展示）。
+func blobRefOf(v protocol.Value) (int64, string, bool) {
+	if v.IsNull() {
+		return 0, "", false
+	}
+	b, err := v.MarshalJSON()
+	if err != nil {
+		return 0, "", false
+	}
+	var outer struct {
+		Blob *struct {
+			Len *int64 `json:"len"`
+			Ref string `json:"ref"`
+		} `json:"$blob"`
+	}
+	if err := json.Unmarshal(b, &outer); err != nil || outer.Blob == nil ||
+		outer.Blob.Len == nil || outer.Blob.Ref == "" {
+		return 0, "", false
+	}
+	if !strings.HasPrefix(outer.Blob.Ref, protocol.BlobRefPrefix) {
+		return 0, "", false
+	}
+	return *outer.Blob.Len, strings.TrimPrefix(outer.Blob.Ref, protocol.BlobRefPrefix), true
+}
+
+// blobFetchErrText 取回失败的展示文案：未知/过期用 §5.2 规定的前端固定文案，
+// 其余（超时、INVALID_PARAM 等）原样透出便于排查。
+func blobFetchErrText(err error) string {
+	var pe *protocol.PolyDBError
+	if errors.As(err, &pe) && pe.Code == protocol.ErrBlobNotFound {
+		return "已过期，请重新执行查询"
+	}
+	return err.Error()
+}
+
+// chunkBase64 每 76 字符换行（PEM 风格），避免完整值面板出现超长单行。
+func chunkBase64(s string) string {
+	var sb strings.Builder
+	for i := 0; i < len(s); i++ {
+		if i > 0 && i%76 == 0 {
+			sb.WriteByte('\n')
+		}
+		sb.WriteByte(s[i])
+	}
+	return sb.String()
+}
+
+// blobFetchBlock 完整值面板的 §5.2 取回状态块：仅旁路引用值输出，其余返回空串。
+// 状态与 blobKey 绑定，光标换到别的引用时回落「按 g 取回」。
+func (m *model) blobFetchBlock(v protocol.Value) string {
+	_, id, ok := blobRefOf(v)
+	if !ok {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("\n── 取回（encoding.md §5.2）────────\n")
+	switch {
+	case m.blobLoading && m.blobKey == id:
+		sb.WriteString("取回中…")
+	case m.blobErr != "" && m.blobKey == id:
+		sb.WriteString("取回失败：" + m.blobErr + " · g 重试")
+	case m.blobData != nil && m.blobKey == id:
+		fmt.Fprintf(&sb, "已取回 %d 字节 · base64：\n%s",
+			len(m.blobData), chunkBase64(base64.StdEncoding.EncodeToString(m.blobData)))
+	default:
+		sb.WriteString("按 g 取回内容")
+	}
+	return sb.String()
+}
+
 // headerLabel 表头单元格：列名 + 类型徽标（与 Web/Rust 预览头 "name (type)" 对齐）。
 func headerLabel(c protocol.ResultColumn) string {
 	if c.DataType == "" {
@@ -109,17 +182,40 @@ func headerLabel(c protocol.ResultColumn) string {
 // 用于浏览网格高亮已暂存（未提交）的编辑值。返回 dirty=false 表示不覆盖。
 type cellDecorator func(rowIdx, colIdx int) (display string, dirty bool)
 
-// renderTable 表格渲染核心（无装饰）：见 renderTableDecorated。
-func renderTable(cols []protocol.ResultColumn, rows [][]protocol.Value, maxWidth, maxRows, startRow, curRow, curCol int) string {
-	return renderTableDecorated(cols, rows, maxWidth, maxRows, startRow, curRow, curCol, nil)
+// widthCache 缓存一次「全页值→文本扫描」的输出：钳制到 cellCap、尚未按 maxWidth 缩放的列宽。
+//
+// 键是结果集指针 + 行数 + 列数。TUI 从不原地改写 result.Rows[i][j]（暂存的编辑值走
+// cellDecorator 覆盖显示，且不参与列宽），换页/换结果都会换成新指针 ⇒ 同键即同值。
+// 行数在键里，是为了让「原地 append」这类改写必然失效；缓存本体持有该指针，最多滞留一页。
+//
+// 只缓存「未缩放」的列宽，因此同一份缓存可被不同 maxWidth / maxRows 的两次渲染共用
+// （缩放/下限那两步是 Θ(列数)，每帧重跑）。
+type widthCache struct {
+	res   any
+	rows  int
+	cols  int
+	width []int
 }
 
-// renderTableDecorated 表格渲染核心：startRow 起窗口渲染 maxRows 行，
-// (curRow, curCol) 单元格反显高亮（-1 表示无光标）；decor 非空时覆盖脏格显示并标色。
-func renderTableDecorated(cols []protocol.ResultColumn, rows [][]protocol.Value, maxWidth, maxRows, startRow, curRow, curCol int, decor cellDecorator) string {
-	if len(cols) == 0 {
-		return "（无结果集）"
+// lookup 命中时返回缓存列宽的**副本**——调用方会就地按 maxWidth 缩放，不能改缓存本体。
+func (c *widthCache) lookup(res any, rows, cols int) ([]int, bool) {
+	if c == nil || c.width == nil || c.res != res || c.rows != rows || c.cols != cols {
+		return nil, false
 	}
+	w := make([]int, len(c.width))
+	copy(w, c.width)
+	return w, true
+}
+
+func (c *widthCache) store(res any, rows, cols int, width []int) {
+	if c == nil || res == nil {
+		return // 没有身份就不存：res=nil 必须逐帧全量重算（见 renderTableDecoratedCached）
+	}
+	*c = widthCache{res: res, rows: rows, cols: cols, width: width}
+}
+
+// measureCellWidths 扫描全页求各列最宽文本（cellCap 钳制后、maxWidth 缩放前）。
+func measureCellWidths(cols []protocol.ResultColumn, rows [][]protocol.Value) []int {
 	widths := make([]int, len(cols))
 	for i, c := range cols {
 		widths[i] = runewidth.StringWidth(headerLabel(c))
@@ -139,6 +235,33 @@ func renderTableDecorated(cols []protocol.ResultColumn, rows [][]protocol.Value,
 		if widths[i] > cellCap {
 			widths[i] = cellCap
 		}
+	}
+	return widths
+}
+
+// renderTable 表格渲染核心（无装饰）：见 renderTableDecorated。
+func renderTable(cols []protocol.ResultColumn, rows [][]protocol.Value, maxWidth, maxRows, startRow, curRow, curCol int) string {
+	return renderTableDecorated(cols, rows, maxWidth, maxRows, startRow, curRow, curCol, nil)
+}
+
+// renderTableDecorated 无缓存渲染：每次调用都重扫全页。见 renderTableDecoratedCached。
+func renderTableDecorated(cols []protocol.ResultColumn, rows [][]protocol.Value, maxWidth, maxRows, startRow, curRow, curCol int, decor cellDecorator) string {
+	return renderTableDecoratedCached(nil, nil, cols, rows, maxWidth, maxRows, startRow, curRow, curCol, decor)
+}
+
+// renderTableDecoratedCached 表格渲染核心：startRow 起窗口渲染 maxRows 行，
+// (curRow, curCol) 单元格反显高亮（-1 表示无光标）；decor 非空时覆盖脏格显示并标色。
+// cache 非空时按结果集身份复用全页列宽测量。
+// res 必须是**该结果集的指针**（可比较的身份值，见 widthCache）；传切片会 panic。
+// cache/res 任一为 nil 时退化为逐帧全量重算。
+func renderTableDecoratedCached(cache *widthCache, res any, cols []protocol.ResultColumn, rows [][]protocol.Value, maxWidth, maxRows, startRow, curRow, curCol int, decor cellDecorator) string {
+	if len(cols) == 0 {
+		return "（无结果集）"
+	}
+	widths, ok := cache.lookup(res, len(rows), len(cols))
+	if !ok {
+		widths = measureCellWidths(cols, rows)
+		cache.store(res, len(rows), len(cols), widths)
 	}
 	// 总宽超限时按比例收缩（至少保留表头）。
 	total := 1

@@ -4,6 +4,7 @@ package appcore
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net"
 	"net/url"
 	"sync"
@@ -49,9 +50,15 @@ type AppCore struct {
 	// knownHostsPath 为 SSH 主机密钥 known_hosts 文件（TOFU 首用校验，见 docs/ssh-tunnel.md）；
 	// 空则不校验主机密钥（M8 原行为）。由宿主（server/tui main）经 SetKnownHostsPath 注入。
 	knownHostsPath string
+	// blobs 是大字段旁路存储（spec/encoding.md §5.2）：New 时建句柄、
+	// 启动清扫并注册到 dbcore（进程级 sink，覆盖本进程所有入口）。
+	blobs *storage.BlobStore
 }
 
 func New(db *sql.DB, kr keyring.Keyring) *AppCore {
+	blobs := storage.NewBlobStore(storage.DataDir())
+	blobs.Sweep()
+	dbcore.SetBlobSink(blobs)
 	return &AppCore{
 		repo:        storage.NewConnectionRepository(db),
 		kr:          kr,
@@ -59,7 +66,24 @@ func New(db *sql.DB, kr keyring.Keyring) *AppCore {
 		tunnels:     make(map[string]*sshtunnel.Tunnel),
 		txs:         make(map[string]*txEntry),
 		readOnly:    make(map[string]bool),
+		blobs:       blobs,
 	}
+}
+
+// BlobStore 返回大字段旁路存储（server 的 REST+Range 取回经此读取）。
+func (a *AppCore) BlobStore() *storage.BlobStore { return a.blobs }
+
+// GetBlob 是 §5.2 的进程内取回用例：blobID 为引用前缀后的 UUID，
+// 非法 UUID 报 INVALID_PARAM，未知/已过期报 BLOB_NOT_FOUND。
+func (a *AppCore) GetBlob(blobID string) ([]byte, error) {
+	if _, err := uuid.Parse(blobID); err != nil {
+		return nil, &protocol.PolyDBError{Code: protocol.ErrInvalidParam, Message: "invalid blob id: " + blobID}
+	}
+	data, err := a.blobs.Get(blobID)
+	if errors.Is(err, storage.ErrBlobNotFound) {
+		return nil, &protocol.PolyDBError{Code: protocol.ErrBlobNotFound, Message: "blob not found: " + blobID}
+	}
+	return data, err
 }
 
 // SetKnownHostsPath 指定 SSH known_hosts 文件路径；传空串保持 M8 的不校验行为。
@@ -199,6 +223,16 @@ func (a *AppCore) Connect(ctx context.Context, id string) error {
 	}
 
 	a.mu.Lock()
+	// 覆盖写入前必须关掉被顶替的句柄：并发懒连接时两个 goroutine 都会打开驱动，
+	// 谁后写谁留下，前一个若不 Close 就永久泄漏（Go 没有 Drop，Rust 侧靠 insert
+	// 覆盖旧值自动释放）。隧道同理——它只服务于那个已关闭的连接。
+	if prev, ok := a.connections[id]; ok {
+		_ = prev.Driver().Close()
+	}
+	if prevTunnel, ok := a.tunnels[id]; ok && prevTunnel != nil {
+		_ = prevTunnel.Close()
+		delete(a.tunnels, id)
+	}
 	a.connections[id] = dbcore.NewConnection(d)
 	a.readOnly[id] = info.ReadOnly != nil && *info.ReadOnly
 	if tunnel != nil {
@@ -391,7 +425,11 @@ func (a *AppCore) CommitTransaction(txID string) (*protocol.TransactionInfo, err
 		return nil, &protocol.PolyDBError{Code: protocol.ErrTransactionFailed, Message: "commit failed: " + err.Error()}
 	}
 	e.status = protocol.TxnCommitted
-	return e.info(), nil
+	info := e.info()
+	// finalize 成功后移出注册表：与 Rust commit_transaction 的 remove-不回插一致，
+	// 也让上面的注释（"事务只成功 finalize 一次"）成为事实而非意图。
+	delete(a.txs, txID)
+	return info, nil
 }
 
 // RollbackTransaction 回滚指定事务；已 finalize 的事务返回 POLYDB_ERR_TRANSACTION_NOT_FOUND。
@@ -410,30 +448,44 @@ func (a *AppCore) RollbackTransaction(txID string) (*protocol.TransactionInfo, e
 		return nil, &protocol.PolyDBError{Code: protocol.ErrTransactionFailed, Message: "rollback failed: " + err.Error()}
 	}
 	e.status = protocol.TxnRolledBack
-	return e.info(), nil
+	info := e.info()
+	delete(a.txs, txID)
+	return info, nil
 }
 
 // ExecuteInTx 在指定事务内执行一条 SQL。事务必须处于 active 状态；
 // 否则返回 POLYDB_ERR_TRANSACTION_NOT_FOUND。
+//
+// 执行期间 entry 从注册表借出（与 Rust execute_in_transaction 的 remove/回插对齐）：
+// spec §10 要求事务内查询串行，而 *sql.Tx 底下只有一条连接，两个 goroutine 同时
+// ExecuteIn 会交错乃至互相踩坏结果。借出后并发的那一次只会拿到 NOT_FOUND，
+// 不会再并发驱动同一个句柄。SQL 失败事务保持 active，成败都放回注册表。
 func (a *AppCore) ExecuteInTx(ctx context.Context, txID, sql string, args ...protocol.Value) (*protocol.QueryResult, error) {
-	a.mu.RLock()
+	a.mu.Lock()
 	e, ok := a.txs[txID]
-	if !ok {
-		a.mu.RUnlock()
+	if !ok || e.status != protocol.TxnActive {
+		a.mu.Unlock()
 		return nil, &protocol.PolyDBError{Code: protocol.ErrTransactionNotFound, Message: "transaction not found: " + txID}
 	}
-	if e.status != protocol.TxnActive {
-		a.mu.RUnlock()
-		return nil, &protocol.PolyDBError{Code: protocol.ErrTransactionNotFound, Message: "transaction not found: " + txID}
-	}
+	delete(a.txs, txID)
 	connID := e.connID
-	a.mu.RUnlock()
+	a.mu.Unlock()
+
+	reinsert := func() {
+		a.mu.Lock()
+		a.txs[txID] = e
+		a.mu.Unlock()
+	}
+
 	if a.isReadOnly(connID) {
 		if err := rejectWriteOnReadOnly(sql); err != nil {
+			reinsert()
 			return nil, err
 		}
 	}
-	return e.driver.ExecuteIn(e.tx, ctx, sql, args...)
+	res, err := e.driver.ExecuteIn(e.tx, ctx, sql, args...)
+	reinsert()
+	return res, err
 }
 
 // GetTransactionInfo 返回当前事务的快照（供前端在编辑器上显示状态徽章等）。
@@ -445,14 +497,16 @@ func (a *AppCore) GetTransactionInfo(txID string) (*protocol.TransactionInfo, er
 	return e.info(), nil
 }
 
-// lookupTx 拿读锁查一次；找不到返回 POLYDB_ERR_TRANSACTION_FAILED。
+// lookupTx 拿读锁查一次；找不到返回 POLYDB_ERR_TRANSACTION_NOT_FOUND
+// （spec §10 与 Rust 侧 TransactionNotFound 一致：查不到就是没有该事务，
+// 而非事务执行失败）。
 // 调用方需要写操作（Commit/Rollback 改 status）时，再显式拿写锁。
 func (a *AppCore) lookupTx(txID string) (*txEntry, error) {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	e, ok := a.txs[txID]
 	if !ok {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrTransactionFailed, Message: "transaction not found: " + txID}
+		return nil, &protocol.PolyDBError{Code: protocol.ErrTransactionNotFound, Message: "transaction not found: " + txID}
 	}
 	return e, nil
 }

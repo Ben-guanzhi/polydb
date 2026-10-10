@@ -801,6 +801,77 @@ paths:
         default:
           $ref: "#/components/responses/Error"
 
+  # 大字段旁路取回（spec/encoding.md §5.2）
+  /api/connections/{id}/blobs/{blob_id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          $ref: "schemas/common.json#/definitions/ConnectionId"
+      - name: blob_id
+        in: path
+        required: true
+        description: 引用 ID（`$polydb_blob:<uuid>` 的 UUID 部分）
+        schema:
+          type: string
+          format: uuid
+      - name: Range
+        in: header
+        required: false
+        description: 单段字节区间，如 `bytes=0-1048575`（多段/语法错误按无 Range 处理）
+        schema:
+          type: string
+    get:
+      operationId: getBlob
+      summary: 取回大字段内容
+      description: |
+        按 spec/encoding.md §5.2 取回超阈值 BLOB 内容；支持 Range 请求。
+        已过期（TTL 24h 清扫）或未知引用返回 404 POLYDB_ERR_BLOB_NOT_FOUND。
+      tags: [blobs]
+      responses:
+        "200":
+          description: "全量内容（`Accept-Ranges: bytes`）"
+          headers:
+            Accept-Ranges:
+              schema:
+                type: string
+                enum: [bytes]
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "206":
+          description: "区间内容，`Content-Range: bytes a-b/len`"
+          headers:
+            Content-Range:
+              schema:
+                type: string
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: 引用不存在或已过期（POLYDB_ERR_BLOB_NOT_FOUND）
+          content:
+            application/json:
+              schema:
+                $ref: "schemas/error.json#/definitions/PolyDBError"
+        "416":
+          description: "Range 不可满足（`Content-Range: bytes */len`）"
+          headers:
+            Content-Range:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "schemas/error.json#/definitions/PolyDBError"
+        default:
+          $ref: "#/components/responses/Error"
+
 components:
   responses:
     Error:

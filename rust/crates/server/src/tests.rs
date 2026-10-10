@@ -902,3 +902,132 @@ async fn ws_cross_origin_handshake_rejected() {
         "cross-origin handshake must be rejected"
     );
 }
+
+// ─── 大字段旁路取回（spec/encoding.md §5.2，对拍 Go blob_test.go）──
+
+/// 与 Go `server.parseByteRange` 同一张表；`("", 0, ...)` 的全量 end 按
+/// u64 语义记 0（Go 为 -1，该值仅全量时无消费者）。
+#[test]
+fn parse_byte_range_matches_go_table() {
+    use crate::{parse_byte_range, RANGE_FULL, RANGE_PARTIAL, RANGE_UNSATISFIABLE};
+
+    let cases: &[(&str, u64, u64, u64, u8)] = &[
+        ("", 100, 0, 99, RANGE_FULL),
+        ("bytes=0-9", 100, 0, 9, RANGE_PARTIAL),
+        ("bytes=90-199", 100, 90, 99, RANGE_PARTIAL),
+        ("bytes=50-", 100, 50, 99, RANGE_PARTIAL),
+        ("bytes=-10", 100, 90, 99, RANGE_PARTIAL),
+        ("bytes=-150", 100, 0, 99, RANGE_PARTIAL),
+        ("bytes=100-", 100, 0, 0, RANGE_UNSATISFIABLE),
+        ("bytes=-0", 100, 0, 0, RANGE_UNSATISFIABLE),
+        ("bytes=5-3", 100, 0, 99, RANGE_FULL),
+        ("bytes=0-1,4-5", 100, 0, 99, RANGE_FULL),
+        ("bytes=abc-def", 100, 0, 99, RANGE_FULL),
+        ("items=0-9", 100, 0, 99, RANGE_FULL),
+        ("foo=bar", 100, 0, 99, RANGE_FULL),
+        ("", 0, 0, 0, RANGE_FULL),
+        ("bytes=0-", 0, 0, 0, RANGE_UNSATISFIABLE),
+        ("bytes=-5", 0, 0, 0, RANGE_UNSATISFIABLE),
+    ];
+    for &(h, size, want_start, want_end, want_mode) in cases {
+        let (start, end, mode) = parse_byte_range(h, size);
+        assert_eq!(
+            (start, end, mode),
+            (want_start, want_end, want_mode),
+            "parse_byte_range({h:?}, {size})"
+        );
+    }
+}
+
+/// 独立存储 + AppCore 的路由（播种 blob 用；blob 是目录级而非连接级资源）。
+fn new_blob_test_app() -> (Router, Arc<AppCore>) {
+    let dir = std::env::temp_dir().join(format!("polydb-blob-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let storage = Storage::open(dir.join("polydb.db").to_str().unwrap()).unwrap();
+    let kr: Arc<dyn Keyring> =
+        Arc::new(FileKeyring::open(dir.to_str().unwrap(), "test-master").unwrap());
+    let app = Arc::new(AppCore::with_keyring(storage, kr));
+    (router(app.clone()), app)
+}
+
+/// 不解码 body 的原样请求（二进制响应 / Range 头）。返回 (状态, 字节, 头)。
+async fn do_raw(
+    router: Router,
+    uri: &str,
+    range: Option<&str>,
+) -> (StatusCode, Vec<u8>, HeaderMap) {
+    let mut req = Request::builder().method(Method::GET).uri(uri);
+    if let Some(r) = range {
+        req = req.header("range", r);
+    }
+    let req = req.body(axum::body::Body::empty()).unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let raw = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, raw.to_vec(), headers)
+}
+
+fn err_code(raw: &[u8]) -> String {
+    let v: Value = serde_json::from_slice(raw).expect("error body must be JSON");
+    v["code"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn blob_range_serving_matches_go() {
+    let (router, app) = new_blob_test_app();
+    let data: &[u8] = b"0123456789";
+    let ref_id = app.blob_store().put_blob(data).unwrap();
+    let blob_id = ref_id
+        .strip_prefix(polydb_core::protocol::BLOB_REF_PREFIX)
+        .unwrap()
+        .to_string();
+    let conn_id = uuid::Uuid::new_v4().to_string();
+    let uri = format!("/api/connections/{conn_id}/blobs/{blob_id}");
+
+    let (status, body, headers) = do_raw(router.clone(), &uri, None).await;
+    assert_eq!(status, StatusCode::OK, "full 200");
+    assert_eq!(headers["accept-ranges"], "bytes");
+    assert_eq!(headers["content-type"], "application/octet-stream");
+    assert_eq!(String::from_utf8_lossy(&body), "0123456789");
+
+    let (status, body, headers) = do_raw(router.clone(), &uri, Some("bytes=0-2")).await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT, "range 206");
+    assert_eq!(headers["content-range"], "bytes 0-2/10");
+    assert_eq!(String::from_utf8_lossy(&body), "012");
+
+    let (status, body, headers) = do_raw(router.clone(), &uri, Some("bytes=-4")).await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT, "suffix 206");
+    assert_eq!(headers["content-range"], "bytes 6-9/10");
+    assert_eq!(String::from_utf8_lossy(&body), "6789");
+
+    let (status, body, headers) = do_raw(router.clone(), &uri, Some("bytes=99-")).await;
+    assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE, "416");
+    assert_eq!(headers["content-range"], "bytes */10");
+    assert_eq!(err_code(&body), "POLYDB_ERR_INVALID_PARAM");
+
+    let unknown_uri = format!("/api/connections/{conn_id}/blobs/{}", uuid::Uuid::new_v4());
+    let (status, body, _) = do_raw(router.clone(), &unknown_uri, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "unknown 404");
+    assert_eq!(err_code(&body), "POLYDB_ERR_BLOB_NOT_FOUND");
+
+    let (status, body, _) = do_raw(
+        router.clone(),
+        &format!("/api/connections/{conn_id}/blobs/not-a-uuid"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "bad blob id 400");
+    assert_eq!(err_code(&body), "POLYDB_ERR_INVALID_PARAM");
+
+    let (status, body, _) = do_raw(
+        router,
+        &format!("/api/connections/nope/blobs/{blob_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "bad conn id 400");
+    assert_eq!(err_code(&body), "POLYDB_ERR_INVALID_PARAM");
+}

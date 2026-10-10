@@ -74,4 +74,5 @@ pub mod codes {
     pub const READ_ONLY: &str = "POLYDB_ERR_READ_ONLY";
     pub const CANCELLED: &str = "POLYDB_ERR_CANCELLED";
     pub const QUERY_NOT_FOUND: &str = "POLYDB_ERR_QUERY_NOT_FOUND";
+    pub const BLOB_NOT_FOUND: &str = "POLYDB_ERR_BLOB_NOT_FOUND";
 }

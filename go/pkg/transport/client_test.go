@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -131,6 +132,53 @@ func runScenario(t *testing.T, c Client, remote bool) string {
 		}
 		if pe.Code != protocol.ErrQueryFailed {
 			t.Fatalf("select missing table: code = %v, want %v", pe.Code, protocol.ErrQueryFailed)
+		}
+	}
+
+	// §5.2 旁路引用取回：超阈值单元格 → $polydb_blob ref，GetBlob 双通道对拍
+	//（Local 进程内零序列化 / Remote REST 二进制），含未知引用 404 错误码一致。
+	if _, err = c.Execute(ctx, id, "CREATE TABLE blobref(b BLOB)"); err != nil {
+		t.Fatalf("blobref create: %v", err)
+	}
+	if _, err = c.Execute(ctx, id, "INSERT INTO blobref VALUES(zeroblob(1048577))"); err != nil {
+		t.Fatalf("blobref insert: %v", err)
+	}
+	bres, err := c.Execute(ctx, id, "SELECT b FROM blobref")
+	if err != nil || len(bres.Rows) != 1 || len(bres.Rows[0]) != 1 {
+		t.Fatalf("blobref select: err=%v rows=%v", err, bres)
+	}
+	raw, err := bres.Rows[0][0].MarshalJSON()
+	if err != nil {
+		t.Fatalf("blobref marshal: %v", err)
+	}
+	var outer struct {
+		Blob *struct {
+			Ref string `json:"ref"`
+		} `json:"$blob"`
+	}
+	if err = json.Unmarshal(raw, &outer); err != nil || outer.Blob == nil ||
+		!strings.HasPrefix(outer.Blob.Ref, protocol.BlobRefPrefix) {
+		t.Fatalf("blobref: want $polydb_blob ref, got %s (err=%v)", raw, err)
+	}
+	blobID := strings.TrimPrefix(outer.Blob.Ref, protocol.BlobRefPrefix)
+	data, err := c.GetBlob(ctx, id, blobID)
+	if err != nil {
+		t.Fatalf("get blob: %v", err)
+	}
+	if len(data) != 1048577 {
+		t.Fatalf("get blob: len = %d, want 1048577", len(data))
+	}
+	for i, by := range data {
+		if by != 0 {
+			t.Fatalf("get blob: byte[%d] = %#x, want 0", i, by)
+		}
+	}
+	if _, err = c.GetBlob(ctx, id, "00000000-0000-0000-0000-000000000000"); err == nil {
+		t.Fatal("get unknown blob: expected error")
+	} else {
+		var pe *protocol.PolyDBError
+		if !errors.As(err, &pe) || pe.Code != protocol.ErrBlobNotFound {
+			t.Fatalf("get unknown blob: err = %v, want BLOB_NOT_FOUND", err)
 		}
 	}
 

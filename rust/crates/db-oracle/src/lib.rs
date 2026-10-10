@@ -110,7 +110,7 @@ impl OracleConn {
             return Value::String(s);
         }
         if let Ok(bytes) = v.get::<Vec<u8>>() {
-            return polydb_core::blob_value(&bytes);
+            return polydb_db_core::blob_value(&bytes);
         }
         Value::Null
     }

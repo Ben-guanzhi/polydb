@@ -2,6 +2,7 @@
 // 纯函数、无 IO、无 React，供 QueryWorkspace 与单测复用。
 // 许可红线：仅参考 TablePro(AGPLv3) 的交互语义，实现全部自研，未移植其代码。
 import type { QueryResult, ResultColumn, StatementType } from '../api';
+import { asBlobValue, blobLabel } from './blobValue';
 
 export type ViewMode = 'table' | 'json' | 'chart' | 'output';
 
@@ -13,6 +14,7 @@ export type CellClass = 'null' | 'num' | 'bool' | 'text' | 'blob';
 /** 单元格值的语义分类（网格与 Inspector 共用一套颜色语义）。 */
 export function cellClass(v: unknown, col?: ResultColumn): CellClass {
   if (v === null || v === undefined) return 'null';
+  if (asBlobValue(v)) return 'blob';
   const t = col?.type?.toLowerCase() ?? '';
   if (typeof v === 'number') return 'num';
   if (typeof v === 'boolean') return 'bool';
@@ -23,9 +25,11 @@ export function cellClass(v: unknown, col?: ResultColumn): CellClass {
   return 'text';
 }
 
-/** 单元格值转显示文本：NULL 大写、数组递归、对象走 JSON。 */
+/** 单元格值转显示文本：NULL 大写、$blob 走 §5.1 占位标签、数组递归、对象走 JSON。 */
 export function fmt(v: unknown): string {
   if (v === null || v === undefined) return 'NULL';
+  const blob = asBlobValue(v);
+  if (blob) return blobLabel(blob.len);
   if (typeof v === 'object') {
     if (Array.isArray(v)) return `[${v.map(fmt).join(', ')}]`;
     return JSON.stringify(v);

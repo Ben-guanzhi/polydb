@@ -1,9 +1,11 @@
+pub mod blobsink;
 pub mod browse;
 pub mod connection;
 pub mod detect;
 pub mod driver;
 pub mod tx;
 
+pub use blobsink::{blob_value, clear_blob_sink, set_blob_sink, BlobSink};
 pub use browse::{
     browse_rows_limits, browse_rows_validate, build_rows_count_query, build_rows_query,
     build_rows_where, count_result_to_u64, escape_like_text, glob_quote_text, like_pattern_to_glob,

@@ -155,7 +155,7 @@ func (m *model) historyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *model) historyView() string {
 	var b strings.Builder
 	b.WriteString(selected(" 查询历史 "))
-	b.WriteString(fmt.Sprintf("（%d 条 · Enter 回填 · Esc 关闭）", len(m.hist)))
+	fmt.Fprintf(&b, "（%d 条 · Enter 回填 · Esc 关闭）", len(m.hist))
 	b.WriteString("\n")
 	b.WriteString(strings.Repeat("─", min(m.width, 60)) + "\n")
 	if len(m.hist) == 0 {
@@ -182,7 +182,7 @@ func (m *model) historyView() string {
 		b.WriteString(line + "\n")
 	}
 	if end < len(m.hist) {
-		b.WriteString(fmt.Sprintf("↓ 下方还有 %d", len(m.hist)-end))
+		fmt.Fprintf(&b, "↓ 下方还有 %d", len(m.hist)-end)
 	}
 	return b.String()
 }

@@ -1,7 +1,8 @@
 //! 纯函数工具：值渲染、单元格预览辅助、光标字节定位、多语句拆分、Redis 写回门禁。
 
 use gpui::Keystroke;
-use polydb_core::{RedisValue, Value};
+use polydb_core::{CoreError, RedisValue, Value};
+use polydb_protocol::{codes, BLOB_REF_PREFIX};
 
 // 单行文本编辑器：把一次按键作用到字符串 + 光标（字节下标）上，返回是否有改动。
 // Ctrl/平台键交回上层（剪贴板等）处理，此处直接返回 false。
@@ -67,6 +68,63 @@ pub(crate) fn value_str(v: &Value) -> String {
             serde_json::to_string(v).unwrap_or_else(|_| "<complex>".to_string())
         }
     }
+}
+
+/// spec/encoding.md §5.1：`$blob` 值的字节长度（内联与旁路引用两种形状都带 len）。
+pub(crate) fn blob_len(v: &Value) -> Option<u64> {
+    let Value::Object(map) = v else { return None };
+    let Value::Object(blob) = map.get("$blob")? else {
+        return None;
+    };
+    match blob.get("len")? {
+        Value::Integer(n) if *n >= 0 => Some(*n as u64),
+        _ => None,
+    }
+}
+
+/// §5.2 旁路引用：返回 (len, uuid)。非 $blob / 内联 base64 形状 → None。
+pub(crate) fn blob_ref_of(v: &Value) -> Option<(u64, String)> {
+    let Value::Object(map) = v else { return None };
+    let Value::Object(blob) = map.get("$blob")? else {
+        return None;
+    };
+    let len = blob_len(v)?;
+    let Value::String(r) = blob.get("ref")? else {
+        return None;
+    };
+    let uuid = r.strip_prefix(BLOB_REF_PREFIX)?;
+    Some((len, uuid.to_string()))
+}
+
+/// 网格单元格显示文本：$blob → `<blob N bytes>`（与 Web/TUI 网格对齐），
+/// 其余同 value_str。复制/预览仍走 value_str 保留原始 JSON。
+pub(crate) fn cell_str(v: &Value) -> String {
+    match blob_len(v) {
+        Some(n) => format!("<blob {n} bytes>"),
+        None => value_str(v),
+    }
+}
+
+/// 取回失败的展示文案：未知/过期用 spec 规定的前端固定文案，其余透出错误细节。
+pub(crate) fn blob_fetch_err_text(e: &CoreError) -> String {
+    let p = e.to_protocol();
+    if p.code == codes::BLOB_NOT_FOUND {
+        "已过期，请重新执行查询".to_string()
+    } else {
+        p.to_string()
+    }
+}
+
+/// 取回内容预览：前 n 字节的 hex（每行 16 字节），二进制安全。
+pub(crate) fn hex_bytes(b: &[u8], n: usize) -> String {
+    b.iter()
+        .take(n)
+        .map(|x| format!("{x:02x}"))
+        .collect::<Vec<_>>()
+        .chunks(16)
+        .map(|c| c.join(" "))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // 与 Web 端 tryParseJson 对齐：仅对象/数组字面量视为可美化 JSON。
@@ -451,6 +509,67 @@ mod tests {
         assert_eq!((ls, le), (0, 3)); // \r 留在行内（end 只排除 \n）
         assert_eq!(col_to_byte("中文x", 2), 6);
         assert_eq!(col_to_byte("中文x", 9), 7);
+    }
+
+    fn blob_value(pairs: Vec<(&str, Value)>) -> Value {
+        let mut inner = std::collections::HashMap::new();
+        for (k, v) in pairs {
+            inner.insert(k.to_string(), v);
+        }
+        let mut outer = std::collections::HashMap::new();
+        outer.insert("$blob".to_string(), Value::Object(inner));
+        Value::Object(outer)
+    }
+
+    #[test]
+    fn blob_cell_str_and_ref() {
+        let big = blob_value(vec![
+            ("len", Value::Integer(1_048_577)),
+            (
+                "ref",
+                Value::String(format!(
+                    "{BLOB_REF_PREFIX}11111111-1111-1111-1111-111111111111"
+                )),
+            ),
+        ]);
+        assert_eq!(blob_len(&big), Some(1_048_577));
+        assert_eq!(cell_str(&big), "<blob 1048577 bytes>");
+        let (len, uuid) = blob_ref_of(&big).expect("ref shape");
+        assert_eq!(len, 1_048_577);
+        assert_eq!(uuid, "11111111-1111-1111-1111-111111111111");
+
+        // 内联 base64 形状：有标签但不是引用（复制/预览仍走 value_str 原始 JSON）
+        let inline = blob_value(vec![
+            ("len", Value::Integer(2)),
+            ("base64", Value::String("AQI=".into())),
+        ]);
+        assert_eq!(cell_str(&inline), "<blob 2 bytes>");
+        assert!(blob_ref_of(&inline).is_none());
+
+        // 非 $blob：标签回落 value_str，ref 判空
+        assert_eq!(cell_str(&Value::String("x".into())), "x");
+        assert!(blob_ref_of(&Value::Null).is_none());
+        let no_len = blob_value(vec![("ref", Value::String("x".into()))]);
+        assert!(blob_ref_of(&no_len).is_none());
+    }
+
+    #[test]
+    fn blob_fetch_err_text_maps_404() {
+        assert_eq!(
+            blob_fetch_err_text(&CoreError::BlobNotFound("22222222".into())),
+            "已过期，请重新执行查询"
+        );
+        assert_eq!(
+            blob_fetch_err_text(&CoreError::Internal("boom".into())),
+            "[POLYDB_ERR_UNKNOWN] boom"
+        );
+    }
+
+    #[test]
+    fn hex_bytes_lines() {
+        assert_eq!(hex_bytes(&[0, 1, 0xff], 16), "00 01 ff");
+        assert_eq!(hex_bytes(&[0xab; 17], 16).lines().count(), 1);
+        assert_eq!(hex_bytes(&[0xab; 17], 17).lines().count(), 2);
     }
 
     #[test]

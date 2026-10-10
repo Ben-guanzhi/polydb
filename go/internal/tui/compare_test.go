@@ -124,11 +124,11 @@ func TestCompareWizardSyncAndRollback(t *testing.T) {
 	}
 
 	// ① 光标下移一位（候选首个是基准侧自己），Enter 比对
-	m, cmd := m.Update(runeKey('j'))
+	m, _ = m.Update(runeKey('j'))
 	if got := md(m).connName(md(m).cmpTargetID()); got != tgtName {
 		t.Fatalf("cursor on %q want %q", got, tgtName)
 	}
-	m, cmd = m.Update(key(tea.KeyEnter))
+	m, cmd := m.Update(key(tea.KeyEnter))
 	m = drive(t, m, cmd)
 	if md(m).cmpStage != cmpStageDiff {
 		t.Fatalf("after diff: stage=%v status=%s", md(m).cmpStage, md(m).status)
@@ -280,8 +280,8 @@ func TestCompareWizardBackChain(t *testing.T) {
 	if cmd != nil {
 		t.Fatalf("g on empty plan should be blocked")
 	}
-	m, cmd = m.Update(key(tea.KeyDown))
-	m, cmd = m.Update(key(tea.KeySpace))
+	m, _ = m.Update(key(tea.KeyDown))
+	m, _ = m.Update(key(tea.KeySpace))
 	m, cmd = m.Update(key(tea.KeyEsc))
 	if cmd != nil || md(m).cmpStage != cmpStagePick {
 		t.Fatalf("esc from ②: stage=%v cmd=%v", md(m).cmpStage, cmd)

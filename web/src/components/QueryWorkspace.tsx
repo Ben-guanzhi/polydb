@@ -5,6 +5,7 @@ import { KeyCode, KeyMod, Range } from 'monaco-editor';
 import type { QueryResult, ResultColumn } from '../api';
 import * as api from '../lib/api';
 import { ApiError } from '../lib/api';
+import { asBlobValue, blobIdOfRef } from '../lib/blobValue';
 import * as exporters from '../lib/exporters';
 import * as ws from '../lib/ws';
 import { registerSqlCompletionGlobal, setSqlCompletionConnId } from '../lib/sqlCompletion';
@@ -1507,7 +1508,24 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
     if (!menu || !ctxTarget) return;
     const { row, col, value } = ctxTarget;
     if (act === 'copy-cell') {
-      copyText(value === null || value === undefined ? 'NULL' : String(value));
+      if (value === null || value === undefined) {
+        copyText('NULL');
+      } else {
+        // $blob：内联导出 base64（§5.1）；旁路引用先按 §5.2 取回再转 base64。
+        const b = asBlobValue(value);
+        if (b && b.base64 !== undefined) {
+          copyText(b.base64);
+        } else if (b?.ref) {
+          const id = blobIdOfRef(b.ref);
+          if (id) {
+            void api.fetchBlob(connId, id)
+              .then((r) => copyText(api.arrayBufferToBase64(r.data)))
+              .catch((e) => setError(api.blobFetchErrorMessage(e)));
+          }
+        } else {
+          copyText(String(value));
+        }
+      }
     } else if (act === 'copy-cell-quoted') {
       copyText(sqlLiteral(value));
     } else if (act === 'copy-row') {
@@ -4032,6 +4050,7 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
           <CellPreviewPanel
             label={<>单元格预览 · 行 {cellPreview.row + 1} · 列 <code>{previewTarget.col.name}</code> (<code>{previewTarget.col.type}</code>)</>}
             value={previewTarget.value}
+            connId={connId}
             tab={previewTab}
             onTabChange={setPreviewTab}
             onClose={() => setCellPreview(null)}

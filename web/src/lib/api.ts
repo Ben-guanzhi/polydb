@@ -252,3 +252,59 @@ export function kvSetValue(id: string, req: RedisSetRequest) {
 export function kvExecCommand(id: string, req: RedisExecCommandRequest) {
   return request<RedisReply>('POST', enc(id, '/kv/exec'), req);
 }
+
+// ─── 大字段旁路取回（spec/encoding.md §5.2）────────────────
+
+/** §5.2 规定：前端对取回 404 展示的固定文案。 */
+export const BLOB_EXPIRED_MSG = '已过期，请重新执行查询';
+
+export interface BlobContent {
+  status: 200 | 206;
+  data: ArrayBuffer;
+  /** 206 时的 Content-Range，如 bytes 0-1048575/2097152 */
+  contentRange?: string;
+}
+
+/**
+ * GET /api/connections/{id}/blobs/{blob_id}：取回旁路大字段内容。
+ * range 为单段字节区间（如 bytes=0-1048575；多段/语法错误服务端按无 Range 处理）。
+ * 成功返回二进制内容；404/416 抛 ApiError。
+ */
+export async function fetchBlob(connectionId: string, blobId: string, range?: string): Promise<BlobContent> {
+  const token = getServerToken();
+  const headers: Record<string, string> = { Accept: 'application/octet-stream' };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (range) headers.Range = range;
+  const res = await fetch(
+    `/api/connections/${encodeURIComponent(connectionId)}/blobs/${encodeURIComponent(blobId)}`,
+    { headers },
+  );
+  if (res.ok) {
+    return {
+      status: res.status as 200 | 206,
+      data: await res.arrayBuffer(),
+      contentRange: res.headers.get('Content-Range') ?? undefined,
+    };
+  }
+  const raw = await res.arrayBuffer();
+  throw toApiError(res.status, raw.byteLength > 0 ? decodeJson(raw) : null);
+}
+
+/** 取回失败的展示文案：404 用 §5.2 固定文案，其余回退 code+message。 */
+export function blobFetchErrorMessage(e: unknown): string {
+  if (e instanceof ApiError) {
+    return e.status === 404 ? BLOB_EXPIRED_MSG : `${e.code}: ${e.message}`;
+  }
+  return e instanceof Error ? e.message : String(e);
+}
+
+/** ArrayBuffer → base64（复制单元格导出用；分块避免大数组爆栈）。 */
+export function arrayBufferToBase64(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  const chunk = 0x8000;
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
+}

@@ -636,7 +636,7 @@ func authedCreateSQLiteConn(t *testing.T, srv *httptest.Server, token string) st
 }
 
 // 启用 token 时，跳过 hello 直接带 connection_id 发 query 必须被拒绝并关闭连接
-//（behavior.md §12.2）。镜像 Rust crates/server/src/tests.rs 的 ws_auth_gate 用例。
+// （behavior.md §12.2）。镜像 Rust crates/server/src/tests.rs 的 ws_auth_gate 用例。
 func TestWSQueryWithoutAuthHelloRejected(t *testing.T) {
 	db, err := storage.Open(filepath.Join(t.TempDir(), "polydb.db"))
 	if err != nil {

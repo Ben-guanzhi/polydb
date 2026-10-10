@@ -120,15 +120,6 @@ func GenGoOps(spec *OpsSpec) string {
 	b.WriteString("\treturn OpRow{}, false\n")
 	b.WriteString("}\n\n")
 
-	b.WriteString("// allOps lists every registered op in the spec's order.\n")
-	b.WriteString("func allOps() []Op {\n")
-	b.WriteString("\tout := make([]Op, 0, len(OpRows))\n")
-	b.WriteString("\tfor _, r := range OpRows {\n")
-	b.WriteString("\t\tout = append(out, r.Op)\n")
-	b.WriteString("\t}\n")
-	b.WriteString("\treturn out\n")
-	b.WriteString("}\n")
-	b.WriteString("\n")
 	b.WriteString("// OpDDLsContain reports whether the dialect `wire` is one the DDL generator targets.\n")
 	b.WriteString("func OpDDLsContain(wire string) bool {\n")
 	b.WriteString("\tfor _, d := range OpDDLs {\n")
@@ -162,25 +153,37 @@ func GenRustOps(spec *OpsSpec) string {
 	b.WriteString("/// The op registry in the spec's declaration order.\n")
 	b.WriteString("pub const OP_ROWS: &[OpRow] = &[\n")
 	for _, o := range spec.Ops {
-		fmt.Fprintf(&b, "    OpRow { op: Op::%s, phase: %d, destructive: %t, inverse: Op::%s },\n",
+		// 逐字段展开与 rustfmt 的多行形态逐字节一致：`ops --check` 是
+		// 字节级比对，若产出紧凑形态则与 `cargo fmt --check` 互相打架。
+		fmt.Fprintf(&b, "    OpRow {\n        op: Op::%s,\n        phase: %d,\n        destructive: %t,\n        inverse: Op::%s,\n    },\n",
 			pascal(o.ID), o.Phase, o.Destructive, pascal(o.Inverse))
 	}
 	b.WriteString("];\n\n")
 	b.WriteString("/// Database-kind wire names the DDL generator targets (v1: sqlite only).\n")
 	b.WriteString("/// `check_kind` consults this instead of a hard-coded kind.\n")
-	b.WriteString("pub const OP_DDL_DIALECTS: &[&str] = &[\n")
-	for _, d := range spec.DDLs {
-		fmt.Fprintf(&b, "    %q,\n", d)
+	// 单行放得下（≤100 列 = rustfmt max_width）就单行，否则多行——两种
+	// 形态都取 rustfmt 的规范形态。
+	dl := "pub const OP_DDL_DIALECTS: &[&str] = &["
+	for i, d := range spec.DDLs {
+		if i > 0 {
+			dl += ", "
+		}
+		dl += fmt.Sprintf("%q", d)
 	}
-	b.WriteString("];\n\n")
+	dl += "];"
+	if len(dl) <= 100 {
+		b.WriteString(dl + "\n\n")
+	} else {
+		b.WriteString("pub const OP_DDL_DIALECTS: &[&str] = &[\n")
+		for _, d := range spec.DDLs {
+			fmt.Fprintf(&b, "    %q,\n", d)
+		}
+		b.WriteString("];\n\n")
+	}
 	b.WriteString("/// The registry row for `op`, or `None` when `op` is not a known schemadiff op.\n")
 	b.WriteString("pub fn lookup_op_row(op: Op) -> Option<&'static OpRow> {\n")
 	b.WriteString("    OP_ROWS.iter().find(|r| r.op == op)\n")
 	b.WriteString("}\n\n")
-	b.WriteString("/// Every registered op, in the spec's declaration order.\n")
-	b.WriteString("pub fn all_ops() -> Vec<Op> {\n")
-	b.WriteString("    OP_ROWS.iter().map(|r| r.op).collect()\n")
-	b.WriteString("}\n")
 	b.WriteString("/// True when `wire` names a dialect the DDL generator targets.\n")
 	b.WriteString("pub fn ddl_supported(wire: &str) -> bool {\n")
 	b.WriteString("    OP_DDL_DIALECTS.contains(&wire)\n")

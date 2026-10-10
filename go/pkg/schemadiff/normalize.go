@@ -98,9 +98,10 @@ func matchingClose(b []byte, open int) int {
 		if inQuote {
 			continue
 		}
-		if c == '(' {
+		switch c {
+		case '(':
 			depth++
-		} else if c == ')' {
+		case ')':
 			depth--
 			if depth == 0 {
 				return i
@@ -302,7 +303,7 @@ func isCastTail(t string) bool {
 			return false
 		}
 		head := base[0]
-		if !(head >= 'a' && head <= 'z') && head != '_' {
+		if (head < 'a' || head > 'z') && head != '_' {
 			return false
 		}
 		okRest := rest == "" ||

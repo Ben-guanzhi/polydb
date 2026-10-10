@@ -187,7 +187,7 @@ REST 控制面（连接/元数据/DDL）	MessagePack
 REST 数据面（查询结果）	MessagePack（当前实现；Arrow IPC 为预留，未实现）
 WebSocket 事件	MessagePack
 WebSocket 大结果流	MessagePack（当前实现；Arrow IPC stream 为预留，未实现）
-大字段（BLOB）	按 spec/encoding.md §5.1 的 $blob 编码内联（≤1MB 含 base64，超阈值仅发长度）；旁路 + Range 请求为预留（§5.2），未实现
+大字段（BLOB）	按 spec/encoding.md §5.1 的 $blob 编码内联（≤1MB 含 base64）；>1MB 走 §5.2 旁路引用 `$polydb_blob:<uuid>` + Range 取回（Go/Rust 双端已实现）
 进程内（GUI/TUI↔app-core）	零序列化，直接传结构体
 Content-Type：application/msgpack（预留：application/vnd.apache.arrow.stream）。
 
@@ -320,7 +320,7 @@ M8	SSH 隧道、keyring、Pub/Sub、Cluster（可选）
 
 不要在数据面引入 JSON；用 MessagePack / Arrow。
 
-不要把大字段内容无限内联进结果集；按 spec/encoding.md §5 执行阈值策略（≤1MB 内联 $blob，超阈值仅发长度；旁路引用为预留）。
+不要把大字段内容无限内联进结果集；按 spec/encoding.md §5 执行阈值策略（≤1MB 内联 $blob；>1MB 旁路引用 `$polydb_blob:<uuid>` + Range 取回，Go/Rust 双端一致）。
 
 不要在 DB 里存明文密码。
 
@@ -414,3 +414,20 @@ systemd 服务	polydb.service
 协议 title	PolyDB API
 错误码前缀	POLYDB_ERR_
 logger 名	polydb
+
+16. 已知偏差清单（AGENTS.md ≠ 实现）
+
+本文件是**意图**，不是实现的事实陈述。以下偏差已被 `.qoder/skills/polydb/SKILL.md` 记录，此处集中列出以便新贡献者不被误导。**真正的门禁是 `spec/` 与 `tools/genprotocol` 的四方比对**，不是本文件。
+
+| # | AGENTS.md 声称 | 实际实现 | 状态 | 修复方向 |
+|---|---|---|---|---|
+| 1 | `SqlConnection` / `KvConnection` 类型存在 | 不存在，只有 `Connection` + `AsSQL()`/`AsKV()` 能力降级 | 已确认 | 若需要强类型连接，在 spec 中补 DTO 并重新生成 |
+| 2 | Rust `HttpTransport` 存在 | 不存在，只有 `LocalTransport`；Web 靠 Go/Rust server | 已确认 | 若需要 Rust HTTP transport，新建 crate 并补 trait |
+| 3 | Rust storage 用 `sqlx` | 实际用 `rusqlite`（bundled） | 已确认 | 迁移到 sqlx 或更新本节 |
+| 4 | 异步统一单运行时 | Rust 混用 tokio（server/SSH/tiberius/oracle）+ smol（主体） | 已知债 | 全局迁移到 smol 或 tokio，二选一 |
+| 5 | Arrow IPC 数据面 | 预留未实现，数据面一律 MessagePack | 已确认 | 实现 Arrow 旁路或删除声明 |
+| 6 | `SqlDriver::begin() -> Transaction` | 实为 `begin_tx(TxMode) -> Box<dyn Any+Send>` | 已确认 | 迁移到 trait-object transaction |
+| 7 | 契约测试用 JSON fixture | 实为 Go 测试（`test/contract/`） | 已确认 | 统一为 JSON fixture 或更新本节 |
+| 8 | Rust/Go protocol 由 spec 生成 | 仅 TS 是真生成；Rust/Go 是手工维护 + 漂移检查 | 已确认 | 扩展 genprotocol 生成 Rust/Go |
+
+**规则**：新增偏差时，先在 `.qoder/skills/polydb/SKILL.md` 记录，再同步到本表。修复实现后，从本表删除对应行。

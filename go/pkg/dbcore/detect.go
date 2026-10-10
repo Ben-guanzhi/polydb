@@ -121,7 +121,7 @@ func stripCommentsAndLiterals(sql string) string {
 }
 
 // skipQuoted 越过从 sql[start] 开始的引号字面量，返回结束引号之后的下标。
-// 处理 ''（双写）与 MySQL 反斜杠转义；[] 标识符只按 ] 结束。
+// 处理 ”（双写）与 MySQL 反斜杠转义；[] 标识符只按 ] 结束。
 func skipQuoted(sql string, start int, quote byte) int {
 	i := start + 1
 	n := len(sql)

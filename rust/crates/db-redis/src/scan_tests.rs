@@ -21,11 +21,20 @@ struct Fake {
 /// keyspace：250 个键，i%50==7 的用 "sel:" 前缀 → sel:* 恰好匹配 5 个（i=7,57,107,157,207）。
 fn start_fake() -> (String, Arc<Fake>) {
     let keys: Vec<String> = (0..250)
-        .map(|i| if i % 50 == 7 { format!("sel:{i:03}") } else { format!("k{i:03}") })
+        .map(|i| {
+            if i % 50 == 7 {
+                format!("sel:{i:03}")
+            } else {
+                format!("k{i:03}")
+            }
+        })
         .collect();
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("local_addr").to_string();
-    let fake = Arc::new(Fake { keys, scans: AtomicU64::new(0) });
+    let fake = Arc::new(Fake {
+        keys,
+        scans: AtomicU64::new(0),
+    });
     let f = Arc::clone(&fake);
     std::thread::spawn(move || {
         for stream in listener.incoming() {
@@ -123,7 +132,12 @@ fn scan_reply(f: &Fake, args: &[String]) -> String {
         .iter()
         .filter(|k| glob_match(&pattern, k))
         .collect();
-    let mut out = format!("*2\r\n${}\r\n{}\r\n*{}\r\n", next.to_string().len(), next, matched.len());
+    let mut out = format!(
+        "*2\r\n${}\r\n{}\r\n*{}\r\n",
+        next.to_string().len(),
+        next,
+        matched.len()
+    );
     for k in matched {
         out.push_str(&format!("${}\r\n{}\r\n", k.len(), k));
     }
@@ -181,7 +195,10 @@ async fn scan_keys_exhausts_with_selective_pattern() {
     let c2 = open_fake(&_addr2);
     let page3 = c2.scan_keys(0, "nomatch:*", 10).await.expect("nomatch");
     assert!(page3.keys.is_empty());
-    assert_eq!(page3.cursor, 0, "无匹配也必须给出穷尽游标，前端不再显示假『无匹配键』");
+    assert_eq!(
+        page3.cursor, 0,
+        "无匹配也必须给出穷尽游标，前端不再显示假『无匹配键』"
+    );
     assert_eq!(fake2.scans.load(Ordering::SeqCst), 25);
 }
 

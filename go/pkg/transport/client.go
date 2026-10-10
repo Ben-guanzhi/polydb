@@ -79,4 +79,10 @@ type Client interface {
 	GetValue(ctx context.Context, id, key string) (protocol.RedisValue, error)
 	SetValue(ctx context.Context, id, key string, value protocol.RedisValue) error
 	ExecCommand(ctx context.Context, id string, args []string) (protocol.RedisReply, error)
+
+	// 大字段旁路取回（spec/encoding.md §5.2）：blobID 为 $polydb_blob:<uuid> 的
+	// UUID 部分。Local 进程内直读存储（零序列化）；Remote 打 REST 二进制通道
+	//（connID 仅用于拼路径，服务端只校验格式）。未知/过期返回
+	// *protocol.PolyDBError(BLOB_NOT_FOUND)。
+	GetBlob(ctx context.Context, connID, blobID string) ([]byte, error)
 }

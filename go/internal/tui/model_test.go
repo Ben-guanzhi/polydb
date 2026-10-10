@@ -30,8 +30,8 @@ func TestMain(t *testing.M) {
 	SetDataDirFunc(storage.DataDir)
 	// 固定主题档位：非 tty 下 termenv 自动探测为 Ascii 会剥离样式，
 	// 令断言 ANSI 的测试不确定；显式设 ANSI 深色底使样式可预期。
-	os.Setenv("POLYDB_TUI_COLOR", "ansi")
-	os.Setenv("POLYDB_TUI_THEME", "dark")
+	_ = os.Setenv("POLYDB_TUI_COLOR", "ansi")
+	_ = os.Setenv("POLYDB_TUI_THEME", "dark")
 	initTheme()
 	os.Exit(t.Run())
 }
@@ -152,6 +152,58 @@ func TestCellFullText(t *testing.T) {
 	}
 	if got := cellString(blob); got != "<blob 2 bytes>" {
 		t.Errorf("cellString blob = %q", got)
+	}
+}
+
+// TestBlobRefFetchBlock 锁定 §5.2 取回状态块：ref 识别、错误文案映射与状态机展示。
+func TestBlobRefFetchBlock(t *testing.T) {
+	const uuid = "11111111-1111-1111-1111-111111111111"
+	ref := protocol.NewObjectValue(map[string]any{
+		"$blob": map[string]any{"len": int64(1048577), "ref": protocol.BlobRefPrefix + uuid},
+	})
+	if _, id, ok := blobRefOf(ref); !ok || id != uuid {
+		t.Fatalf("blobRefOf ref = %q ok=%v", id, ok)
+	}
+	inline := protocol.NewObjectValue(map[string]any{"$blob": map[string]any{"len": int64(2), "base64": "AQI="}})
+	if _, _, ok := blobRefOf(inline); ok {
+		t.Fatal("inline blob must not be treated as ref")
+	}
+	if _, _, ok := blobRefOf(protocol.NewNullValue()); ok {
+		t.Fatal("NULL must not be ref")
+	}
+
+	m := &model{}
+	if got := m.blobFetchBlock(ref); !strings.Contains(got, "按 g 取回内容") {
+		t.Fatalf("idle block = %q", got)
+	}
+	if got := m.blobFetchBlock(protocol.NewStringValue("plain")); got != "" {
+		t.Fatalf("non-ref must not append block, got %q", got)
+	}
+
+	m.blobKey, m.blobLoading = uuid, true
+	if got := m.blobFetchBlock(ref); !strings.Contains(got, "取回中") {
+		t.Fatalf("loading block = %q", got)
+	}
+
+	m.blobLoading = false
+	m.blobErr = blobFetchErrText(&protocol.PolyDBError{Code: protocol.ErrBlobNotFound, Message: "blob not found: x"})
+	if got := m.blobFetchBlock(ref); !strings.Contains(got, "已过期，请重新执行查询") {
+		t.Fatalf("404 文案缺失（spec §5.2 前端固定文案）: %q", got)
+	}
+
+	m.blobErr = ""
+	m.blobData = []byte{1, 2, 3}
+	got := m.blobFetchBlock(ref)
+	if !strings.Contains(got, "已取回 3 字节") || !strings.Contains(got, "AQID") {
+		t.Fatalf("fetched block = %q", got)
+	}
+
+	// 光标换到另一个引用 → 回落提示（单槽缓存按 blobKey 绑定）
+	other := protocol.NewObjectValue(map[string]any{
+		"$blob": map[string]any{"len": int64(9), "ref": protocol.BlobRefPrefix + "22222222-2222-2222-2222-222222222222"},
+	})
+	if got := m.blobFetchBlock(other); !strings.Contains(got, "按 g 取回内容") {
+		t.Fatalf("other-ref block = %q", got)
 	}
 }
 
@@ -1284,7 +1336,7 @@ func TestModelQueryHistory(t *testing.T) {
 	m = drive(t, m, cmd)
 	m, cmd = m.Update(key(tea.KeyEnter)) // → table detail
 	m = drive(t, m, cmd)
-	m, cmd = m.Update(runeKey('q')) // → query，预填 SELECT
+	m, _ = m.Update(runeKey('q')) // → query，预填 SELECT
 	if md(m).view != viewQuery {
 		t.Fatalf("setup: view=%v", md(m).view)
 	}
@@ -1349,7 +1401,7 @@ func TestModelQueryCancel(t *testing.T) {
 	}
 
 	// 发起查询：登记 UUID 与 cancel，busy 文案提示取消键
-	m, cmd = m.Update(key(tea.KeyF5))
+	m, _ = m.Update(key(tea.KeyF5))
 	mm := md(m)
 	if mm.queryCancel == nil {
 		t.Fatal("F5 应登记可取消上下文")
@@ -1390,18 +1442,18 @@ func TestThemeProfileSelection(t *testing.T) {
 	keys := []string{"NO_COLOR", "POLYDB_TUI_NO_COLOR", "POLYDB_TUI_COLOR", "POLYDB_TUI_THEME"}
 	for _, k := range keys {
 		if v, ok := os.LookupEnv(k); ok {
-			defer os.Setenv(k, v)
+			defer func() { _ = os.Setenv(k, v) }()
 		} else {
-			defer os.Unsetenv(k)
+			defer func() { _ = os.Unsetenv(k) }()
 		}
 	}
 	defer initTheme()
 
 	// 强制 ANSI + 深底：失败标红、灰徽标用亮黑（90）
-	os.Unsetenv("NO_COLOR")
-	os.Unsetenv("POLYDB_TUI_NO_COLOR")
-	os.Setenv("POLYDB_TUI_COLOR", "ansi")
-	os.Setenv("POLYDB_TUI_THEME", "dark")
+	_ = os.Unsetenv("NO_COLOR")
+	_ = os.Unsetenv("POLYDB_TUI_NO_COLOR")
+	_ = os.Setenv("POLYDB_TUI_COLOR", "ansi")
+	_ = os.Setenv("POLYDB_TUI_THEME", "dark")
 	initTheme()
 	if !strings.HasPrefix(failText("boom"), "\x1b[31m") {
 		t.Fatalf("ANSI dark fail not red: %q", failText("boom"))
@@ -1414,14 +1466,14 @@ func TestThemeProfileSelection(t *testing.T) {
 	}
 
 	// 浅底：灰徽标改用黑（30）以保证可见
-	os.Setenv("POLYDB_TUI_THEME", "light")
+	_ = os.Setenv("POLYDB_TUI_THEME", "light")
 	initTheme()
 	if s := stBadge(protocol.StatementTypeOther); !strings.Contains(s, "\x1b[30m") {
 		t.Fatalf("light gray badge not black: %q", s)
 	}
 
 	// NO_COLOR：剥离所有样式
-	os.Setenv("NO_COLOR", "1")
+	_ = os.Setenv("NO_COLOR", "1")
 	initTheme()
 	if failText("boom") != "boom" {
 		t.Fatalf("NO_COLOR should strip fail: %q", failText("boom"))

@@ -15,6 +15,10 @@ const (
 
 type ConnectionID = string
 
+// BlobRefPrefix 是 spec/encoding.md §5.2 旁路引用 ID 的前缀：
+// 完整引用形如 $polydb_blob:<uuid>，REST 取回路径使用其后的 UUID。
+const BlobRefPrefix = "$polydb_blob:"
+
 type Value struct {
 	raw json.RawMessage
 }

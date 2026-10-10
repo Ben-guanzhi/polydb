@@ -107,14 +107,14 @@ cd rust && cargo fmt --all --check && cargo clippy --workspace --all-targets -- 
 
 # Go
 cd go && gofmt -l ./pkg ./cmd ./internal && \
-  go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.0.2 run ./... && \
+  go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0 run ./... && \
   go test ./...
 
 # Web
 cd web && npm run check && npm run build
 
-# 契约测试
-cd test/contract && go test -count=1 -timeout 300s ./...
+# 契约测试（本机实测 ~360s，历史 314–377s：超时须 >6 分钟）
+cd test/contract && go test -count=1 -timeout 600s ./...
 ```
 
 CI 定义在 `.github/workflows/ci.yml`（Rust / Go / Web / contract 四 job，Postgres/MySQL/Redis/MSSQL/Oracle 起容器真跑；MSSQL 用 `mssql/server:2022`，Oracle 用 `gvenzl/oracle-free:23-slim`）。

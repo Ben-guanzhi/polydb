@@ -98,6 +98,61 @@ fn browse_and_transaction_delegate() {
     });
 }
 
+// §5.2 旁路大字段：超阈值单元格 → $polydb_blob ref，get_blob 双向（取回/404）委托验证。
+#[test]
+fn get_blob_roundtrip_and_404() {
+    use polydb_core::Value;
+    use polydb_protocol::{codes, BLOB_REF_PREFIX};
+
+    let app = setup();
+    let t = LocalTransport::new(Arc::clone(&app));
+    let id: ConnectionId = t.create_connection(&sqlite_req("local")).unwrap().id;
+
+    smol::block_on(async {
+        t.execute(id, "CREATE TABLE blobref(b BLOB)", &[])
+            .await
+            .unwrap();
+        t.execute(id, "INSERT INTO blobref VALUES(zeroblob(1048577))", &[])
+            .await
+            .unwrap();
+
+        // 结果集里应是 >1MB 的旁路引用形状（驱动层 blob sink 感知）
+        let res = t.execute(id, "SELECT b FROM blobref", &[]).await.unwrap();
+        let cell = &res.rows[0][0];
+        let blob_id = match cell {
+            Value::Object(map) => match map.get("$blob") {
+                Some(Value::Object(inner)) => match inner.get("ref") {
+                    Some(Value::String(r)) => r
+                        .strip_prefix(BLOB_REF_PREFIX)
+                        .expect("ref must carry $polydb_blob prefix")
+                        .to_string(),
+                    other => panic!("ref field: {other:?}"),
+                },
+                other => panic!("$blob field: {other:?}"),
+            },
+            other => panic!("cell value: {other:?}"),
+        };
+
+        let bytes = t.get_blob(id, &blob_id).await.unwrap();
+        assert_eq!(bytes.len(), 1_048_577, "取回长度与 len 字段一致");
+        assert!(
+            bytes.iter().all(|&b| b == 0),
+            "zeroblob 内容应全零（前 1KB 内已足证）"
+        );
+
+        // 未知引用 → POLYDB_ERR_BLOB_NOT_FOUND（前端映射固定文案）
+        let miss = t
+            .get_blob(id, &uuid::Uuid::new_v4().to_string())
+            .await
+            .unwrap_err();
+        assert_eq!(miss.to_protocol().code, codes::BLOB_NOT_FOUND);
+
+        // 非法 uuid → INVALID_PARAM（AppCore::get_blob 先做格式校验）
+        let bad = t.get_blob(id, "not-a-uuid").await.unwrap_err();
+        assert_eq!(bad.to_protocol().code, codes::INVALID_PARAM);
+    });
+}
+
 #[test]
 fn rollback_discards_write() {
     let app = setup();

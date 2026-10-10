@@ -158,7 +158,7 @@ impl MssqlConn {
             return Value::String(v.to_string());
         }
         if let Ok(Some(v)) = row.try_get::<&[u8], usize>(i) {
-            return polydb_core::blob_value(v);
+            return polydb_db_core::blob_value(v);
         }
         Value::Null
     }

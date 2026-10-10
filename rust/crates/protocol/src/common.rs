@@ -145,11 +145,18 @@ pub enum GenericType {
 }
 
 /// 二进制单元格的编码阈值（spec/encoding.md §5）：
-/// ≤1MB 内联 base64，>1MB 只回长度（旁路 Range 取回仍为预留设计）。
+/// ≤1MB 内联 base64；>1MB 走 §5.2 旁路引用（`ref` 字段 + Range 取回，
+/// 无 sink 时仅回长度占位）。
 pub const MAX_INLINE_BLOB_BYTES: usize = 1_048_576;
 
-/// 按 spec/encoding.md §5 的约定编码二进制单元格：
+/// spec/encoding.md §5.2 旁路引用 ID 前缀：完整引用形如
+/// `$polydb_blob:<uuid>`，REST 取回路径使用其后的 UUID。
+pub const BLOB_REF_PREFIX: &str = "$polydb_blob:";
+
+/// 按 spec/encoding.md §5.1 的约定编码内联二进制单元格：
 /// `{"$blob": {"len": N, "base64": "..."}}`；超过阈值时省略 `base64`。
+/// **驱动层一律调用 `polydb_db_core::blob_value`**（sink 感知，>阈值改发
+/// §5.2 引用）；本函数保留给 ≤阈值内联与无 sink 回落。
 /// 用既有的 Object 变体承载，msgpack 与 JSON 通道都能无损往返。
 pub fn blob_value(bytes: &[u8]) -> Value {
     let mut inner = std::collections::HashMap::new();

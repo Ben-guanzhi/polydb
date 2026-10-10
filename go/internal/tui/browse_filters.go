@@ -101,7 +101,7 @@ func opIsTextMatch(op protocol.FilterOperator) bool {
 
 // opSupported 当前连接方言是否支持该 op（§13.6：MSSQL 无原生正则）。
 func opSupported(kind protocol.DatabaseKind, op protocol.FilterOperator) bool {
-	return !(op == protocol.FilterOpRegex && kind == protocol.DatabaseKindMSSQL)
+	return op != protocol.FilterOpRegex || kind != protocol.DatabaseKindMSSQL
 }
 
 // opUnsupportedHint 不支持时的提示文案；可用则空串。

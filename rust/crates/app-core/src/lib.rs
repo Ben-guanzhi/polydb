@@ -12,10 +12,11 @@ use polydb_core::{
     SchemaDiffPlan, SchemaDiffRequest, SchemaDiffTarget, SchemaInfo, TableInfo, TableRowsRequest,
     TableRowsResult, TableType, TransactionInfo, TransactionStatus, UpdateConnectionRequest, Value,
 };
-use polydb_db_core::{Connection, DatabaseDriver, SqlDriver, TxMode};
+use polydb_db_core::{set_blob_sink, BlobSink, Connection, DatabaseDriver, SqlDriver, TxMode};
 use polydb_protocol::common::SshTunnelConfig;
+use polydb_protocol::error::{codes, PolyDBError};
 use polydb_schema_diff as schema_diff;
-use polydb_storage::{keyring_ref, FileKeyring, Keyring, Storage};
+use polydb_storage::{keyring_ref, BlobStore, FileKeyring, Keyring, Storage};
 
 type Snapshot = schema_diff::Snapshot;
 type TableSnapshot = schema_diff::TableSnapshot;
@@ -133,8 +134,20 @@ impl TxEntry {
     }
 }
 
+/// 把 storage 的 [`BlobStore`] 适配为 db-core 的 [`BlobSink`]：trait 属
+/// db-core、类型属 storage，包装层按孤儿规则落在 app-core。
+struct StoreSink(Arc<BlobStore>);
+
+impl BlobSink for StoreSink {
+    fn put_blob(&self, data: &[u8]) -> Option<String> {
+        self.0.put_blob(data).ok()
+    }
+}
+
 pub struct AppCore {
     storage: Storage,
+    /// 旁路大字段存储（spec/encoding.md §5.2）；目录跟随库文件所在目录。
+    blobs: Arc<BlobStore>,
     kr: Arc<dyn Keyring>,
     connections: RwLock<HashMap<ConnectionId, Connection>>,
     tunnels: RwLock<HashMap<ConnectionId, Arc<Tunnel>>>,
@@ -161,16 +174,40 @@ impl AppCore {
         Self::with_keyring(storage, kr)
     }
 
-    /// 显式指定 keyring（测试用）。
+    /// 显式指定 keyring（测试用）。构造期同时注入大字段 sink（§5.2）：
+    /// 目录取库文件所在目录，启动时清扫一次过期引用。
     pub fn with_keyring(storage: Storage, kr: Arc<dyn Keyring>) -> Self {
+        let blobs = Arc::new(BlobStore::new(storage.data_dir()));
+        blobs.sweep();
+        set_blob_sink(Arc::new(StoreSink(blobs.clone())));
         Self {
             storage,
+            blobs,
             kr,
             connections: RwLock::new(HashMap::new()),
             tunnels: RwLock::new(HashMap::new()),
             txs: Mutex::new(HashMap::new()),
             read_only: RwLock::new(std::collections::HashSet::new()),
         }
+    }
+
+    /// 旁路大字段存储（server Range 取回与测试播种用）。
+    pub fn blob_store(&self) -> &BlobStore {
+        &self.blobs
+    }
+
+    /// 取回旁路大字段（§5.2 进程内路径；HTTP 走 server 的 Range handler）。
+    /// `blob_id` 为完整引用 `$polydb_blob:<uuid>` 去掉前缀后的 UUID，
+    /// 非法值报 INVALID_PARAM，未知值报 BLOB_NOT_FOUND。
+    pub fn get_blob(&self, blob_id: &str) -> CoreResult<Vec<u8>> {
+        if uuid::Uuid::parse_str(blob_id).is_err() {
+            return Err(PolyDBError::new(
+                codes::INVALID_PARAM,
+                format!("invalid blob id: {blob_id}"),
+            )
+            .into());
+        }
+        self.blobs.get(blob_id)
     }
 
     fn get_conn(&self, id: ConnectionId) -> CoreResult<Connection> {

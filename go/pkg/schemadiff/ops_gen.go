@@ -44,15 +44,6 @@ func lookupOpRow(op Op) (OpRow, bool) {
 	return OpRow{}, false
 }
 
-// allOps lists every registered op in the spec's order.
-func allOps() []Op {
-	out := make([]Op, 0, len(OpRows))
-	for _, r := range OpRows {
-		out = append(out, r.Op)
-	}
-	return out
-}
-
 // OpDDLsContain reports whether the dialect `wire` is one the DDL generator targets.
 func OpDDLsContain(wire string) bool {
 	for _, d := range OpDDLs {

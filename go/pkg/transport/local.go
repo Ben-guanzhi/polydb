@@ -150,3 +150,11 @@ func (l *Local) SetValue(ctx context.Context, id, key string, value protocol.Red
 func (l *Local) ExecCommand(ctx context.Context, id string, args []string) (protocol.RedisReply, error) {
 	return l.app.ExecCommand(ctx, id, args)
 }
+
+// ─── 大字段旁路取回（spec/encoding.md §5.2）────────────────
+
+// GetBlob 进程内取回（「进程内取回走 GetBlob」，零序列化，同一存储）。
+// connID 是 REST 路径参数（blob 为目录级资源），进程内通道忽略。
+func (l *Local) GetBlob(ctx context.Context, connID, blobID string) ([]byte, error) {
+	return l.app.GetBlob(blobID)
+}

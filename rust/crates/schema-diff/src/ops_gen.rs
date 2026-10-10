@@ -82,10 +82,6 @@ pub fn lookup_op_row(op: Op) -> Option<&'static OpRow> {
     OP_ROWS.iter().find(|r| r.op == op)
 }
 
-/// Every registered op, in the spec's declaration order.
-pub fn all_ops() -> Vec<Op> {
-    OP_ROWS.iter().map(|r| r.op).collect()
-}
 /// True when `wire` names a dialect the DDL generator targets.
 pub fn ddl_supported(wire: &str) -> bool {
     OP_DDL_DIALECTS.contains(&wire)

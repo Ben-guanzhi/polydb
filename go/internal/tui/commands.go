@@ -291,6 +291,24 @@ func cancelQueryCmd(a transport.Client, queryID string) tea.Cmd {
 	}
 }
 
+// blobFetchedMsg §5.2 旁路取回完成：id 为引用 UUID；err 非 nil 时 data 无效。
+type blobFetchedMsg struct {
+	id   string
+	data []byte
+	err  error
+}
+
+// getBlobCmd 经 transport 取回旁路大字段（Local 进程内 / Remote REST 二进制）。
+// 30s 上限防止超大字段在慢盘上拖死面板；超时按取回失败展示。
+func getBlobCmd(a transport.Client, connID, blobID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		data, err := a.GetBlob(ctx, connID, blobID)
+		return blobFetchedMsg{id: blobID, data: data, err: err}
+	}
+}
+
 // browseCmd 拉取一页表数据（服务端分页；M11 数据浏览）。req 携带过滤/排序/分页。
 func browseCmd(a transport.Client, id, schema, table string, req *protocol.TableRowsRequest) tea.Cmd {
 	return func() tea.Msg {

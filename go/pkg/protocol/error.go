@@ -56,4 +56,5 @@ const (
 	ErrCancelled           = "POLYDB_ERR_CANCELLED"
 	ErrUnauthorized        = "POLYDB_ERR_UNAUTHORIZED"
 	ErrReadOnly            = "POLYDB_ERR_READ_ONLY"
+	ErrBlobNotFound        = "POLYDB_ERR_BLOB_NOT_FOUND"
 )

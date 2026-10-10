@@ -58,6 +58,11 @@ pub trait Transport: Send + Sync {
         table: &str,
     ) -> CoreResult<String>;
 
+    // ─── §5.2 旁路大字段取回 ──────────────────────────────
+    /// 按 UUID 取回旁路大字段完整内容（当前阈值下整段返回，Range 留给 REST 层）。
+    /// 未知/过期引用 → `POLYDB_ERR_BLOB_NOT_FOUND`（前端映射固定文案）。
+    async fn get_blob(&self, id: ConnectionId, blob_id: &str) -> CoreResult<Vec<u8>>;
+
     // ─── 表数据浏览（M11）──────────────────────────────────
     async fn browse_rows(
         &self,
@@ -209,6 +214,12 @@ impl Transport for LocalTransport {
         table: &str,
     ) -> CoreResult<String> {
         self.app.create_table_sql(id, schema, table).await
+    }
+
+    async fn get_blob(&self, _id: ConnectionId, blob_id: &str) -> CoreResult<Vec<u8>> {
+        // blob store 挂在 AppCore 上、与连接无关（与 Go Local 忽略 connID 同构）；
+        // AppCore::get_blob 是同步用例（零序列化直读存储），与其它 sync 委托一致。
+        self.app.get_blob(blob_id)
     }
 
     // ─── 表数据浏览（M11）──────────────────────────────────

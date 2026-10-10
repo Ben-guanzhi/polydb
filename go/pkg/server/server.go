@@ -123,6 +123,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/connections/{id}/kv/keys/{key}", s.kvSetValue)
 	mux.HandleFunc("POST /api/connections/{id}/kv/exec", s.kvExecCommand)
 
+	mux.HandleFunc("GET /api/connections/{id}/blobs/{blob_id}", s.getBlob)
+
 	return logMiddleware(panicMiddleware(s.authMiddleware(mux)))
 }
 
@@ -735,6 +737,7 @@ var errToStatus = map[string]int{
 	protocol.ErrInvalidParam:        http.StatusBadRequest,
 	protocol.ErrTransactionNotFound: http.StatusNotFound,
 	protocol.ErrQueryNotFound:       http.StatusNotFound,
+	protocol.ErrBlobNotFound:        http.StatusNotFound,
 	protocol.ErrCancelled:           http.StatusRequestTimeout,
 	protocol.ErrTimeout:             http.StatusRequestTimeout,
 	protocol.ErrUnauthorized:        http.StatusUnauthorized,

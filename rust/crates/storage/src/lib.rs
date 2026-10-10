@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -7,11 +8,16 @@ use rusqlite::Connection as RusqliteConnection;
 mod connection_repo;
 pub use connection_repo::ConnectionRepository;
 
+pub mod blobs;
+pub use blobs::{BlobStore, BLOB_TTL};
+
 pub mod keyring;
 pub use keyring::{keyring_ref, FileKeyring, Keyring};
 
 pub struct Storage {
     conn: Arc<Mutex<RusqliteConnection>>,
+    /// 库文件所在目录：`blobs/` 等旁路资源的根（spec/encoding.md §5.2）。
+    data_dir: PathBuf,
 }
 
 impl Storage {
@@ -20,8 +26,14 @@ impl Storage {
             .map_err(|e| CoreError::Storage(format!("failed to open storage: {e}")))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
             .map_err(|e| CoreError::Storage(format!("pragma failed: {e}")))?;
+        let data_dir = Path::new(path)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."))
+            .to_path_buf();
         let storage = Self {
             conn: Arc::new(Mutex::new(conn)),
+            data_dir,
         };
         storage.init_schema()?;
         Ok(storage)
@@ -68,6 +80,11 @@ impl Storage {
             }
         }
         Ok(())
+    }
+
+    /// 库文件所在目录（`BlobStore` 定位用；`:memory:` 等无父目录时为 `.`）。
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
     }
 
     pub fn connections(&self) -> ConnectionRepository {

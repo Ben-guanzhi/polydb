@@ -7,6 +7,7 @@ import { CASE_MODES, FILTER_OPS, condToWire, emptyCondRow, opMeta, opSupported, 
 import { toCsv, toTsv, toJson, toNdjson, toMarkdown, toSqlInsert, toInClause, download } from '../lib/exporters';
 import ContextMenu, { type ContextMenuEntry } from './ContextMenu';
 import CellPreviewPanel from './CellPreview';
+import { asBlobValue, blobIdOfRef, blobLabel } from '../lib/blobValue';
 
 // ─── M11 表数据浏览器（behavior.md §13）：服务端分页/排序/过滤 ───
 
@@ -341,6 +342,27 @@ export default function TableDataView({ connId, kind, schema, table, onOpenSql, 
     });
   };
 
+  // 复制单元格：内联 $blob 直接给 base64（§5.1）；旁路引用先按 §5.2 取回再转 base64。
+  const copyCellValue = async (v: unknown) => {
+    const b = asBlobValue(v);
+    if (b && b.base64 !== undefined) {
+      await navigator.clipboard?.writeText(b.base64);
+      return;
+    }
+    if (b?.ref) {
+      const id = blobIdOfRef(b.ref);
+      if (!id) return;
+      try {
+        const r = await api.fetchBlob(connId, id);
+        await navigator.clipboard?.writeText(api.arrayBufferToBase64(r.data));
+      } catch (e) {
+        setError(api.blobFetchErrorMessage(e));
+      }
+      return;
+    }
+    await navigator.clipboard?.writeText(formatCell(v));
+  };
+
   const columns = result?.columns ?? [];
   const rows = result?.rows ?? [];
   const hasMore = result?.has_more ?? false;
@@ -609,6 +631,7 @@ export default function TableDataView({ connId, kind, schema, table, onOpenSql, 
         <CellPreviewPanel
           label={<>单元格预览 · 行 {cellPreview.ri + 1} · 列 <code>{columns[cellPreview.ci]?.name}</code> (<code>{columns[cellPreview.ci]?.type}</code>)</>}
           value={rows[cellPreview.ri]?.[cellPreview.ci] ?? null}
+          connId={connId}
           onClose={() => setCellPreview(null)}
         />
       )}
@@ -674,7 +697,7 @@ export default function TableDataView({ connId, kind, schema, table, onOpenSql, 
         const items: ContextMenuEntry[] = [
           { header: `${col?.name ?? ''} (${col?.type ?? ''})` },
           { key: 'preview', label: '预览单元格', icon: '🔍', onClick: () => { setCellPreview({ ri: cellMenu.ri, ci: cellMenu.ci }); setCellMenu(null); } },
-          { key: 'copy', label: '复制单元格内容', icon: '⧉', onClick: () => { const b = asBlob(cellVal); void navigator.clipboard?.writeText(b?.base64 ?? formatCell(cellVal)); setCellMenu(null); } },
+          { key: 'copy', label: '复制单元格内容', icon: '⧉', onClick: () => { setCellMenu(null); void copyCellValue(cellVal); } },
         ];
         return <ContextMenu x={cellMenu.x} y={cellMenu.y} items={items} onClose={() => setCellMenu(null)} width={220} />;
       })()}
@@ -684,21 +707,10 @@ export default function TableDataView({ connId, kind, schema, table, onOpenSql, 
 
 function formatCell(v: unknown): string {
   if (v === null || v === undefined) return '';
-  const blob = asBlob(v);
-  if (blob) return `<blob ${blob.len} bytes>`;
+  const blob = asBlobValue(v);
+  if (blob) return blobLabel(blob.len);
   if (typeof v === 'object') {
     try { return JSON.stringify(v); } catch { return String(v); }
   }
   return String(v);
-}
-
-// spec/encoding.md §5 的 $blob 内联编码：{"$blob":{"len":N,"base64":"..."}}
-function asBlob(v: unknown): { len: number; base64?: string } | null {
-  if (typeof v !== 'object' || v === null) return null;
-  const inner = (v as Record<string, unknown>)['$blob'];
-  if (typeof inner !== 'object' || inner === null) return null;
-  const len = (inner as Record<string, unknown>)['len'];
-  if (typeof len !== 'number') return null;
-  const base64 = (inner as Record<string, unknown>)['base64'];
-  return { len, base64: typeof base64 === 'string' ? base64 : undefined };
 }

@@ -28,6 +28,16 @@ describe('fmt / cellClass', () => {
     expect(cellClass('42', col('s', 'varchar'))).toBe('text');
     expect(cellClass(null)).toBe('null');
   });
+
+  it('$blob 内联与旁路引用统一占位标签（encoding.md §5.1）', () => {
+    expect(fmt({ $blob: { len: 3, base64: 'AAEC' } })).toBe('<blob 3 bytes>');
+    expect(fmt({ $blob: { len: 2097153, ref: '$polydb_blob:00000000-0000-0000-0000-000000000000' } }))
+      .toBe('<blob 2097153 bytes>');
+    expect(cellClass({ $blob: { len: 3, base64: 'AAEC' } })).toBe('blob');
+    expect(cellClass({ $blob: { len: 2097153, ref: '$polydb_blob:x' } })).toBe('blob');
+    // 非 $blob 对象仍走 JSON
+    expect(fmt({ other: 1 })).toBe('{"other":1}');
+  });
 });
 
 describe('buildInspectorFields', () => {

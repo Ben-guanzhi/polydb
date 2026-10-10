@@ -98,6 +98,7 @@ func (m *model) viewHelp() []helpEntry {
 	case viewResults:
 		if m.cellFull {
 			return []helpEntry{
+				{"g", "取回大字段（旁路引用）"},
 				{"Enter", "刷新完整值"},
 				{"Esc", "关闭完整值（再按返回查询）"},
 			}
@@ -134,6 +135,7 @@ func (m *model) viewHelp() []helpEntry {
 		}
 		if m.brFull {
 			return []helpEntry{
+				{"g", "取回大字段（旁路引用）"},
 				{"Enter", "刷新完整值"},
 				{"Esc", "关闭完整值（再按返回列表）"},
 			}

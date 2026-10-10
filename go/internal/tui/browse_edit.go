@@ -45,7 +45,7 @@ func (m *model) browseRowID(ri int) string {
 	}
 	parts := make([]string, 0, len(m.brPK))
 	for _, pk := range m.brPK {
-		var v protocol.Value = protocol.NewNullValue()
+		var v = protocol.NewNullValue()
 		if ci := colIndexOf(r.Columns, pk); ci >= 0 && ci < len(r.Rows[ri]) {
 			v = r.Rows[ri][ci]
 		}
@@ -62,7 +62,7 @@ func (m *model) browseBuildRow(ri int) changes.Row {
 	}
 	row := make(changes.Row, 0, len(r.Columns))
 	for j, c := range r.Columns {
-		var v protocol.Value = protocol.NewNullValue()
+		var v = protocol.NewNullValue()
 		if j < len(r.Rows[ri]) {
 			v = r.Rows[ri][j]
 		}
@@ -329,7 +329,7 @@ func (m *model) reviewView() string {
 		b.WriteString(line + "\n")
 	}
 	if rem := len(m.brStmts) - (start + avail); rem > 0 {
-		b.WriteString(fmt.Sprintf("↓ 下方还有 %d", rem))
+		fmt.Fprintf(&b, "↓ 下方还有 %d", rem)
 	}
 	return b.String()
 }

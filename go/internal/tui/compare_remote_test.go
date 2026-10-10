@@ -143,11 +143,11 @@ func TestCompareWizardOverRemoteTransport(t *testing.T) {
 	}
 
 	// ① 选期望侧 → Enter 比对（这一脚踩的是 POST /api/schema/diff）
-	m, cmd := m.Update(runeKey('j'))
+	m, _ = m.Update(runeKey('j'))
 	if got := md(m).connName(md(m).cmpTargetID()); got != tgtName {
 		t.Fatalf("cursor on %q want %q", got, tgtName)
 	}
-	m, cmd = m.Update(key(tea.KeyEnter))
+	m, cmd := m.Update(key(tea.KeyEnter))
 	m = drive(t, m, cmd)
 	if md(m).cmpStage != cmpStageDiff {
 		t.Fatalf("after diff: stage=%v status=%s", md(m).cmpStage, md(m).status)

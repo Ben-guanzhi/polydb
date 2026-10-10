@@ -30,8 +30,8 @@ use crate::profile::{self, ProfileColumn};
 use crate::tabs::{self, ActiveView};
 use crate::theme::Theme;
 use crate::util::{
-    char_ceil, char_floor, col_to_byte, edit_line, line_bounds, split_statements, word_at,
-    word_ceil, word_floor,
+    blob_fetch_err_text, char_ceil, char_floor, col_to_byte, edit_line, line_bounds,
+    split_statements, word_at, word_ceil, word_floor,
 };
 
 // ─── IO 桥 ─────────────────────────────────────────────────
@@ -625,6 +625,13 @@ pub struct PolyDBApp {
     pub(crate) compare: Option<CompareState>,
     pub(crate) cmp_focus: FocusHandle,
 
+    // ── §5.2 旁路大字段取回（预览/Inspector 单槽缓存）──
+    /// 当前取回目标（引用 UUID）。展示块仅在单元格引用与此相等时显示 data/err。
+    pub(crate) blob_key: Option<String>,
+    pub(crate) blob_loading: bool,
+    pub(crate) blob_data: Option<Vec<u8>>,
+    pub(crate) blob_err: Option<String>,
+
     // ── 过滤栏值输入（复用单一聚焦句柄；编辑目标定位到当前表 tab 的某草稿某字段）──
     pub(crate) filter_focus: FocusHandle,
     /// (草稿行下标, 字段：0=值 1=第二值 2=IN列表)
@@ -720,6 +727,10 @@ impl PolyDBApp {
             explain: None,
             compare: None,
             cmp_focus: cx.focus_handle(),
+            blob_key: None,
+            blob_loading: false,
+            blob_data: None,
+            blob_err: None,
             filter_focus: cx.focus_handle(),
             editing: None,
             edit_cursor: 0,
@@ -785,6 +796,39 @@ impl PolyDBApp {
             });
         })
         .detach();
+    }
+
+    /// 取回 §5.2 旁路大字段（单槽：新取回顶掉旧目标；过期回包按 blob_key 丢弃）。
+    pub(crate) fn fetch_blob(&mut self, conn: ConnectionId, uuid: String, cx: &mut Context<Self>) {
+        if self.blob_loading {
+            return;
+        }
+        self.blob_key = Some(uuid.clone());
+        self.blob_loading = true;
+        self.blob_data = None;
+        self.blob_err = None;
+        cx.notify();
+        let key = uuid.clone();
+        self.io(
+            cx,
+            move |t| Box::pin(async move { t.get_blob(conn, &uuid).await }),
+            move |this, out, cx| {
+                this.blob_loading = false;
+                if this.blob_key.as_deref() == Some(key.as_str()) {
+                    match out {
+                        Ok(bytes) => {
+                            this.blob_data = Some(bytes);
+                            this.blob_err = None;
+                        }
+                        Err(e) => {
+                            this.blob_data = None;
+                            this.blob_err = Some(blob_fetch_err_text(&e));
+                        }
+                    }
+                }
+                cx.notify();
+            },
+        );
     }
 
     pub(crate) fn sel_id(&self) -> Option<ConnectionId> {
