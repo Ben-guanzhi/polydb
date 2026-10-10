@@ -95,25 +95,17 @@ pub(crate) fn group_by_phase(entries: &[SchemaDiffEntry]) -> Vec<PhaseGroup> {
 
 /// 服务端给的默认勾选集（破坏性条目默认不勾，除非 select_destructive）。
 pub(crate) fn default_selection(entries: &[SchemaDiffEntry]) -> Vec<String> {
-    entries
-        .iter()
-        .filter(|e| e.selected)
-        .map(|e| e.id.clone())
-        .collect()
+    filter_entries(entries, |e| e.selected)
 }
 
 /// 计划里的全部条目 id（全选）。
 pub(crate) fn all_ids(entries: &[SchemaDiffEntry]) -> Vec<String> {
-    entries.iter().map(|e| e.id.clone()).collect()
+    filter_entries(entries, |_| true)
 }
 
 /// 全部非破坏性条目 id（「只勾非破坏」）。
 pub(crate) fn non_destructive_ids(entries: &[SchemaDiffEntry]) -> Vec<String> {
-    entries
-        .iter()
-        .filter(|e| !e.destructive)
-        .map(|e| e.id.clone())
-        .collect()
+    filter_entries(entries, |e| !e.destructive)
 }
 
 /// 勾选/取消一条，返回新集合。
@@ -128,11 +120,8 @@ pub(crate) fn toggle_entry(sel: &[String], id: &str) -> Vec<String> {
 /// 把勾选集还原成计划顺序的 id 数组：服务端按重算出的计划校验，顺序无关，
 /// 但保序去重能让三端文案一致。
 pub(crate) fn selected_ids(entries: &[SchemaDiffEntry], sel: &[String]) -> Vec<String> {
-    entries
-        .iter()
-        .filter(|e| sel.iter().any(|s| s == &e.id))
-        .map(|e| e.id.clone())
-        .collect()
+    let sel_set: std::collections::HashSet<&String> = sel.iter().collect();
+    filter_entries(entries, |e| sel_set.contains(&e.id))
 }
 
 /// 某表的全部条目。
@@ -141,6 +130,18 @@ pub(crate) fn entries_of_table(entries: &[SchemaDiffEntry], table: &str) -> Vec<
         .iter()
         .filter(|e| same_table(&e.table, table))
         .cloned()
+        .collect()
+}
+
+/// 通用条目过滤：按谓词筛选并提取 id（SICP ch1 高阶函数：消除手写循环重复）。
+fn filter_entries<F>(entries: &[SchemaDiffEntry], pred: F) -> Vec<String>
+where
+    F: Fn(&SchemaDiffEntry) -> bool,
+{
+    entries
+        .iter()
+        .filter(|e| pred(e))
+        .map(|e| e.id.clone())
         .collect()
 }
 

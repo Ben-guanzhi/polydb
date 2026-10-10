@@ -162,14 +162,16 @@ func ValuesEqual(a, b protocol.Value) bool {
 // ─── 变更队列 ──────────────────────────────────────────────
 
 // Queue 每表一个：同格重复编辑合并（保留最初旧值）、改回原值自动塌缩。
+// index 维护 keyOf(rowID,type) → changes 下标，使 find 从 O(n) 降为 O(1)。
 type Queue struct {
 	changes   []RowChange
+	index     map[string]int
 	undoStack []undoOp
 	seq       int64
 }
 
 // New 构造空队列。
-func New() *Queue { return &Queue{} }
+func New() *Queue { return &Queue{index: make(map[string]int)} }
 
 // Size 返回已排队行数。
 func (q *Queue) Size() int { return len(q.changes) }
@@ -184,10 +186,8 @@ func (q *Queue) All() []RowChange {
 
 func (q *Queue) find(rowID string, t ChangeType) int {
 	k := keyOf(rowID, t)
-	for i := range q.changes {
-		if keyOf(q.changes[i].RowID, q.changes[i].Type) == k {
-			return i
-		}
+	if i, ok := q.index[k]; ok {
+		return i
 	}
 	return -1
 }
@@ -234,6 +234,7 @@ func (q *Queue) AddCellChange(rowID, column string, oldValue, newValue protocol.
 			Sequence:    q.seq,
 		})
 		idx = len(q.changes) - 1
+		q.index[key] = idx
 	}
 	ch := &q.changes[idx]
 	orig := rowGet(ch.OriginalRow, column)
@@ -263,36 +264,39 @@ func (q *Queue) AddCellChange(rowID, column string, oldValue, newValue protocol.
 // AddInsert 追加一行插入。
 func (q *Queue) AddInsert(rowID string, row Row) {
 	q.seq++
-	q.upsert(RowChange{
+	ch := RowChange{
 		RowID:    rowID,
 		Type:     Insert,
 		NewRow:   row,
 		Sequence: q.seq,
-	})
+	}
+	q.changes = append(q.changes, ch)
+	q.index[keyOf(rowID, Insert)] = len(q.changes) - 1
 	q.undoStack = append(q.undoStack, undoOp{isRow: true, key: keyOf(rowID, Insert)})
 }
 
 // AddDelete 追加一行删除。
 func (q *Queue) AddDelete(rowID string, originalRow Row) {
 	q.seq++
-	q.upsert(RowChange{
+	ch := RowChange{
 		RowID:       rowID,
 		Type:        Delete,
 		OriginalRow: originalRow,
 		Sequence:    q.seq,
-	})
+	}
+	q.changes = append(q.changes, ch)
+	q.index[keyOf(rowID, Delete)] = len(q.changes) - 1
 	q.undoStack = append(q.undoStack, undoOp{isRow: true, key: keyOf(rowID, Delete)})
 }
 
 func (q *Queue) upsert(ch RowChange) {
 	k := keyOf(ch.RowID, ch.Type)
-	for i := range q.changes {
-		if keyOf(q.changes[i].RowID, q.changes[i].Type) == k {
-			q.changes[i] = ch
-			return
-		}
+	if i, ok := q.index[k]; ok {
+		q.changes[i] = ch
+		return
 	}
 	q.changes = append(q.changes, ch)
+	q.index[k] = len(q.changes) - 1
 }
 
 func (q *Queue) removeByKey(key string) {
@@ -303,6 +307,11 @@ func (q *Queue) removeByKey(key string) {
 		}
 	}
 	q.changes = out
+	// 重建索引（删除操作不频繁，重建代价可接受）
+	q.index = make(map[string]int)
+	for i, c := range q.changes {
+		q.index[keyOf(c.RowID, c.Type)] = i
+	}
 }
 
 // Undo 撤销最近一次操作：cell 移除该格改动（全空则整行）；row 移除整条插入 / 删除。
@@ -318,19 +327,21 @@ func (q *Queue) Undo() bool {
 		q.removeByKey(op.key)
 		return len(q.changes) < before
 	}
-	i := -1
-	for j := range q.changes {
-		if keyOf(q.changes[j].RowID, q.changes[j].Type) == op.key {
-			i = j
-			break
-		}
+	i, ok := q.index[op.key]
+	if !ok {
+		return false
 	}
-	if i < 0 || q.changes[i].Type != Update {
+	if q.changes[i].Type != Update {
 		return false
 	}
 	q.changes[i].CellChanges = retainExceptColumn(q.changes[i].CellChanges, op.column)
 	if len(q.changes[i].CellChanges) == 0 {
 		q.changes = append(q.changes[:i], q.changes[i+1:]...)
+		// 重建索引（删除操作不频繁）
+		q.index = make(map[string]int)
+		for j, c := range q.changes {
+			q.index[keyOf(c.RowID, c.Type)] = j
+		}
 	}
 	return true
 }
@@ -338,6 +349,7 @@ func (q *Queue) Undo() bool {
 // Clear 清空队列与撤销栈。
 func (q *Queue) Clear() {
 	q.changes = nil
+	q.index = make(map[string]int)
 	q.undoStack = nil
 }
 
