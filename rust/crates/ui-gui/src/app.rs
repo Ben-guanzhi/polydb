@@ -2769,7 +2769,8 @@ impl PolyDBApp {
 
     // ─── D3 执行计划（语义对齐 Web lib/explain.ts / TUI pkg/explain）───
 
-    /// 取编辑器第一条语句，按方言包成 EXPLAIN 执行，结果渲染为计划树/表格文本。
+    /// 取编辑器第一条语句，按方言包成 EXPLAIN 依次执行，结果渲染为计划树/表格文本。
+    /// Oracle 需要两条（EXPLAIN PLAN 写入 session + DBMS_XPLAN.DISPLAY 取回）。
     pub(crate) fn run_explain(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.sel_id() else {
             self.status = "请先选择连接".into();
@@ -2783,25 +2784,39 @@ impl PolyDBApp {
         }
         let Some(kind) = self.sel_kind() else { return };
         let sql = self.sql.trim().to_string();
-        let esql = split_statements(&sql)
+        let mut stmts = split_statements(&sql)
             .into_iter()
             .next()
-            .map(|s| crate::explain::build_sql(&s, kind))
+            .map(|s| crate::explain::explain_statements(&s, kind))
             .unwrap_or_default();
-        if esql.is_empty() {
+        if stmts.is_empty() {
             self.status = "SQL 为空".into();
             cx.notify();
             return;
         }
+        let last = stmts.pop().unwrap();
+        let shown = stmts
+            .iter()
+            .map(String::as_str)
+            .chain([last.as_str()])
+            .collect::<Vec<_>>()
+            .join(";\n");
         self.active = ActiveView::Workbench;
         self.busy = true;
         self.preview = None;
         self.ctx_menu = None;
         cx.notify();
-        let shown = esql.clone();
         self.io(
             cx,
-            move |t| Box::pin(async move { t.execute(id, &esql, &[]).await }),
+            move |t| {
+                Box::pin(async move {
+                    // 前几条只负责把计划写进 session，返回行数没有意义。
+                    for s in &stmts {
+                        t.execute(id, s, &[]).await?;
+                    }
+                    t.execute(id, &last, &[]).await
+                })
+            },
             move |this, out, cx| {
                 this.busy = false;
                 match out {

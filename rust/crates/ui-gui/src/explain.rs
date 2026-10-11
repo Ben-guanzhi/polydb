@@ -1,7 +1,10 @@
 //! 执行计划：按方言包 EXPLAIN 语句 + 把结果解析成计划树（纯函数，无 IO）。
 //!
-//! 语义与 Go `pkg/explain`、Web `lib/explain.ts` 对齐：SQLite 用 id/parent 行树，
-//! PostgreSQL / MySQL 解析 JSON 计划，其余（含解析失败）退化为「列 | 行」表格文本。
+//! SQLite 用 id/parent 行树，PostgreSQL / MySQL 解析 JSON 计划，Oracle 解析
+//! DBMS_XPLAN 的 ASCII 表格；其余（含解析失败）退化为「列 | 行」表格文本。
+//! Oracle 与其他方言的差异：需要两条语句（EXPLAIN PLAN 写入 session + DISPLAY
+//! 取回），而 Go `pkg/explain`、Web `lib/explain.ts` 仍是单条 EXPLAIN PLAN，
+//! 只回一行 "Statement explained."——见 explain_statements 的注释。
 
 use serde_json::{Map, Value as Json};
 
@@ -73,24 +76,30 @@ fn node_label(n: &Node) -> String {
     s
 }
 
-/// 按方言把编辑器里的 SQL 包成 EXPLAIN 语句（注释与尾分号先剥）。
-/// 空输入返回空串；已经以 EXPLAIN 开头的原样返回。
-pub(crate) fn build_sql(raw: &str, kind: DatabaseKind) -> String {
+/// 按方言给出需要依次执行的 EXPLAIN 语句（注释与尾分号先剥）。
+/// 多数方言一条；Oracle 没有 EXPLAIN 语句，要先 EXPLAIN PLAN 把计划写进 session，
+/// 再用 DBMS_XPLAN.DISPLAY 取回——DISPLAY 不带 plan_id/statement_id 时显示本
+/// session 最近一次 EXPLAIN PLAN 的计划，所以顺序不能反。
+/// 空输入返回空 vec；已经以 EXPLAIN 开头的原样返回。
+pub(crate) fn explain_statements(raw: &str, kind: DatabaseKind) -> Vec<String> {
     let clean = strip_comments(raw)
         .trim_matches(|c| " \t\r\n;".contains(c))
         .to_string();
     if clean.is_empty() {
-        return String::new();
+        return Vec::new();
     }
     if starts_with_explain(&clean) {
-        return clean;
+        return vec![clean];
     }
     match kind {
-        DatabaseKind::Sqlite => format!("EXPLAIN QUERY PLAN {clean}"),
-        DatabaseKind::Postgres => format!("EXPLAIN (FORMAT JSON) {clean}"),
-        DatabaseKind::MySql => format!("EXPLAIN FORMAT=JSON {clean}"),
-        DatabaseKind::Oracle => format!("EXPLAIN PLAN FOR {clean}"),
-        _ => format!("EXPLAIN {clean}"),
+        DatabaseKind::Sqlite => vec![format!("EXPLAIN QUERY PLAN {clean}")],
+        DatabaseKind::Postgres => vec![format!("EXPLAIN (FORMAT JSON) {clean}")],
+        DatabaseKind::MySql => vec![format!("EXPLAIN FORMAT=JSON {clean}")],
+        DatabaseKind::Oracle => vec![
+            format!("EXPLAIN PLAN FOR {clean}"),
+            "SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY(NULL, NULL, 'TYPICAL'))".into(),
+        ],
+        _ => vec![format!("EXPLAIN {clean}")],
     }
 }
 
@@ -174,12 +183,316 @@ pub(crate) fn render(res: &QueryResult, kind: DatabaseKind) -> Render {
         DatabaseKind::Sqlite => sqlite_tree(res),
         DatabaseKind::Postgres => pg_tree(&first_cell(res)),
         DatabaseKind::MySql => mysql_tree(&first_cell(res)),
+        DatabaseKind::Oracle => oracle_tree(res),
         _ => None,
     };
     match tree {
         Some(nodes) if !nodes.is_empty() => Render::Tree(nodes),
         _ => Render::Text(table_text(res)),
     }
+}
+
+// ─── Oracle：EXPLAIN PLAN + DBMS_XPLAN.DISPLAY 文本 ─────────
+//
+// 回传的是单列 plan_table_output，整段计划是带换行的 ASCII 表格：列名行在
+// 下划线分隔线之间，Operation 列的缩进（每层 2 空格）即树的深度，Id 列为空
+// 的续行是 Predicate Information 之类的条件说明。
+
+/// Oracle 算子说明：逐行转录自 PL/SQL Developer 17 随工具发行的 PlanDesc.cfg
+/// （47 条，含原文拼写）。键归一化为大写并去掉空格与连字符，所以 DBMS_XPLAN
+/// 的 `UNION ALL`（两个空格）能命中 `UNION-ALL`。
+const PLAN_DESC: [(&str, &str); 47] = [
+    ("ANDEQUAL", "Merge sorted lists returned by indexes"),
+    ("BITMAPCONVERSIONCOUNT", "Return the number of ROWIDS"),
+    (
+        "BITMAPCONVERSIONFROMROWIDS",
+        "Convert ROWIDS to bitmap represantations",
+    ),
+    (
+        "BITMAPCONVERSIONTOROWIDS",
+        "Convert bitmap represantations to ROWIDS",
+    ),
+    ("BITMAPINDEXFULLSCAN", "Scan the complete bitmap"),
+    (
+        "BITMAPINDEXRANGESCAN",
+        "Scan the bitmap for a range of values",
+    ),
+    (
+        "BITMAPINDEXSINGLEVALUE",
+        "Scan the bitmap for a single value",
+    ),
+    ("BITMAPMERGE", "Merge multiple bitmaps into one bitmap"),
+    (
+        "BITMAPMINUS",
+        "Subtract the bits from one bitmap from another",
+    ),
+    ("BITMAPOR", "Perform a bitwise OR operation on two bitmaps"),
+    (
+        "CONCATENATION",
+        "Concatenate result sets without elimination of duplicates",
+    ),
+    ("CONNECTBY", "Recursively join a table to itself"),
+    ("COUNT", "Implicit use of the ROWNUM pseudo column"),
+    ("COUNTSTOPKEY", "Explicit use of the ROWNUM pseudo column"),
+    (
+        "FILTER",
+        "Test WHERE clause condition without using an index",
+    ),
+    ("FIRSTROW", "Return only the first row of a query"),
+    ("FORUPDATE", "Place a row-level lock"),
+    (
+        "HASHJOIN",
+        "Join one in-memory table to another table using a hash key",
+    ),
+    (
+        "HASHOUTERJOIN",
+        "Join one in-memory table to another table using a hash key",
+    ),
+    ("INDEXFULLSCAN", "Select all values from an index"),
+    (
+        "INDEXRANGESCAN",
+        "Select a range of values from an index in ascending order",
+    ),
+    (
+        "INDEXRANGESCANDESCENDING",
+        "Select a range of values from an index in descending order",
+    ),
+    (
+        "INDEXUNIQUESCAN",
+        "Select a unique value from a unique index",
+    ),
+    (
+        "INLISTITERATORCONCATENATED",
+        "Iterate over the operation below",
+    ),
+    (
+        "INTERSECTION",
+        "Merge result sets returned by queries for an INTERSECT clause",
+    ),
+    (
+        "MERGEJOIN",
+        "Join tables by merging sorted lists of records from each table",
+    ),
+    (
+        "MERGEJOINCARTESIAN",
+        "Join tables by merging sorted lists of records from each table",
+    ),
+    (
+        "MERGEJOINOUTER",
+        "Join tables by merging sorted lists of records from each table",
+    ),
+    (
+        "MINUS",
+        "Return rows from one query that are not present in a second query",
+    ),
+    (
+        "NESTEDLOOPS",
+        "Join two tables where at least one index is used",
+    ),
+    (
+        "NESTEDLOOPOUTER",
+        "Join two tables where at least one index is used",
+    ),
+    (
+        "PROJECTION",
+        "Return a single set of records from multiple queries",
+    ),
+    (
+        "REMOTE",
+        "Send an SQL statement to a remote database via a database link",
+    ),
+    ("SEQUENCE", "Access a NEXTVAL or CURRVAL of a sequence"),
+    (
+        "SORTAGGREGATE",
+        "Sort a result set for an aggregation function (MIN, MAX, ...)",
+    ),
+    ("SORTGROUPBY", "Sort a result set for a GROUP BY clause"),
+    (
+        "SORTJOIN",
+        "Sort a set of records for a MERGE JOIN operation",
+    ),
+    ("SORTORDERBY", "Sort a result set for an ORDER BY clause"),
+    ("SORTUNIQUE", "Sort a result set and eliminate duplicates"),
+    (
+        "TABLEACCESSBYINDEXROWID",
+        "Return a single row based on its ROWID",
+    ),
+    (
+        "TABLEACCESSBYROWID",
+        "Return a single row based on its ROWID",
+    ),
+    ("TABLEACCESSCLUSTER", "Return rows based on a cluster key"),
+    ("TABLEACCESSFULL", "Return all rows from a table"),
+    (
+        "TABLEACCESSHASH",
+        "Return a single row based on its hash key",
+    ),
+    ("UNION", "Concatenate result sets and elimnate duplicates"),
+    (
+        "UNIONALL",
+        "Concatenate result sets without eliminating duplicates",
+    ),
+    ("VIEW", "Resolve view and return the results"),
+];
+
+/// 算子说明查表：大小写不敏感，忽略空格与连字符。
+fn plan_desc(op: &str) -> Option<&'static str> {
+    let key: String = op
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    PLAN_DESC.iter().find(|(k, _)| *k == key).map(|(_, v)| *v)
+}
+
+fn oracle_tree(res: &QueryResult) -> Option<Vec<Node>> {
+    // DBMS_XPLAN 输出是单列 plan_table_output，整段计划带换行；驱动可能整段
+    // 塞在一格里，也可能已按行拆开，两种形状都按换行拼回来。
+    let mut raw = String::new();
+    for r in &res.rows {
+        for v in r {
+            raw.push_str(&cell_of(v));
+            raw.push('\n');
+        }
+    }
+    parse_oracle_plan(&raw)
+}
+
+/// 解析 DBMS_XPLAN 的 ASCII 表格为计划树。
+fn parse_oracle_plan(raw: &str) -> Option<Vec<Node>> {
+    let mut cols: Option<Vec<(usize, String)>> = None;
+    let mut flat: Vec<(usize, Node)> = Vec::new();
+    // 首行 Operation 列的前导空格作为基准：DBMS_XPLAN 的 `| ` 分隔符会占掉一格，
+    // 而有的驱动已经剥掉了这一格，两种形状都要能算出同样的相对深度。
+    let mut base: Option<usize> = None;
+
+    for line in raw.lines() {
+        let t = line.trim();
+        if !t.starts_with('|') {
+            continue;
+        }
+        let mut cells: Vec<&str> = t.split('|').skip(1).collect();
+        if cells.last().map(|c| c.trim()) == Some("") {
+            cells.pop();
+        }
+        let ops: Vec<&str> = cells.iter().map(|c| c.trim()).collect();
+
+        // 列名行：记下各列下标，后面按名取值。
+        if cols.is_none() && ops.iter().any(|c| c.eq_ignore_ascii_case("operation")) {
+            cols = Some(
+                ops.iter()
+                    .enumerate()
+                    .map(|(i, c)| (i, c.to_string()))
+                    .collect(),
+            );
+            continue;
+        }
+        let Some(cols) = &cols else { continue };
+        let col = |name: &str| -> Option<usize> {
+            cols.iter()
+                .find(|(_, n)| n.eq_ignore_ascii_case(name))
+                .map(|(i, _)| *i)
+        };
+        let Some(i_op) = col("operation") else {
+            continue;
+        };
+        if i_op >= ops.len() {
+            continue;
+        }
+
+        // Id 列为空的续行：Predicate Information 的条件说明，挂到上一个节点。
+        if ops.first().is_some_and(|s| s.is_empty()) {
+            if let Some(last) = flat.last_mut() {
+                if let Some(msg) = ops.get(1).copied().filter(|s| predicate_detail(s)) {
+                    last.1.detail = join(&last.1.detail, msg);
+                }
+            }
+            continue;
+        }
+
+        let lead = cells[i_op].len() - cells[i_op].trim_start().len();
+        let base = *base.get_or_insert(lead);
+        let depth = lead.saturating_sub(base) / 2;
+        if depth >= MAX_DEPTH {
+            continue;
+        }
+        let op = ops[i_op];
+        let name = match col("options")
+            .and_then(|i| ops.get(i))
+            .filter(|s| !s.is_empty())
+        {
+            Some(o) => format!("{op} {o}"),
+            None => op.to_string(),
+        };
+        let mut n = Node {
+            name,
+            ..Default::default()
+        };
+        if let Some(i) = col("name") {
+            if let Some(s) = ops.get(i).filter(|s| !s.is_empty()) {
+                n.detail = format!("on {s}");
+            }
+        }
+        if let Some(i) = col("rows") {
+            if let Some(s) = ops.get(i).filter(|s| !s.is_empty()) {
+                n.rows = format!("rows≈{s}");
+            }
+        }
+        if let Some(i) = col("cost") {
+            if let Some(s) = ops.get(i).filter(|s| !s.is_empty()) {
+                n.cost = format!("cost={s}");
+            }
+        }
+        if let Some(d) = plan_desc(op) {
+            n.detail = join(&n.detail, d);
+        }
+
+        flat.push((depth, n));
+    }
+
+    let roots = build_oracle_tree(&mut flat);
+    if roots.is_empty() {
+        None
+    } else {
+        Some(roots)
+    }
+}
+
+/// 把「深度 + 节点」的扁平序列还原成树。
+fn build_oracle_tree(flat: &mut [(usize, Node)]) -> Vec<Node> {
+    let mut roots = Vec::new();
+    let mut cur = 0;
+    while cur < flat.len() {
+        let d = flat[cur].0;
+        roots.push(take_subtree(flat, &mut cur, d));
+    }
+    roots
+}
+
+/// 从游标处取走 depth == d 的那棵子树（含其后代）。
+fn take_subtree(flat: &mut [(usize, Node)], cur: &mut usize, d: usize) -> Node {
+    let pos = *cur;
+    let mut node = std::mem::take(&mut flat[pos].1);
+    *cur += 1;
+    let mut kids = Vec::new();
+    while *cur < flat.len() && flat[*cur].0 > d {
+        let child_depth = flat[*cur].0;
+        kids.push(take_subtree(flat, cur, child_depth));
+    }
+    node.children = kids;
+    node
+}
+
+/// 判断是否为 `5 - filter(...)` 形式的条件说明（区别于标题行与分隔线）。
+fn predicate_detail(s: &str) -> bool {
+    let Some(dash) = s.find('-') else {
+        return false;
+    };
+    let (num, rest) = (&s[..dash], s[dash + 1..].trim_start());
+    !num.trim().is_empty()
+        && num.trim().chars().all(|c| c.is_ascii_digit())
+        && !rest.is_empty()
+        && !rest.starts_with('-')
 }
 
 // ─── SQLite：id / parent / detail 行树 ───────────────────────
@@ -614,30 +927,49 @@ mod tests {
     }
 
     #[test]
-    fn build_sql_wraps_per_dialect() {
-        assert_eq!(build_sql("  ", Sqlite), "");
+    fn explain_statements_wraps_per_dialect() {
+        assert!(explain_statements("  ", Sqlite).is_empty());
         assert_eq!(
-            build_sql("select 1;", Sqlite),
-            "EXPLAIN QUERY PLAN select 1"
+            explain_statements("select 1;", Sqlite),
+            vec!["EXPLAIN QUERY PLAN select 1".to_string()]
         );
         assert_eq!(
-            build_sql("SELECT 1", Postgres),
-            "EXPLAIN (FORMAT JSON) SELECT 1"
+            explain_statements("SELECT 1", Postgres),
+            vec!["EXPLAIN (FORMAT JSON) SELECT 1".to_string()]
         );
-        assert_eq!(build_sql("SELECT 1", MySql), "EXPLAIN FORMAT=JSON SELECT 1");
-        assert_eq!(build_sql("SELECT 1", Oracle), "EXPLAIN PLAN FOR SELECT 1");
-        assert_eq!(build_sql("SELECT 1", Mssql), "EXPLAIN SELECT 1");
+        assert_eq!(
+            explain_statements("SELECT 1", MySql),
+            vec!["EXPLAIN FORMAT=JSON SELECT 1".to_string()]
+        );
+        assert_eq!(
+            explain_statements("SELECT 1", Mssql),
+            vec!["EXPLAIN SELECT 1".to_string()]
+        );
         // 已经带 EXPLAIN 的不重复包裹；大小写与前缀词都要认。
-        assert_eq!(build_sql("explain select 1", Sqlite), "explain select 1");
-        assert_eq!(build_sql("EXPLAINX", Sqlite), "EXPLAIN QUERY PLAN EXPLAINX");
+        assert_eq!(
+            explain_statements("explain select 1", Sqlite),
+            vec!["explain select 1".to_string()]
+        );
+        assert_eq!(
+            explain_statements("EXPLAINX", Sqlite),
+            vec!["EXPLAIN QUERY PLAN EXPLAINX".to_string()]
+        );
+        // Oracle 两条：先写进 session，再用 DISPLAY 取回，顺序不能反。
+        let o = explain_statements("SELECT * FROM t", Oracle);
+        assert_eq!(o.len(), 2);
+        assert_eq!(o[0], "EXPLAIN PLAN FOR SELECT * FROM t");
+        assert_eq!(
+            o[1],
+            "SELECT * FROM TABLE(DBMS_XPLAN.DISPLAY(NULL, NULL, 'TYPICAL'))"
+        );
     }
 
     #[test]
-    fn build_sql_strips_comments_keeping_literals() {
+    fn explain_statements_strips_comments_keeping_literals() {
         let sql = "-- 注释\nSELECT '--不是注释' /* 块 */ FROM t;\n";
         assert_eq!(
-            build_sql(sql, Sqlite),
-            "EXPLAIN QUERY PLAN SELECT '--不是注释'  FROM t"
+            explain_statements(sql, Sqlite),
+            vec!["EXPLAIN QUERY PLAN SELECT '--不是注释'  FROM t".to_string()]
         );
     }
 
@@ -723,7 +1055,7 @@ mod tests {
 
     #[test]
     fn unparseable_falls_back_to_table_text() {
-        // PG 但首格不是 JSON → 表格文本；MSSQL/Oracle 一律表格文本。
+        // PG 但首格不是 JSON、Oracle 但没有列名行 → 表格文本；MSSQL 一律表格文本。
         let r = res(
             &["id", "parent", "detail"],
             vec![vec![
@@ -739,5 +1071,98 @@ mod tests {
         assert_eq!(render(&r, Mssql).lines()[1], "1 | 0 | SCAN");
         let empty = res(&["a"], vec![]);
         assert_eq!(render(&empty, Sqlite).lines(), vec!["(空结果)"]);
+    }
+
+    #[test]
+    fn plan_desc_normalizes_options_and_case() {
+        assert!(plan_desc("TABLE ACCESS FULL").is_some());
+        assert!(plan_desc("table access full").is_some());
+        assert!(plan_desc("Index Range Scan Descending").is_some());
+        // cfg 里写的是 UNION-ALL，DBMS_XPLAN 输出是 UNION ALL（两个空格）。
+        assert!(plan_desc("UNION ALL").is_some());
+        assert!(plan_desc("SELECT STATEMENT").is_none());
+    }
+
+    #[test]
+    fn oracle_plan_becomes_a_tree() {
+        let raw = "Plan hash value: 1857779742\n\
+                   -----------------------------------------------------------\n\
+                   | Id  | Operation                     | Name   | Rows | Cost |\n\
+                   -----------------------------------------------------------\n\
+                    |   0 | SELECT STATEMENT              |        |    1 |    2 |\n\
+                    |   1 |   NESTED LOOPS                      |        |    1 |    2 |\n\
+                    |   2 |     TABLE ACCESS FULL               | T1     |    1 |    2 |\n\
+                    |   3 |     TABLE ACCESS BY INDEX ROWID     | T2     |    1 |    1 |\n\
+                    |   4 |       INDEX RANGE SCAN               | IDX_T2 |    1 |    1 |\n\
+                   -----------------------------------------------------------\n\
+                   Plan hash value: 1857779742\n";
+        let r = res(
+            &["plan_table_output"],
+            vec![vec![Value::String(raw.into())]],
+        );
+        let lines = render(&r, Oracle).lines();
+        assert_eq!(lines[0], "└─ SELECT STATEMENT [cost=2 · rows≈1]");
+        assert!(
+            lines[1].contains("NESTED LOOPS [cost=2 · rows≈1]"),
+            "{}",
+            lines[1]
+        );
+        assert!(
+            lines[1].contains("Join two tables where at least one index is used"),
+            "{}",
+            lines[1]
+        );
+        assert!(lines[2].contains("on T1"), "{}", lines[2]);
+        assert!(
+            lines[2].contains("Return all rows from a table"),
+            "{}",
+            lines[2]
+        );
+        // 索引扫描是回表的子节点而不是兄弟：正好多缩进一级（3 空格）。
+        let lead = |l: &str| l.len() - l.trim_start().len();
+        let at = |s: &str| lines.iter().position(|l| l.contains(s)).unwrap();
+        let (row_tab, row_idx) = (at("TABLE ACCESS BY INDEX ROWID"), at("INDEX RANGE SCAN"));
+        assert_eq!(
+            lead(&lines[row_idx]),
+            lead(&lines[row_tab]) + 3,
+            "{}",
+            lines[row_idx]
+        );
+        assert!(lines[row_idx].contains("IDX_T2"), "{}", lines[row_idx]);
+    }
+
+    #[test]
+    fn oracle_plan_predicates_attach_to_the_node() {
+        let raw = "-----------------------------------------------------------\n\
+                   | Id  | Operation           | Name | Rows | Cost |\n\
+                   -----------------------------------------------------------\n\
+                    |   0 | SELECT STATEMENT    |      |    1 |    2 |\n\
+                    |   1 |   TABLE ACCESS FULL  | T1   |    1 |    2 |\n\
+                    |     |   Predicate Information (identified by access path):\n\
+                    |     |   --------------------------------------------------\n\
+                    |     |   1 - filter(\"X\">10)\n\
+                   -----------------------------------------------------------\n";
+        let nodes = parse_oracle_plan(raw).expect("plan tree");
+        let leaf = &nodes[0].children[0];
+        assert_eq!(leaf.name, "TABLE ACCESS FULL");
+        assert!(leaf.detail.contains("filter(\"X\">10)"), "{}", leaf.detail);
+        // 标题行与分隔线不算条件说明。
+        assert!(
+            !leaf.detail.contains("Predicate Information"),
+            "{}",
+            leaf.detail
+        );
+        assert!(!leaf.detail.contains("----"), "{}", leaf.detail);
+    }
+
+    #[test]
+    fn oracle_plan_without_a_header_falls_back_to_table_text() {
+        // EXPLAIN PLAN 本身只回一行 "Statement explained."，没有列名行。
+        let r = res(
+            &["plan_table_output"],
+            vec![vec![Value::String("Statement explained.".into())]],
+        );
+        assert_eq!(render(&r, Oracle).lines()[1], "Statement explained.");
+        assert!(parse_oracle_plan("Statement explained.").is_none());
     }
 }
