@@ -22,6 +22,7 @@ import (
 	"github.com/polydb/polydb/pkg/protocol"
 	"github.com/polydb/polydb/pkg/sshtunnel"
 	"github.com/polydb/polydb/pkg/storage"
+	"golang.org/x/sync/singleflight"
 )
 
 // txEntry 保存单个进程内事务的运行时状态。同一 txEntry 内的
@@ -53,6 +54,10 @@ type AppCore struct {
 	// blobs 是大字段旁路存储（spec/encoding.md §5.2）：New 时建句柄、
 	// 启动清扫并注册到 dbcore（进程级 sink，覆盖本进程所有入口）。
 	blobs *storage.BlobStore
+	// connectSF 归并同一连接 id 的并发懒连接：两个 goroutine 同时 miss 时
+	// 只让一个跑完整 Connect（含 SSH 隧道 + 拨号 + Ping），其余共享其结果，
+	// 避免重复开隧道/连接后又被覆盖 Close（见 ensure）。
+	connectSF singleflight.Group
 }
 
 func New(db *sql.DB, kr keyring.Keyring) *AppCore {
@@ -322,6 +327,11 @@ func (a *AppCore) Ping(ctx context.Context, id string) error {
 
 // ensure 懒连接：已连接直接返回，否则按保存的连接信息打开驱动。
 // 查询/元数据入口都应先经 ensure，保证未显式 /test 也能工作。
+//
+// 并发首次使用同一 id 时用 singleflight 归并：只让一个 goroutine 跑完整
+// Connect（SSH 隧道 + 拨号 + Ping 都是慢操作），其余共享其结果。
+// 没有它时两个 goroutine 各开一条隧道/连接，后进者覆盖先到者再 Close，
+// 结果虽不泄漏却白做一遍（还会让先到者的调用方拿到"连接失败"的假错误）。
 func (a *AppCore) ensure(ctx context.Context, id string) (dbcore.Connection, error) {
 	a.mu.RLock()
 	c, ok := a.connections[id]
@@ -329,7 +339,18 @@ func (a *AppCore) ensure(ctx context.Context, id string) (dbcore.Connection, err
 	if ok {
 		return c, nil
 	}
-	if err := a.Connect(ctx, id); err != nil {
+	// flight 内二次检查：RLock 未命中之后、进入 Do 之前可能已被别的
+	// flight 或显式 Connect 建好。
+	_, err, _ := a.connectSF.Do(id, func() (any, error) {
+		a.mu.RLock()
+		_, ok := a.connections[id]
+		a.mu.RUnlock()
+		if ok {
+			return nil, nil
+		}
+		return nil, a.Connect(ctx, id)
+	})
+	if err != nil {
 		return dbcore.Connection{}, err
 	}
 	return a.get(id)
