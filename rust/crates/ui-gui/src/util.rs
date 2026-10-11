@@ -215,6 +215,63 @@ pub(crate) fn col_to_byte(line: &str, col_chars: usize) -> usize {
         .unwrap_or(line.len())
 }
 
+// ── Smart AutoIndent ──────────────────────────────────────────
+// PL/SQL Developer 的 Smart AutoIndent 词表（Tools > Preferences > Editor，
+// 随工具发行 SmartIndent.txt）：光标所在行以这些词开头时，换行给下一行缩进一级。
+pub(crate) const SMART_INDENT_WORDS: &[&str] = &[
+    "BEGIN",
+    "IF",
+    "THEN",
+    "ELSE",
+    "ELSIF",
+    "PROCEDURE",
+    "FUNCTION",
+    "CASE",
+    "WHEN",
+    "LOOP",
+    "WHILE",
+    "FOR",
+    "EXCEPTION",
+];
+
+// 裸换行，与「换行 + 一级缩进」：一级缩进是两个空格，与 Go 侧 SQL 模板同口径。
+const PLAIN_NEWLINE: &str = "\n";
+const INDENTED_NEWLINE: &str = "\n  ";
+
+// 行首第一个词（跳掉前导空白），返回切片引用不分配。以注释或字符串字面量
+// 开头的行不是语句，返回 None。
+pub(crate) fn first_code_word(line: &str) -> Option<&str> {
+    let rest = line.trim_start();
+    let end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
+    let word = &rest[..end];
+    if word.is_empty()
+        || word.starts_with("--")
+        || word.starts_with("/*")
+        || word.starts_with('#')
+        || word.starts_with('\'')
+        || word.starts_with('"')
+        || word.starts_with('`')
+    {
+        return None;
+    }
+    Some(word)
+}
+
+// 行首词是否命中词表（大小写不敏感、整词匹配：FORM 不算 FOR）。
+pub(crate) fn smart_indent_line(line: &str) -> bool {
+    first_code_word(line)
+        .is_some_and(|w| SMART_INDENT_WORDS.iter().any(|k| k.eq_ignore_ascii_case(w)))
+}
+
+// 光标处换行应插入的文本：命中词表就带上缩进，否则是裸换行。
+pub(crate) fn newline_insert(line: &str) -> &'static str {
+    if smart_indent_line(line) {
+        INDENTED_NEWLINE
+    } else {
+        PLAIN_NEWLINE
+    }
+}
+
 // SQL 编辑器词移动：字母/数字/下划线视为词字符，其余（含空白、标点、换行）为分隔。
 pub(crate) fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
@@ -598,5 +655,42 @@ mod tests {
         assert_eq!(hex_dump(""), "(empty)");
         assert!(hex_dump("hi").contains("68 69"));
         assert!(hex_dump("hi").contains("|hi|"));
+    }
+
+    #[test]
+    fn smart_indent_first_word() {
+        assert_eq!(first_code_word("BEGIN"), Some("BEGIN"));
+        assert_eq!(first_code_word("  \tif x = 1;"), Some("if"));
+        assert_eq!(first_code_word("FOR i IN 1..3 LOOP"), Some("FOR"));
+        assert_eq!(first_code_word("x := 1; THEN"), Some("x"));
+        assert_eq!(first_code_word("-- IF"), None);
+        assert_eq!(first_code_word("/* IF"), None);
+        assert_eq!(first_code_word("# IF"), None);
+        assert_eq!(first_code_word("'IF'"), None);
+        assert_eq!(first_code_word("`IF`"), None);
+        assert_eq!(first_code_word("   "), None);
+        assert_eq!(first_code_word(""), None);
+    }
+
+    #[test]
+    fn smart_indent_line_matches() {
+        for w in SMART_INDENT_WORDS {
+            assert!(smart_indent_line(&format!("  {w}")), "{w}");
+            assert!(smart_indent_line(&format!("  {w} x")), "{w}");
+        }
+        // 整词匹配：FORM / THENISH 不算 FOR / THEN。
+        assert!(!smart_indent_line("FORM"));
+        assert!(!smart_indent_line("THENISH"));
+        assert!(!smart_indent_line("SELECT * FROM t"));
+        assert!(!smart_indent_line("-- BEGIN"));
+    }
+
+    #[test]
+    fn newline_insert_steps_only_on_trigger_lines() {
+        assert_eq!(newline_insert("BEGIN"), "\n  ");
+        assert_eq!(newline_insert("  when x = 1 then"), "\n  ");
+        assert_eq!(newline_insert("SELECT * FROM t"), "\n");
+        assert_eq!(newline_insert("-- BEGIN"), "\n");
+        assert_eq!(newline_insert(""), "\n");
     }
 }

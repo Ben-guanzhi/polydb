@@ -31,7 +31,7 @@ use crate::tabs::{self, ActiveView};
 use crate::theme::Theme;
 use crate::util::{
     blob_fetch_err_text, char_ceil, char_floor, col_to_byte, edit_line, line_bounds,
-    split_statements, word_at, word_ceil, word_floor,
+    newline_insert, split_statements, word_at, word_ceil, word_floor,
 };
 
 // ─── IO 桥 ─────────────────────────────────────────────────
@@ -3377,6 +3377,16 @@ impl PolyDBApp {
         self.cursor = boundary + text.len();
     }
 
+    // Shift+Enter 要插入的换行文本：光标所在行以 Smart AutoIndent 词开头就带
+    // 一级缩进；有选区时不猜缩进，只塌缩选区。
+    fn newline_text(&self) -> &'static str {
+        if self.sel_range().is_some() {
+            return "\n";
+        }
+        let (start, end) = line_bounds(&self.sql, self.cursor.min(self.sql.len()));
+        newline_insert(&self.sql[start..end])
+    }
+
     fn backspace(&mut self) {
         if self.sel_range().is_none() && self.cursor == 0 {
             return;
@@ -3548,7 +3558,7 @@ impl PolyDBApp {
             // Enter 执行、Shift+Enter 换行（与多数 SQL 客户端一致）。
             "enter" => {
                 if shift {
-                    self.insert_text("\n");
+                    self.insert_text(self.newline_text());
                     cx.notify();
                 } else {
                     self.run_query(cx);
