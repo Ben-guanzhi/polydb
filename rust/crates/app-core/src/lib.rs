@@ -169,7 +169,6 @@ impl Drop for TxEntryGuard {
     }
 }
 
-
 /// 把 storage 的 [`BlobStore`] 适配为 db-core 的 [`BlobSink`]：trait 属
 /// db-core、类型属 storage，包装层按孤儿规则落在 app-core。
 struct StoreSink(Arc<BlobStore>);

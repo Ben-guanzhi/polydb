@@ -147,9 +147,13 @@ fn failed_in_tx_execute_keeps_the_transaction_rollbackable() {
     app.connect(id).unwrap();
 
     smol::block_on(async {
-        app.execute(id, "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)", &[])
-            .await
-            .unwrap();
+        app.execute(
+            id,
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)",
+            &[],
+        )
+        .await
+        .unwrap();
 
         let txn = app
             .begin_transaction(&BeginTransactionRequest {
@@ -163,8 +167,7 @@ fn failed_in_tx_execute_keeps_the_transaction_rollbackable() {
 
         app.execute_in_transaction(&txid, "INSERT INTO no_such_table (a) VALUES (1)", &[])
             .await
-            .err()
-            .expect("expected the in-transaction SQL to fail");
+            .expect_err("expected the in-transaction SQL to fail");
 
         // 失败后条目已回插：同一事务仍能继续执行并提交。
         app.execute_in_transaction(
@@ -192,4 +195,3 @@ fn failed_in_tx_execute_keeps_the_transaction_rollbackable() {
 
     app.disconnect(id);
 }
-
