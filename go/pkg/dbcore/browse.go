@@ -107,11 +107,10 @@ func offsetFetchClause(offset, limit uint64) string {
 	return fmt.Sprintf(" OFFSET %d ROWS FETCH NEXT %d ROWS ONLY", offset, limit)
 }
 
-// BrowseRowsLimits 应用 behavior.md §13.2 的分页钳制（上限 10000）。缺省值当前
-// 取 200，而 spec 声明 100——偏差已登记在 AGENTS.md §16 第 9 条。
+// BrowseRowsLimits 应用 behavior.md §13.2 的分页钳制：limit 缺省 100，上限 10000。
 func BrowseRowsLimits(limit uint32) uint64 {
 	if limit == 0 {
-		return 200
+		return 100
 	}
 	if limit > 10000 {
 		return 10000
