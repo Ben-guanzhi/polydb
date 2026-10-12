@@ -134,6 +134,42 @@ impl TxEntry {
     }
 }
 
+/// `txs` map 的借出守卫。不变量是「entry 要么在 map 里，要么被唯一借出者持有」：
+/// 借出期间释放锁，让并发 commit/rollback 拿到 TRANSACTION_NOT_FOUND 而不是
+/// 并发驱动同一个事务句柄。
+///
+/// 回插落在 `Drop` 里而不是手写语句，这样三条退出路径都成立：正常返回、`?`
+/// 提前返回、future 在 `await` 点被取消/drop。旧写法是 remove → await →
+/// insert，取消时最后的 insert 不执行——事务永久失踪、handle drop 静默回滚。
+/// `txs` 用 `Arc` 承载，让守卫可以 clone 一份跨过 `await`（`&Mutex` 不可 Send）。
+struct TxEntryGuard {
+    txs: Arc<Mutex<HashMap<String, TxEntry>>>,
+    id: String,
+    entry: Option<TxEntry>,
+}
+
+impl TxEntryGuard {
+    fn entry(&mut self) -> &mut TxEntry {
+        self.entry
+            .as_mut()
+            .expect("transaction entry already finalized")
+    }
+
+    /// 事务已终结（commit/rollback 成功）：不再放回 map。
+    fn finish(&mut self) {
+        self.entry = None;
+    }
+}
+
+impl Drop for TxEntryGuard {
+    fn drop(&mut self) {
+        if let Some(entry) = self.entry.take() {
+            self.txs.lock().insert(self.id.clone(), entry);
+        }
+    }
+}
+
+
 /// 把 storage 的 [`BlobStore`] 适配为 db-core 的 [`BlobSink`]：trait 属
 /// db-core、类型属 storage，包装层按孤儿规则落在 app-core。
 struct StoreSink(Arc<BlobStore>);
@@ -151,7 +187,7 @@ pub struct AppCore {
     kr: Arc<dyn Keyring>,
     connections: RwLock<HashMap<ConnectionId, Connection>>,
     tunnels: RwLock<HashMap<ConnectionId, Arc<Tunnel>>>,
-    txs: Mutex<HashMap<String, TxEntry>>,
+    txs: Arc<Mutex<HashMap<String, TxEntry>>>,
     // 已打开连接的只读标志快照（behavior.md §12.3）；disconnect 时移除。
     read_only: RwLock<std::collections::HashSet<ConnectionId>>,
 }
@@ -186,7 +222,7 @@ impl AppCore {
             kr,
             connections: RwLock::new(HashMap::new()),
             tunnels: RwLock::new(HashMap::new()),
-            txs: Mutex::new(HashMap::new()),
+            txs: Arc::new(Mutex::new(HashMap::new())),
             read_only: RwLock::new(std::collections::HashSet::new()),
         }
     }
@@ -701,60 +737,67 @@ impl AppCore {
         Ok(info)
     }
 
+    /// 从 map 里借出事务条目并释放锁；不存在报 TRANSACTION_NOT_FOUND。
+    fn take_tx(&self, txn_id: &str) -> CoreResult<TxEntryGuard> {
+        let entry = self
+            .txs
+            .lock()
+            .remove(txn_id)
+            .ok_or_else(|| CoreError::TransactionNotFound(txn_id.to_string()))?;
+        Ok(TxEntryGuard {
+            txs: self.txs.clone(),
+            id: txn_id.to_string(),
+            entry: Some(entry),
+        })
+    }
+
     pub async fn execute_in_transaction(
         &self,
         txn_id: &str,
         sql: &str,
         params: &[Value],
     ) -> CoreResult<QueryResult> {
-        // 取出 entry 释放锁，避免 execute 期间持锁。
+        // 借出 entry 释放锁，避免 execute 期间持锁。
         // spec §10：execute 中 SQL 失败事务保持 active；无论成败都把 entry 放回，
-        // 让客户端可自行 rollback 或重试 commit。
-        let mut entry = {
-            let mut txs = self.txs.lock();
-            txs.remove(txn_id)
-                .ok_or_else(|| CoreError::TransactionNotFound(txn_id.to_string()))?
-        };
+        // 让客户端可自行 rollback 或重试 commit。回插在守卫的 Drop 里执行，
+        // future 在 await 点被取消时也照样放回。
+        let mut guard = self.take_tx(txn_id)?;
+        let entry = guard.entry();
         // 只读拦截（behavior.md §12.3）：按事务所属连接判定。
-        if let Err(e) = self.reject_write_on_read_only(&entry.connection_id, sql) {
-            self.txs.lock().insert(txn_id.to_string(), entry);
-            return Err(e);
-        }
-        let result = match entry.handle.as_mut() {
+        self.reject_write_on_read_only(&entry.connection_id, sql)?;
+        match entry.handle.as_mut() {
             Some(handle) => entry.driver.execute_in_tx(handle, sql, params).await,
             None => Err(CoreError::Internal("tx already committed".into())),
-        };
-        self.txs.lock().insert(txn_id.to_string(), entry);
-        result
+        }
     }
 
     pub async fn commit_transaction(&self, txn_id: &str) -> CoreResult<TransactionInfo> {
-        let mut entry = {
-            let mut txs = self.txs.lock();
-            txs.remove(txn_id)
-                .ok_or_else(|| CoreError::TransactionNotFound(txn_id.to_string()))?
-        };
-        let info = entry.info_finalized(TransactionStatus::Committed);
-        let handle = entry
+        let mut guard = self.take_tx(txn_id)?;
+        let info = guard.entry().info_finalized(TransactionStatus::Committed);
+        let driver = guard.entry().driver.clone();
+        let handle = guard
+            .entry()
             .handle
             .take()
             .ok_or_else(|| CoreError::Internal("tx already committed".into()))?;
-        entry.driver.commit(handle).await?;
+        // 事务终结：守卫不再回插（与 Go 侧一致，commit/rollback 只 remove）。
+        // 放在 await 之前，取消或失败都不会把已终结的事务留在 map 里。
+        guard.finish();
+        driver.commit(handle).await?;
         Ok(info)
     }
 
     pub async fn rollback_transaction(&self, txn_id: &str) -> CoreResult<TransactionInfo> {
-        let mut entry = {
-            let mut txs = self.txs.lock();
-            txs.remove(txn_id)
-                .ok_or_else(|| CoreError::TransactionNotFound(txn_id.to_string()))?
-        };
-        let info = entry.info_finalized(TransactionStatus::RolledBack);
-        let handle = entry
+        let mut guard = self.take_tx(txn_id)?;
+        let info = guard.entry().info_finalized(TransactionStatus::RolledBack);
+        let driver = guard.entry().driver.clone();
+        let handle = guard
+            .entry()
             .handle
             .take()
             .ok_or_else(|| CoreError::Internal("tx already rolled back".into()))?;
-        entry.driver.rollback(handle).await?;
+        guard.finish();
+        driver.rollback(handle).await?;
         Ok(info)
     }
 

@@ -1,5 +1,8 @@
 use polydb_app_core::AppCore;
-use polydb_core::{CoreResult, CreateConnectionRequest, DatabaseKind, Value};
+use polydb_core::{
+    BeginTransactionRequest, CoreResult, CreateConnectionRequest, DatabaseKind, IsolationLevel,
+    TransactionStatus, Value,
+};
 use polydb_storage::{FileKeyring, Storage};
 
 fn setup() -> AppCore {
@@ -132,3 +135,61 @@ fn execute_on_missing_connection_errors() {
         smol::block_on(async { app.execute(missing, "SELECT 1", &[]).await });
     assert!(result.is_err());
 }
+
+#[test]
+fn failed_in_tx_execute_keeps_the_transaction_rollbackable() {
+    // 回归：事务条目从注册表借出后，任何退出路径都必须把它放回。spec §10 要求
+    // 事务内 SQL 失败时事务保持 active，客户端仍可 rollback；回插原先是一条手写
+    // 语句（取消时会被跳过，事务永久失踪），现在落在借出守卫的 Drop 里。
+    let app = setup();
+    let info = app.create_connection(&sqlite_req("tx")).unwrap();
+    let id = info.id;
+    app.connect(id).unwrap();
+
+    smol::block_on(async {
+        app.execute(id, "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)", &[])
+            .await
+            .unwrap();
+
+        let txn = app
+            .begin_transaction(&BeginTransactionRequest {
+                connection_id: id,
+                isolation_level: Some(IsolationLevel::ReadCommitted),
+            })
+            .await
+            .unwrap();
+        assert_eq!(txn.status, TransactionStatus::Active);
+        let txid = txn.id.to_string();
+
+        app.execute_in_transaction(&txid, "INSERT INTO no_such_table (a) VALUES (1)", &[])
+            .await
+            .err()
+            .expect("expected the in-transaction SQL to fail");
+
+        // 失败后条目已回插：同一事务仍能继续执行并提交。
+        app.execute_in_transaction(
+            &txid,
+            "INSERT INTO t (name) VALUES (?1)",
+            &[Value::String("kept".into())],
+        )
+        .await
+        .unwrap();
+        let committed = app.commit_transaction(&txid).await.unwrap();
+        assert_eq!(committed.status, TransactionStatus::Committed);
+
+        // 已终结的事务不再留在注册表：重复 commit 报 NOT_FOUND。
+        let dup = app.commit_transaction(&txid).await.err().unwrap();
+        assert_eq!(
+            dup.to_protocol().code,
+            "POLYDB_ERR_TRANSACTION_NOT_FOUND",
+            "finalized transaction must not stay registered"
+        );
+
+        let rows = app.execute(id, "SELECT name FROM t", &[]).await.unwrap();
+        assert_eq!(rows.rows.len(), 1);
+        assert_eq!(rows.rows[0][0], Value::String("kept".into()));
+    });
+
+    app.disconnect(id);
+}
+
