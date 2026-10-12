@@ -137,6 +137,34 @@
 - Redis 命令天然串行（单线程模型）
 - 批量查询中 `stop_on_error: true` 时，遇到第一个错误后停止
 
+### 6.1 双实现有意的不对称（登记册）
+
+契约测试对拍的是**可观测行为**，拍不出"两侧用了不同算法/不同资源上限"这个事实本身。
+因此下列四条不对称**显式立法**：任何一端改动使其中一条失效，都视同 spec 变更，
+必须在 PR 里标注 breaking / non-breaking 并更新本节，不允许默默漂移。
+
+1. **连接首次创建的归并**
+   - Go：`pkg/appcore/appcore.go` 用 `singleflight.Group` 合并——同一连接 id 的并发首次使用
+     只建一次驱动/隧道，其余 goroutine 等待同一结果。
+   - Rust：`crates/app-core` 的创建路径是普通函数，**无对应归并**——并发首次使用可能重复建
+     SSH 隧道/重复连接。
+   - 可观测差异：并发首连时的隧道连接数与连接数，以及建连耗时分布。正确性不受影响。
+2. **连接建立的时机**
+   - Rust：驱动构造用 `connect_lazy`（`crates/db-postgres`、`crates/db-mysql`），打开连接
+     不触网，首条语句才建。
+   - Go：各驱动的 `New` 内立即 `sql.Open` + `PingContext`（`pkg/dbmysql`、`pkg/dbpostgres`、
+     `pkg/dbmssql`、`pkg/dboracle`、`pkg/dbredis`），因此**建连失败在创建连接时就返回**。
+   - 可观测差异：`POST /api/connections` 的响应时间与失败时机。
+3. **服务端连接池上限**
+   - Rust：Postgres/MySQL 的 `connect_options().max_connections(4)`。
+   - Go：仅 SQLite 设 `SetMaxOpenConns(1)`；MySQL/Postgres/MSSQL/Oracle **无上限**。
+   - 可观测差异：慢查询并发下的排队与超时形态。
+4. **WebSocket 订阅队列的背压**
+   - Rust：`crates/server/src/ws.rs` 用 `mpsc::unbounded_channel`，慢客户端订阅无界排队，
+     内存可无界增长直至客户端断开。
+   - Go：`pkg/server/ws.go` 的 `writeCh` 缓冲 32，写满即阻塞发布方（会连带阻塞其他订阅者）。
+   - 可观测差异：慢订阅者的内存曲线与对同通道其他客户端的拖慢形态。
+
 ---
 
 ## 7. 字符编码
@@ -254,10 +282,22 @@
     （不再复用 §11 判型）：剥离 `--` / `/* */` 注释与 `'…'` / `"…"` / `` `…` `` / `[…]`
     字面量后，整词命中 `INSERT` / `UPDATE` / `DELETE` / `MERGE` / `REPLACE` / `TRUNCATE` /
     `GRANT` / `REVOKE` / `CREATE` / `ALTER` / `DROP` / `CALL` / `EXEC` / `EXECUTE` / `COPY` /
-    `VACUUM` / `REINDEX` / `CLUSTER` / `LOCK` / `COMMENT` 即返回 **409** `POLYDB_ERR_READ_ONLY`。
+    `VACUUM` / `REINDEX` / `CLUSTER` / `LOCK` / `COMMENT` / `SETVAL` / `REFRESH` / `INTO` /
+    `LOAD` / `DO` / `OPTIMIZE` 即返回 **409** `POLYDB_ERR_READ_ONLY`。
     扫整句使数据修改 CTE（`WITH … DELETE/UPDATE/INSERT`）与 `TRUNCATE` / `GRANT` / `CALL`
-    等此前归入 `select` / `other` 的写型语句同样被拦；注释/字符串中的同名词不误判。
-    `PRAGMA` 等写型 `other` 语句仍不在拦截范围，文档如实标注。
+    等此前归入 `select` / `other` 的写型语句同样被拦；注释/字符串中的同名词不误判
+    （`'delete'`、列名 `inserted_events` 均放行）。
+    `SETVAL` / `REFRESH` / `INTO` / `LOAD` / `DO` / `OPTIMIZE` 是首关键字为 `SELECT` 或
+    `REFRESH` 等、会被 §11 判型归入 `select` / `other` 的写型语句：`SELECT setval('seq', n)`
+    （Postgres 推进序列）、`REFRESH MATERIALIZED VIEW` / `REFRESH TABLE`、
+    `SELECT … INTO table` / `SELECT … INTO OUTFILE|DUMPFILE`（建表或落盘）、
+    `LOAD DATA INFILE` / `LOAD XML`、`DO $$ … $$` 匿名块（可任意写）、`OPTIMIZE TABLE`。
+    代价是 fail-closed 的误拦：`LOAD TABLE … INTO OUTFILE` 虽是读路径也会被拦；
+    命中判定为整词，`setval_log` / `load_status` / `do_count` 等列名不受影响。
+  - **已知漏网（如实标注，未拦截）**：会话/实例级语句 `SET`（含 `SET GLOBAL` /
+    `SET PERSIST` / `SET PASSWORD`）、`FLUSH`、`RESET`、`KILL`、`NOTIFY`、以及写型
+    `PRAGMA`（如 `PRAGMA wal_checkpoint`）。这些不触及业务数据行，但可改写会话或实例
+    配置；`read_only` 的连接若需覆盖它们，须在应用层另行限制，服务端当前不拦。
   - KV：`kv/keys/{key}` PUT（SetValue）与 `kv/exec`（ExecCommand）一律返回 409 `POLYDB_ERR_READ_ONLY`；
     GET / scan / select db 不受限。
 - 事务内语句同样拦截（按事务所属连接判定）。
