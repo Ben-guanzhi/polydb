@@ -104,7 +104,8 @@ fn offset_fetch_clause(offset: u64, limit: u64) -> String {
     format!(" OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY")
 }
 
-/// 分页钳制（§13.2）：limit 缺省 200，上限 10000。
+/// 分页钳制（§13.2），上限 10000。缺省值当前取 200，而 spec 声明 100——偏差已
+/// 登记在 AGENTS.md §16 第 9 条。
 pub fn browse_rows_limits(limit: u32) -> u64 {
     match limit {
         0 => 200,

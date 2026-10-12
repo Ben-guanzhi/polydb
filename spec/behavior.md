@@ -315,7 +315,8 @@
 
 ### 13.2 分页与 has_more
 
-- `limit` 缺省 200，服务端钳制到 10000；`offset` 缺省 0。分页用 OFFSET/LIMIT 语义
+- `limit` 缺省 100（与 §1.1 及 schemas/common.json 一致），服务端钳制到 10000；`offset`
+  缺省 0。分页用 OFFSET/LIMIT 语义
   （MSSQL/Oracle 用 `OFFSET n ROWS FETCH NEXT m ROWS ONLY`；MSSQL 无排序时补
   `ORDER BY (SELECT NULL)` 兜底）。
 - `has_more`：服务端实际请求 `limit+1` 行，多于 limit 时截断并置 `has_more=true`。

@@ -429,5 +429,6 @@ logger 名	polydb
 | 6 | `SqlDriver::begin() -> Transaction` | 实为 `begin_tx(TxMode) -> Box<dyn Any+Send>` | 已确认 | 迁移到 trait-object transaction |
 | 7 | 契约测试用 JSON fixture | 实为 Go 测试（`test/contract/`） | 已确认 | 统一为 JSON fixture 或更新本节 |
 | 8 | Rust/Go protocol 由 spec 生成 | 仅 TS 是真生成；Rust/Go 是手工维护 + 漂移检查 | 已确认 | 扩展 genprotocol 生成 Rust/Go |
+| 9 | `browse_rows_limits` 缺省 limit = 100（spec/behavior.md §1.1、§5、§13.2 与 schemas/common.json 均声明 100） | Go `dbcore.BrowseRowsLimits` 与 Rust `browse_rows_limits` 实际取 200；`ui-gui` 另在 `app.rs` 显式传 200 | 已确认 | 二选一：改实现为 100（贴合 spec 与 schema），或改 spec 四处为 200；另需决定 `ui-gui` 是否改为 `limit: 0` 让服务端定默认值 |
 
 **规则**：新增偏差时，先在 `.qoder/skills/polydb/SKILL.md` 记录，再同步到本表。修复实现后，从本表删除对应行。
