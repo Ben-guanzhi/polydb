@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strconv"
 
 	"github.com/vmihailenco/msgpack/v5"
 )
@@ -58,6 +59,14 @@ func marshalScalarMsgpack(raw []byte) (data []byte, handled bool, err error) {
 		var i int64
 		if json.Unmarshal(t, &i) == nil {
 			b, err := msgpack.Marshal(i)
+			return b, true, err
+		}
+		// Unsigned values above MaxInt64 stay exact as msgpack uint64; falling
+		// straight through to float64 would drop low bits (and would disagree
+		// with the container path, which normalizes json.Number the same way).
+		var u uint64
+		if json.Unmarshal(t, &u) == nil {
+			b, err := msgpack.Marshal(u)
 			return b, true, err
 		}
 		var f float64
@@ -171,6 +180,13 @@ func normalizeForMsgpack(v any) any {
 	case json.Number:
 		if i, err := t.Int64(); err == nil {
 			return i
+		}
+		if u, err := strconv.ParseUint(t.String(), 10, 64); err == nil {
+			// Must come before Float64: an unsigned value above MaxInt64 is
+			// exact as msgpack uint64, while float64 silently drops low bits.
+			// The scalar unmarshal path already keeps it exact (0xcf), so the
+			// container tree must not lose it on the way back out.
+			return u
 		}
 		if f, err := t.Float64(); err == nil {
 			return f

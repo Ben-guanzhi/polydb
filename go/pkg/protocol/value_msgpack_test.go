@@ -2,8 +2,11 @@ package protocol
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"math"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/vmihailenco/msgpack/v5"
@@ -124,6 +127,72 @@ func TestScalarFastPathUnmarshalEquivalence(t *testing.T) {
 			t.Errorf("%#v: raw differs tree=%q fast=%q", n, want, v.raw)
 		}
 	}
+}
+
+// Regression: an unsigned integer above MaxInt64 must survive a msgpack round
+// trip bit-for-bit. Both encode paths used to fall through to float64 here and
+// silently drop low bits, so a value that was received exactly (the 0xcf
+// scalar decode path keeps it exact) could not be sent back out exactly.
+// TestScalarFastPathMarshalEquivalence could not catch this: it only asserts
+// fast path == tree path, and both were lossy in the same way.
+func TestLargeUnsignedIntegersSurviveMsgpackRoundTrip(t *testing.T) {
+	const maxUint64 = `18446744073709551615`
+	const maxInt64Plus1 = `9223372036854775808`
+
+	cases := []string{
+		maxUint64,
+		maxInt64Plus1,
+		`{"id":18446744073709551615,"ids":[9223372036854775808,18446744073709551614]}`,
+		`[{"deep":{"v":18446744073709551613}}]`,
+	}
+	for _, c := range cases {
+		var v Value
+		if err := json.Unmarshal([]byte(c), &v); err != nil {
+			t.Fatalf("unmarshal %s: %v", c, err)
+		}
+		data, err := v.MarshalMsgpack()
+		if err != nil {
+			t.Fatalf("marshal %s: %v", c, err)
+		}
+		var back Value
+		if err := back.UnmarshalMsgpack(data); err != nil {
+			t.Fatalf("unmarshal wire from %s: %v", c, err)
+		}
+		if canonicalJSON(c) != canonicalJSON(string(back.raw)) {
+			t.Errorf("%s: precision lost on round trip\n got=%s", c, back.raw)
+		}
+	}
+
+	// Pin the wire type, not just the decoded number: 0xcf + 8 big-endian
+	// bytes is msgpack uint64; 0xcb would be a float64 approximation.
+	var v Value
+	if err := json.Unmarshal([]byte(maxUint64), &v); err != nil {
+		t.Fatal(err)
+	}
+	wire, err := v.MarshalMsgpack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wire) != 9 || wire[0] != 0xcf {
+		t.Fatalf("MaxUint64 encoded as %x, want 0xcf + 8 bytes", wire)
+	}
+	if got := strconv.FormatUint(binary.BigEndian.Uint64(wire[1:]), 10); got != maxUint64 {
+		t.Errorf("0xcf payload decoded to %s, want %s", got, maxUint64)
+	}
+}
+
+func canonicalJSON(s string) string {
+	var x any
+	dec := json.NewDecoder(strings.NewReader(s))
+	dec.UseNumber()
+	if err := dec.Decode(&x); err != nil {
+		return s
+	}
+	b, err := json.Marshal(x)
+	if err != nil {
+		return s
+	}
+	return string(b)
 }
 
 func BenchmarkMarshalMsgpackStringCell(b *testing.B) {
