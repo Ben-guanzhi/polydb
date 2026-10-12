@@ -52,6 +52,9 @@ const MUTATING_KEYWORDS: &[&str] = &[
     "INSERT", "UPDATE", "DELETE", "MERGE", "REPLACE", "TRUNCATE", "GRANT", "REVOKE", "CREATE",
     "ALTER", "DROP", "CALL", "EXEC", "EXECUTE", "COPY", "VACUUM", "REINDEX", "CLUSTER", "LOCK",
     "COMMENT",
+    // Writes whose leading keyword is none of the above, so the §11 classifier
+    // calls them select/other and they would slip past the read-only gate.
+    "SETVAL", "REFRESH", "INTO", "LOAD", "DO", "OPTIMIZE",
 ];
 
 /// 判断语句是否包含变更关键字。扫描整条语句（含 WITH 子树与多语句），先剥离
@@ -157,7 +160,25 @@ mod tests {
             ("SELECT * FROM inserted_events", false),
             ("SELECT updated_at FROM t", false),
             ("SELECT \"delete\" FROM t", false),
+            ("SELECT [delete] FROM t", false),
             ("select * from t where note = 'it''s not a delete'", false),
+            // Writes reached through a leading keyword the §11 classifier calls
+            // select/other.
+            ("SELECT setval('seq1', 100)", true),
+            ("REFRESH MATERIALIZED VIEW mv", true),
+            ("REFRESH TABLE t", true),
+            ("SELECT * INTO newt FROM t", true),
+            ("SELECT * FROM t INTO OUTFILE '/tmp/dump.csv'", true),
+            ("LOAD DATA INFILE '/tmp/x' INTO TABLE t", true),
+            ("DO $$ BEGIN UPDATE t SET x = 1; END $$", true),
+            ("OPTIMIZE TABLE t", true),
+            ("SELECT nextval('seq1') AS n", false),
+            (
+                "SELECT * FROM \"intoval\" WHERE note = 'into the woods'",
+                false,
+            ),
+            ("SELECT * FROM setval_log WHERE load_status = 1", false),
+            ("SELECT do_count, refresher, optimize_time FROM t", false),
         ];
         for (sql, want) in cases {
             assert_eq!(mutates_data(sql), *want, "mutates_data({sql:?})");

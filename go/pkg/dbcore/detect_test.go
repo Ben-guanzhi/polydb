@@ -32,6 +32,19 @@ func TestMutatesData(t *testing.T) {
 		{`SELECT "delete" FROM t`, false},
 		{"SELECT [delete] FROM t", false},
 		{"select * from t where note = 'it''s not a delete'", false},
+		// 首关键字被 §11 判型归入 select/other 的写语句。
+		{"SELECT setval('seq1', 100)", true},
+		{"REFRESH MATERIALIZED VIEW mv", true},
+		{"REFRESH TABLE t", true},
+		{"SELECT * INTO newt FROM t", true},
+		{"SELECT * FROM t INTO OUTFILE '/tmp/dump.csv'", true},
+		{"LOAD DATA INFILE '/tmp/x' INTO TABLE t", true},
+		{"DO $$ BEGIN UPDATE t SET x = 1; END $$", true},
+		{"OPTIMIZE TABLE t", true},
+		{"SELECT nextval('seq1') AS n", false},
+		{`SELECT * FROM "intoval" WHERE note = 'into the woods'`, false},
+		{"SELECT * FROM setval_log WHERE load_status = 1", false},
+		{"SELECT do_count, refresher, optimize_time FROM t", false},
 	}
 	for _, c := range cases {
 		if got := MutatesData(c.sql); got != c.want {

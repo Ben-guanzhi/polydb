@@ -61,6 +61,8 @@ var mutatingKeywords = map[string]bool{
 	"CREATE": true, "ALTER": true, "DROP": true, "CALL": true,
 	"EXEC": true, "EXECUTE": true, "COPY": true, "VACUUM": true,
 	"REINDEX": true, "CLUSTER": true, "LOCK": true, "COMMENT": true,
+	// 这些写语句的首关键字不在上面，§11 判型会把它们归入 select/other 而放行。
+	"SETVAL": true, "REFRESH": true, "INTO": true, "LOAD": true, "DO": true, "OPTIMIZE": true,
 }
 
 // MutatesData 判断语句是否包含变更关键字（behavior.md §12.3 只读拦截的判定基础）。
