@@ -30,17 +30,24 @@ func NewBoolValue(v bool) Value {
 	}
 	return Value{raw: json.RawMessage("false")}
 }
+
+// 三个标量构造器是**每格一次**的热路径（驱动把扫描出来的值转成 Value 都走这里），
+// 所以不再借道 encoding/json 的 reflect：输出由 value_json.go 手写，与
+// `json.Marshal` 逐字节对拍（TestValueConstructorsMatchJSONMarshal）。
+// NewFloatValue 对 Inf/NaN 保持旧语义——json.Marshal 报错时返回 nil 原文，
+// 也就是一个 NULL 单元格。
 func NewIntValue(v int64) Value {
-	b, _ := json.Marshal(v)
-	return Value{raw: json.RawMessage(b)}
+	return Value{raw: appendJSONNumberInt(nil, v)}
 }
 func NewFloatValue(v float64) Value {
-	b, _ := json.Marshal(v)
+	b, ok := appendJSONFloat(nil, v, 64)
+	if !ok {
+		return Value{}
+	}
 	return Value{raw: json.RawMessage(b)}
 }
 func NewStringValue(v string) Value {
-	b, _ := json.Marshal(v)
-	return Value{raw: json.RawMessage(b)}
+	return Value{raw: appendJSONString(nil, v)}
 }
 
 // NewObjectValue 构造 JSON 对象 Value（如 spec/encoding.md §5 的 $blob 编码）。
