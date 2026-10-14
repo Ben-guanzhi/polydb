@@ -55,7 +55,10 @@ jobs:
             exit 1
           fi
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        # golangci-lint-action v6 parses the requested version with a
+        # pre-v2.0 scheme and rejects "v2.13.2"; v7 is the action that
+        # supports golangci-lint v2.x.
+        uses: golangci/golangci-lint-action@v7
         with:
           version: v2.13.2
           working-directory: go
@@ -137,12 +140,15 @@ jobs:
           MSSQL_SA_PASSWORD: "PolyDb_Test_2026"
         ports:
           - 1433:1433
+        # First boot initialises the master DB from scratch, which has
+        # outgrown the 40s start-period + 20 retries (240s) budget; MSSQL
+        # needs the longest headroom of the five services here.
         options: >-
           --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P $${MSSQL_SA_PASSWORD} -Q 'SELECT 1' -b -o /dev/null"
           --health-interval 10s
           --health-timeout 5s
-          --health-retries 20
-          --health-start-period 40s
+          --health-retries 30
+          --health-start-period 2m
       oracle:
         image: gvenzl/oracle-free:23-slim
         env:
@@ -180,6 +186,14 @@ jobs:
           docker ps -a --format '{{.Names}} | {{.Status}}' 2>/dev/null | while IFS= read -r line; do
             echo "$line"
             echo "::warning title=service container::$line"
+          done
+          # "(unhealthy)" only says *that* a healthcheck never passed, not why.
+          # sqlcmd may be missing, the password may be rejected, or the server
+          # may never have finished initialising, so pull each offender's log.
+          docker ps -aq --filter health=unhealthy 2>/dev/null | while IFS= read -r c; do
+            name=$(docker inspect --format '{{.Name}}' "$c" 2>/dev/null)
+            msg=$(docker logs --tail 25 "$c" 2>&1 | tr '\n' ' ' | sed 's/%/%25/g' | head -c 850)
+            echo "::error title=unhealthy $name::$msg"
           done
       - name: contract tests
         working-directory: test/contract
