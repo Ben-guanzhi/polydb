@@ -20,22 +20,32 @@ type Conn struct {
 	mu  sync.Mutex
 }
 
-// withPlaceholderParsing 给 DSN 补上 parse=true。go-mssqldb 只有在 parse=true
-// 时才把 ? 占位符翻译成 @p1 形式的参数；缺了它，本包里所有带 ? 的语句都会被
-// MSSQL 直接当成语法错误（Incorrect syntax near '?'，错误 102）。
-func withPlaceholderParsing(dsn string) string {
-	if strings.Contains(dsn, "parse=") {
-		return dsn
+// positional 把 ? 占位符改写成 @p1、@p2 ...。go-mssqldb v1.11 只认 @pN 或
+// @Name 形式的参数，既不认 ? 也没有 parse=true 开关；不翻译的话每条带参数的
+// 语句都会被 MSSQL 当成语法错误（Incorrect syntax near '?'，错误 102）。
+// 本包的语句里 ? 只作占位符，不作 LIKE 通配，所以按出现顺序改写是安全的。
+func positional(sql string) string {
+	var b strings.Builder
+	n := 0
+	for i := 0; i < len(sql); i++ {
+		if sql[i] == '?' {
+			n++
+			fmt.Fprintf(&b, "@p%d", n)
+			continue
+		}
+		b.WriteByte(sql[i])
 	}
-	if i := strings.IndexByte(dsn, '?'); i >= 0 {
-		return dsn[:i+1] + "parse=true&" + dsn[i+1:]
-	}
-	return dsn + "?parse=true"
+	return b.String()
+}
+
+// queryCtx 在出包前统一翻译占位符，避免每个查询各写一遍。
+func (c *Conn) queryCtx(ctx context.Context, sql string, args ...any) (*sql.Rows, error) {
+	return c.db.QueryContext(ctx, positional(sql), args...)
 }
 
 // Open 通过 DSN（sqlserver://user:pass@host:port?database=dbname）建立连接池。
 func Open(ctx context.Context, dsn string) (*Conn, error) {
-	db, err := sql.Open("sqlserver", withPlaceholderParsing(dsn))
+	db, err := sql.Open("sqlserver", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open mssql: %w", err)
 	}
@@ -68,6 +78,7 @@ func (c *Conn) ExecuteIn(exec dbcore.SQLTx, ctx context.Context, sql string, arg
 func (c *Conn) executeIn(ctx context.Context, exec dbcore.SQLTx, sql string, args []protocol.Value) (*protocol.QueryResult, error) {
 	start := timeNowMs()
 	stmtType := dbcore.DetectStatementType(sql)
+	sql = positional(sql)
 
 	if stmtType == protocol.StatementTypeSelect || stmtType == protocol.StatementTypeOther {
 		rows, err := exec.QueryContext(ctx, sql, dbcore.ValueArgs(args)...)
@@ -139,7 +150,7 @@ func queryResult(rows *sql.Rows, stmtType protocol.StatementType, start float64)
 }
 
 func (c *Conn) ListSchemas(ctx context.Context) ([]protocol.SchemaInfo, error) {
-	rows, err := c.db.QueryContext(ctx,
+	rows, err := c.queryCtx(ctx,
 		`SELECT name FROM sys.schemas
 		  WHERE name NOT IN ('sys','INFORMATION_SCHEMA','guest')
 		    AND name NOT LIKE 'db_%' AND name NOT LIKE '##%'
@@ -160,7 +171,7 @@ func (c *Conn) ListSchemas(ctx context.Context) ([]protocol.SchemaInfo, error) {
 }
 
 func (c *Conn) ListTables(ctx context.Context, schema string) ([]protocol.TableInfo, error) {
-	rows, err := c.db.QueryContext(ctx,
+	rows, err := c.queryCtx(ctx,
 		`SELECT name, 'table' FROM sys.tables WHERE schema_id = SCHEMA_ID(?)
 		  UNION ALL
 		  SELECT name, 'view' FROM sys.views WHERE schema_id = SCHEMA_ID(?)
@@ -181,7 +192,7 @@ func (c *Conn) ListTables(ctx context.Context, schema string) ([]protocol.TableI
 }
 
 func (c *Conn) ListColumns(ctx context.Context, schema, table string) ([]protocol.ColumnInfo, error) {
-	rows, err := c.db.QueryContext(ctx,
+	rows, err := c.queryCtx(ctx,
 		`SELECT c.name,
 		        ty.name + CASE
 		          WHEN ty.name IN ('varchar','nvarchar','char','nchar','binary','varbinary')
@@ -228,7 +239,7 @@ func (c *Conn) ListColumns(ctx context.Context, schema, table string) ([]protoco
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	pkRows, err := c.db.QueryContext(ctx,
+	pkRows, err := c.queryCtx(ctx,
 		`SELECT col.name
 		   FROM sys.indexes i
 		   JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
@@ -258,7 +269,7 @@ func (c *Conn) ListColumns(ctx context.Context, schema, table string) ([]protoco
 }
 
 func (c *Conn) ListIndexes(ctx context.Context, schema, table string) ([]protocol.IndexInfo, error) {
-	rows, err := c.db.QueryContext(ctx,
+	rows, err := c.queryCtx(ctx,
 		`SELECT i.name, i.is_unique, i.is_primary_key, i.type_desc, col.name, ic.key_ordinal
 		   FROM sys.indexes i
 		   JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
@@ -318,7 +329,7 @@ func indexType(desc string) protocol.IndexType {
 }
 
 func (c *Conn) ListForeignKeys(ctx context.Context, schema, table string) ([]protocol.ForeignKeyInfo, error) {
-	rows, err := c.db.QueryContext(ctx,
+	rows, err := c.queryCtx(ctx,
 		`SELECT fk.name, fkcol.name, rs.name, rt.name, rcol.name, fkc.constraint_column_id
 		   FROM sys.foreign_keys fk
 		   JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
