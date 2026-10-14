@@ -1,0 +1,10 @@
+# Force LF on both commit and checkout.
+#
+# Without this, core.autocrlf=true on Windows rewrites the index to CRLF on
+# every `git add`, producing phantom modifications and "LF will be replaced
+# by CRLF" warnings even though HEAD and the working tree are already LF.
+# .gitattributes entries take precedence over core.autocrlf.
+#
+# `text=auto` (not `text`) so tracked binaries are content-sniffed and never
+# have their bytes normalised.
+* text=auto eol=lf
