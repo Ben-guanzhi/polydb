@@ -20,6 +20,106 @@ export function dialectOf(kind: string): AlterDialect {
   }
 }
 
+// ─── 方言能力表 ────────────────────────────────────────────────
+// Adding a new dialect = adding one entry to this table.
+
+interface DialectCapabilities {
+  /** quoteIdent: wrap identifier (oracle lowercases) */
+  quote: (s: string) => string;
+  /** ADD COLUMN: can add PRIMARY KEY? */
+  addColumnPk: boolean;
+  /** ADD COLUMN: NOT NULL without DEFAULT allowed? */
+  addColumnNotNullNoDefault: boolean;
+  /** ADD COLUMN: include NOT NULL / NULL suffix? */
+  addColumnNullClause: boolean;
+  /** DROP COLUMN: supported? */
+  dropColumn: boolean;
+  /** RENAME COLUMN: supported? */
+  renameColumn: boolean;
+  /** ADD INDEX: schema-qualified name? */
+  indexSchemaQualified: boolean;
+  /** DROP INDEX: schema-qualified name? */
+  dropIndexSchemaQualified: boolean;
+  /** ADD FOREIGN KEY: supported? */
+  addForeignKey: boolean;
+  /** DROP CONSTRAINT: supported? (for FK drop) */
+  dropForeignKey: boolean;
+  /** DROP FOREIGN KEY syntax (mysql uses DROP FOREIGN KEY) */
+  dropForeignKeySyntax: boolean;
+}
+
+const CAPS: Record<AlterDialect, DialectCapabilities> = {
+  sqlite: {
+    quote: (s) => `"${s}"`,
+    addColumnPk: false,
+    addColumnNotNullNoDefault: false,
+    addColumnNullClause: false,
+    dropColumn: true,
+    renameColumn: true,
+    indexSchemaQualified: true,
+    dropIndexSchemaQualified: true,
+    addForeignKey: false,
+    dropForeignKey: true,
+    dropForeignKeySyntax: false,
+  },
+  postgres: {
+    quote: (s) => `"${s}"`,
+    addColumnPk: true,
+    addColumnNotNullNoDefault: true,
+    addColumnNullClause: false,
+    dropColumn: true,
+    renameColumn: true,
+    indexSchemaQualified: true,
+    dropIndexSchemaQualified: true,
+    addForeignKey: true,
+    dropForeignKey: true,
+    dropForeignKeySyntax: false,
+  },
+  mysql: {
+    quote: (s) => `"${s}"`,
+    addColumnPk: true,
+    addColumnNotNullNoDefault: true,
+    addColumnNullClause: true,
+    dropColumn: true,
+    renameColumn: true,
+    indexSchemaQualified: true,
+    dropIndexSchemaQualified: true,
+    addForeignKey: true,
+    dropForeignKey: true,
+    dropForeignKeySyntax: true,
+  },
+  mssql: {
+    quote: (s) => `"${s}"`,
+    addColumnPk: true,
+    addColumnNotNullNoDefault: true,
+    addColumnNullClause: true,
+    dropColumn: true,
+    renameColumn: true,
+    indexSchemaQualified: false,
+    dropIndexSchemaQualified: false,
+    addForeignKey: true,
+    dropForeignKey: true,
+    dropForeignKeySyntax: false,
+  },
+  oracle: {
+    quote: (s) => `"${s.toLowerCase()}"`,
+    addColumnPk: true,
+    addColumnNotNullNoDefault: true,
+    addColumnNullClause: true,
+    dropColumn: true,
+    renameColumn: false,
+    indexSchemaQualified: true,
+    dropIndexSchemaQualified: true,
+    addForeignKey: true,
+    dropForeignKey: false,
+    dropForeignKeySyntax: false,
+  },
+};
+
+function caps(d: AlterDialect): DialectCapabilities {
+  return CAPS[d];
+}
+
 export class UnsupportedAlterError extends Error {
   constructor(readonly op: string, readonly dialect: AlterDialect, reason: string) {
     super(`${dialect} 不支持该操作：${reason}`);
@@ -29,8 +129,7 @@ export class UnsupportedAlterError extends Error {
 
 /** 标识符引用（DDL 生成统一加引用，避免保留字冲突；oracle 统一小写） */
 export function quoteIdent(dialect: AlterDialect, s: string): string {
-  if (dialect === 'oracle') return `"${s.toLowerCase()}"`;
-  return `"${s}"`;
+  return caps(dialect).quote(s);
 }
 
 export function quoteTable(dialect: AlterDialect, schema: string, table: string): string {
@@ -65,18 +164,19 @@ export interface NewForeignKey {
 // ─── 列 ─────────────────────────────────────────────────────
 
 export function addColumnSql(d: AlterDialect, schema: string, table: string, c: NewColumn): string {
+  const cp = caps(d);
   if (!/^\w+$/.test(c.name)) throw new UnsupportedAlterError('ADD COLUMN', d, `非法列名：${c.name}`);
   const t = quoteTable(d, schema, table);
   const col = quoteIdent(d, c.name);
   let ddl = `${c.type.toUpperCase()}`;
   if (c.primaryKey) {
-    if (d === 'sqlite') throw new UnsupportedAlterError('ADD COLUMN', d, 'SQLite 不允许 ADD COLUMN 加 PRIMARY KEY');
+    if (!cp.addColumnPk) throw new UnsupportedAlterError('ADD COLUMN', d, '该方言不允许 ADD COLUMN 加 PRIMARY KEY');
     ddl += ' PRIMARY KEY';
   }
   if (c.nullable === false && !c.defaultExpr && !c.primaryKey) {
-    if (d === 'sqlite') throw new UnsupportedAlterError('ADD COLUMN', d, 'SQLite NOT NULL 列必须带非常量 DEFAULT');
+    if (!cp.addColumnNotNullNoDefault) throw new UnsupportedAlterError('ADD COLUMN', d, 'NOT NULL 列必须带非常量 DEFAULT');
   }
-  if (d === 'mysql' || d === 'mssql' || d === 'oracle') ddl += c.nullable === false ? ' NOT NULL' : ' NULL';
+  if (cp.addColumnNullClause) ddl += c.nullable === false ? ' NOT NULL' : ' NULL';
   if (c.defaultExpr) ddl += ` DEFAULT ${c.defaultExpr}`;
   return `ALTER TABLE ${t} ADD COLUMN ${col} ${ddl};`;
 }
@@ -89,8 +189,8 @@ export function dropColumnSql(d: AlterDialect, schema: string, table: string, co
 }
 
 export function renameColumnSql(d: AlterDialect, schema: string, table: string, from: string, to: string): string {
-  if (d === 'oracle') {
-    throw new UnsupportedAlterError('RENAME COLUMN', d, 'Oracle 18c 前不支持 RENAME COLUMN');
+  if (!caps(d).renameColumn) {
+    throw new UnsupportedAlterError('RENAME COLUMN', d, '该方言不支持 RENAME COLUMN');
   }
   return `ALTER TABLE ${quoteTable(d, schema, table)} RENAME COLUMN ${quoteIdent(d, from)} TO ${quoteIdent(d, to)};`;
 }
@@ -101,28 +201,20 @@ export function addIndexSql(d: AlterDialect, schema: string, table: string, idx:
   const cols = idx.columns.map((c) => quoteIdent(d, c)).join(', ');
   const u = idx.unique ? 'UNIQUE ' : '';
   const t = quoteTable(d, schema, table);
-  const name = schema ? `${quoteIdent(d, schema)}.${quoteIdent(d, idx.name)}` : quoteIdent(d, idx.name);
-  switch (d) {
-    case 'mssql':
-      // MSSQL：索引建在 schema 上，名称不能带 schema 前缀
-      return `CREATE ${u}INDEX ${quoteIdent(d, idx.name)} ON ${t} (${cols});`;
-    case 'oracle':
-      return `CREATE ${u}INDEX ${name} ON ${t} (${cols});`;
-    default:
-      return `CREATE ${u}INDEX ${name} ON ${t} (${cols});`;
-  }
+  const name = schema && caps(d).indexSchemaQualified
+    ? `${quoteIdent(d, schema)}.${quoteIdent(d, idx.name)}`
+    : quoteIdent(d, idx.name);
+  return `CREATE ${u}INDEX ${name} ON ${t} (${cols});`;
 }
 
 export function dropIndexSql(d: AlterDialect, schema: string, table: string, indexName: string): string {
-  const name = schema ? `${quoteIdent(d, schema)}.${quoteIdent(d, indexName)}` : quoteIdent(d, indexName);
-  switch (d) {
-    case 'mssql':
-      return `DROP INDEX ${quoteIdent(d, indexName)} ON ${quoteTable(d, schema, table)};`;
-    case 'oracle':
-      return `DROP INDEX ${name};`;
-    default:
-      return `DROP INDEX ${name};`;
+  const name = schema && caps(d).dropIndexSchemaQualified
+    ? `${quoteIdent(d, schema)}.${quoteIdent(d, indexName)}`
+    : quoteIdent(d, indexName);
+  if (d === 'mssql') {
+    return `DROP INDEX ${quoteIdent(d, indexName)} ON ${quoteTable(d, schema, table)};`;
   }
+  return `DROP INDEX ${name};`;
 }
 
 // ─── 外键 ───────────────────────────────────────────────────
@@ -133,11 +225,11 @@ export function addForeignKeySql(
   table: string,
   fk: NewForeignKey,
 ): string {
-  if (d === 'sqlite') {
+  if (!caps(d).addForeignKey) {
     throw new UnsupportedAlterError(
       'ADD FOREIGN KEY',
       d,
-      'SQLite 不支持 ALTER TABLE ADD FOREIGN KEY，需重建表（CREATE TABLE 新表 → INSERT INTO…SELECT → RENAME）',
+      '该方言不支持 ALTER TABLE ADD FOREIGN KEY，需重建表',
     );
   }
   const t = quoteTable(d, schema, table);
@@ -155,12 +247,11 @@ export function addForeignKeySql(
 }
 
 export function dropForeignKeySql(d: AlterDialect, schema: string, table: string, fkName: string): string {
-  if (d === 'oracle') {
-    throw new UnsupportedAlterError('DROP CONSTRAINT', d, 'Oracle 不支持 DROP CONSTRAINT，需重建表');
+  if (!caps(d).dropForeignKey) {
+    throw new UnsupportedAlterError('DROP CONSTRAINT', d, '该方言不支持 DROP CONSTRAINT，需重建表');
   }
-  if (d === 'mysql') {
+  if (caps(d).dropForeignKeySyntax) {
     return `ALTER TABLE ${quoteTable(d, schema, table)} DROP FOREIGN KEY ${quoteIdent(d, fkName)};`;
   }
-  // postgres / mssql
   return `ALTER TABLE ${quoteTable(d, schema, table)} DROP CONSTRAINT ${quoteIdent(d, fkName)};`;
 }

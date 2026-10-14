@@ -1,10 +1,13 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -165,6 +168,131 @@ func TestUnknownRoute(t *testing.T) {
 	status, _, _ := mpDo(t, srv, "GET", "/api/nonexistent", nil)
 	if status != http.StatusNotFound {
 		t.Fatalf("unknown route: status=%d", status)
+	}
+}
+
+// logMiddleware 记录 ServeMux 路由模板而非带 UUID 的 Path（模板基数固定，
+// 日志聚合与告警阈值才有意义），并按状态码分级；/api/health 静默——Docker
+// HEALTHCHECK 高频轮询，打日志只会淹没真正的事件。
+func TestLogMiddlewareRecordsRoutePatternAndSkipsHealth(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {})
+	mux.HandleFunc("GET /ok", func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "fine")
+	})
+	mux.HandleFunc("GET /api/connections/{id}", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("GET /boom", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	h := logMiddleware(mux)
+
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/health", nil))
+	if buf.Len() != 0 {
+		t.Fatalf("health 应静默，实际输出 %q", buf.String())
+	}
+
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/connections/deadbeef", nil))
+	entries, level := oneLogLine(t, &buf)
+	if entries["route"] != "GET /api/connections/{id}" {
+		t.Fatalf("route = %v，应为 ServeMux 模板而非带真实 id 的 Path", entries["route"])
+	}
+	if entries["status"] != float64(http.StatusNotFound) {
+		t.Fatalf("status = %v，WriteHeader 应被捕获", entries["status"])
+	}
+	if level != "INFO" {
+		t.Fatalf("4xx 应为 INFO，实际 %s", level)
+	}
+	buf.Reset()
+
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/ok", nil))
+	entries, level = oneLogLine(t, &buf)
+	if entries["status"] != float64(http.StatusOK) {
+		t.Fatalf("未显式 WriteHeader 时应记 200，实际 %v", entries["status"])
+	}
+	if level != "DEBUG" {
+		t.Fatalf("2xx 应为 DEBUG，实际 %s", level)
+	}
+	buf.Reset()
+
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/boom", nil))
+	entries, level = oneLogLine(t, &buf)
+	if entries["status"] != float64(http.StatusInternalServerError) {
+		t.Fatalf("status = %v", entries["status"])
+	}
+	if level != "WARN" {
+		t.Fatalf("5xx 应为 WARN，实际 %s", level)
+	}
+}
+
+func oneLogLine(t *testing.T, buf *bytes.Buffer) (map[string]any, string) {
+	t.Helper()
+	var lines []map[string]any
+	dec := json.NewDecoder(buf)
+	for dec.More() {
+		var m map[string]any
+		if err := dec.Decode(&m); err != nil {
+			t.Fatalf("decode log line: %v (raw %q)", err, buf.String())
+		}
+		lines = append(lines, m)
+	}
+	if len(lines) != 1 {
+		t.Fatalf("期望 1 条日志，实际 %d 条: %q", len(lines), buf.String())
+	}
+	level, ok := lines[0]["level"].(string)
+	if !ok {
+		t.Fatalf("日志缺 level 字段: %v", lines[0])
+	}
+	return lines[0], level
+}
+
+// hijackable 是一个同时实现 http.Flusher 与 http.Hijacker 的底层 ResponseWriter，
+// 用于验证 statusRecorder 真的把这两个接口转发下去。
+type hijackable struct {
+	http.ResponseWriter
+	flushed  int
+	hijacked bool
+}
+
+func (w *hijackable) Flush() { w.flushed++ }
+
+func (w *hijackable) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	w.hijacked = true
+	return nil, nil, nil
+}
+
+// statusRecorder 必须转发 Flush 与 Hijack：前者是 blob Range 流式取回的路径，
+// 后者是 /ws 的 gorilla 升级——断言失败会让 WebSocket 直接退化。首次
+// WriteHeader 生效，后续调用不覆盖，避免客户端改写已发出的状态码。
+func TestStatusRecorderForwardsFlushHijackAndFirstStatus(t *testing.T) {
+	inner := &hijackable{ResponseWriter: httptest.NewRecorder()}
+	rec := &statusRecorder{ResponseWriter: inner}
+
+	rec.Flush()
+	if inner.flushed != 1 {
+		t.Fatalf("Flush 未转发，flushed=%d", inner.flushed)
+	}
+
+	if _, _, err := rec.Hijack(); err != nil {
+		t.Fatalf("Hijack 转发失败: %v", err)
+	}
+	if !inner.hijacked {
+		t.Fatal("Hijack 未转发到底层 ResponseWriter")
+	}
+
+	rec.WriteHeader(http.StatusNoContent)
+	if rec.status != http.StatusNoContent {
+		t.Fatalf("status = %d", rec.status)
+	}
+	rec.WriteHeader(http.StatusInternalServerError)
+	if rec.status != http.StatusNoContent {
+		t.Fatalf("首次 WriteHeader 应生效，status = %d", rec.status)
 	}
 }
 

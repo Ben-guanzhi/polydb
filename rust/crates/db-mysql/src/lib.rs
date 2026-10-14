@@ -51,7 +51,7 @@ impl MySqlConn {
         })
     }
 
-    fn bind_value<'q>(
+    pub fn bind_value<'q>(
         q: sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments>,
         v: &Value,
     ) -> sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments> {
@@ -66,7 +66,7 @@ impl MySqlConn {
     }
 
     /// 与 Go 侧 DriverToValue 对齐：整数列保持 i64（MySQL 无独立 BOOL 类型）。
-    fn my_value(row: &MySqlRow, i: usize) -> Value {
+    pub fn my_value(row: &MySqlRow, i: usize) -> Value {
         let raw = match row.try_get_raw(i) {
             Ok(r) => r,
             Err(_) => return Value::Null,
@@ -101,7 +101,7 @@ impl MySqlConn {
         Value::String(format!("<{}>", raw.type_info().name()))
     }
 
-    fn detect_statement_type(sql: &str) -> StatementType {
+    pub fn detect_statement_type(sql: &str) -> StatementType {
         let t = strip_leading_comments(sql).trim().to_uppercase();
         if t.starts_with("SELECT") || t.starts_with("WITH") {
             StatementType::Select
@@ -135,7 +135,7 @@ impl MySqlConn {
             .collect()
     }
 
-    fn begin_statement(mode: TxMode) -> Option<String> {
+    pub fn begin_statement(mode: TxMode) -> Option<String> {
         match mode.isolation_level {
             IsolationLevel::ReadCommitted => {
                 Some("BEGIN ISOLATION LEVEL READ COMMITTED".to_string())
@@ -232,7 +232,7 @@ impl MySqlConn {
     }
 }
 
-fn strip_leading_comments(sql: &str) -> &str {
+pub fn strip_leading_comments(sql: &str) -> &str {
     let mut s = sql;
     loop {
         s = s.trim_start();

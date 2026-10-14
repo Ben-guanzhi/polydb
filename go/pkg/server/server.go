@@ -1,11 +1,14 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -760,9 +763,68 @@ func writeError(w http.ResponseWriter, err error) {
 	writeJSON(w, status, pe)
 }
 
+// statusRecorder 捕获状态码供 logMiddleware 记录。必须转发 Flush 与 Hijack，
+// 否则 /api/.../blobs 的 Range 流式取回与 /ws 的 gorilla 升级会因断言失败而退化。
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	if r.status == 0 {
+		r.status = code
+	}
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := r.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, http.ErrNotSupported
+}
+
+// logMiddleware 记录每次请求的路由、状态码与耗时。
+//
+// 两个刻意的取舍：
+//   - 记录 r.Pattern（ServeMux 模板，如 POST /api/connections/{id}/query）而非
+//     r.URL.Path：模板基数固定，日志聚合与告警阈值才有意义；UUID 形态的 Path
+//     每次请求都新，会淹没真正的信号。
+//   - 请求体与响应体一律不记录：msgpack 载荷里可能有 SQL 与凭据
+//     （AGENTS.md §10 禁止把密码/token 写进日志）。
 func logMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r)
+		if r.URL.Path == "/api/health" {
+			// Docker HEALTHCHECK 与 compose healthcheck 高频轮询，打日志只会淹没事件。
+			next.ServeHTTP(w, r)
+			return
+		}
+		rec := &statusRecorder{ResponseWriter: w}
+		start := time.Now()
+		next.ServeHTTP(rec, r)
+		if rec.status == 0 {
+			rec.status = http.StatusOK
+		}
+		l := slog.Default()
+		attrs := []any{"route", r.Pattern, "status", rec.status,
+			"duration_ms", time.Since(start).Milliseconds(), "client", r.RemoteAddr}
+		// 分级：2xx/3xx 走 Debug（默认级别下不可见，需要访问日志时
+		// POLYDB_LOG_LEVEL=debug 打开）；4xx 走 Info（鉴权失败、参数错误）；
+		// 5xx 走 Warn（服务端故障必须显性）。
+		switch {
+		case rec.status >= 500:
+			l.Warn("request", attrs...)
+		case rec.status >= 400:
+			l.Info("request", attrs...)
+		default:
+			l.Debug("request", attrs...)
+		}
 	})
 }
 

@@ -21,6 +21,9 @@ import (
 	"github.com/polydb/polydb/pkg/protocol"
 )
 
+// Version is set at build time via -ldflags.
+var Version = "dev"
+
 func main() {
 	if err := run(os.Args[1:], os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "polydb-cli:", err)
@@ -33,8 +36,13 @@ func run(args []string, in io.Reader, out io.Writer) error {
 	dbPath := fs.String("db", ":memory:", "SQLite 文件路径（默认 :memory:）")
 	sqlArg := fs.String("e", "", "要执行的 SQL；缺省时取位置参数或 stdin")
 	compact := fs.Bool("t", false, "紧凑表格输出")
+	version := fs.Bool("version", false, "打印版本信息")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *version {
+		fmt.Fprintln(out, Version)
+		return nil
 	}
 
 	sql := ""

@@ -15,14 +15,7 @@ import (
 // defaultSchema 在请求省略 schema 时按种类取默认（behavior.md §14.5）。
 // SQLite 驱动不做 schema 寻址，恒 main；其余方言传空串，由驱动用自己的当前库/模式。
 func defaultSchema(kind protocol.DatabaseKind) string {
-	switch kind {
-	case protocol.DatabaseKindSQLite:
-		return "main"
-	case protocol.DatabaseKindPostgres:
-		return "public"
-	default:
-		return ""
-	}
+	return driverSpecFor(kind).defaultSchema
 }
 
 // collectSnapshot 采集一个（连接, schema）的结构快照。视图/物化视图**不参与比对**，

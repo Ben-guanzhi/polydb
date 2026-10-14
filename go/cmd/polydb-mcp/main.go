@@ -19,6 +19,9 @@ import (
 	"github.com/polydb/polydb/pkg/storage"
 )
 
+// Version is set at build time via -ldflags.
+var Version = "dev"
+
 func main() {
 	var dataDirFlag string
 	flag.StringVar(&dataDirFlag, "data-dir", "", "数据目录（缺省取 POLYDB_DATA_DIR 或用户配置目录下的 polydb/）")

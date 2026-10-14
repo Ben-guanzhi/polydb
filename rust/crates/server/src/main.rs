@@ -22,7 +22,14 @@ async fn main() {
         tracing::error!(error = %e, dir = %data_dir.display(), "create data dir failed");
         std::process::exit(1);
     }
-    let storage = match Storage::open(db_path.to_str().unwrap()) {
+    let db_path_str = match db_path.to_str() {
+        Some(s) => s,
+        None => {
+            tracing::error!("db path is not valid UTF-8: {}", db_path.display());
+            std::process::exit(1);
+        }
+    };
+    let storage = match Storage::open(db_path_str) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "open storage failed");

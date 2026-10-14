@@ -358,7 +358,15 @@ async fn get_blob(
             .insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
         resp.headers_mut().insert(
             CONTENT_RANGE,
-            format!("bytes */{size}").parse::<HeaderValue>().unwrap(),
+            match format!("bytes */{size}").parse::<HeaderValue>() {
+                Ok(v) => v,
+                Err(_) => {
+                    return error_response(CoreError::Protocol(Box::new(PolyDBError::new(
+                        codes::UNKNOWN,
+                        "failed to build content-range header",
+                    ))));
+                }
+            },
         );
         return resp;
     }

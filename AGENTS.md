@@ -54,17 +54,17 @@ polydb/
 ├── rust/
 │ ├── Cargo.toml # workspace: polydb
 │ ├── crates/
-│ │ ├── protocol/ # 由 spec 生成（package: polydb-protocol）
-│ │ ├── core/ # 领域模型、错误、DTO（无 IO）
-│ │ ├── db-core/ # DatabaseDriver / SqlDriver / KvDriver
-│ │ ├── db-sqlite/ db-mysql/ db-postgres/ db-mssql/ db-oracle/ db-redis/
-│ │ ├── storage/ # sqlx + SQLite + 本地文件 keyring
-│ │ ├── app-core/ # use case 编排
-│ │ ├── transport/ # LocalTransport / HttpTransport
+ │ │ ├── protocol/ # DTO（手工维护 + genprotocol 漂移检查；仅 TS 是真生成）
+ │ │ ├── core/ # 领域模型、错误、DTO（无 IO）
+ │ │ ├── db-core/ # DatabaseDriver / SqlDriver / KvDriver
+ │ │ ├── db-sqlite/ db-mysql/ db-postgres/ db-mssql/ db-oracle/ db-redis/
+ │ │ ├── storage/ # rusqlite(bundled) + SQLite + 本地文件 keyring
+ │ │ ├── app-core/ # use case 编排
+ │ │ ├── transport/ # 仅 LocalTransport（进程内；无 HttpTransport）
 │ │ ├── server/ # Axum（HTTP 服务端，二进制在 crate 内）
-│ │ └── ui-gui/ # GPUI（仅 GUI；TUI 只做 Go，无 Rust ui-tui）
-│ └── apps/
-│   └── polydb-gui/
+ │ │ └── ui-gui/ # GPUI 组件与视图层（TUI 只做 Go，无 Rust ui-tui）
+ │ └── apps/
+ │   └── polydb-gui/ # GPUI 二进制入口，调用 ui-gui
 ├── go/
 │ ├── go.mod # module github.com/<org>/polydb
 │ ├── cmd/
@@ -198,11 +198,11 @@ JSON 仅作为调试/握手 fallback，可保留 application/json。
 编码格式库
 用途	Rust	Go
 MessagePack	rmp-serde	vmihailenco/msgpack
-CBOR	ciborium	fxamacker/cbor
-Arrow	预留（未引入）	—
-压缩	flate2 / zstd	klauspost/compress
+CBOR	预留（未引入依赖）	预留（未引入依赖）
+Arrow	Rust `arrow 54` 已声明于 workspace 但零使用	预留（未引入依赖）
+压缩	预留（未引入依赖）	预留（未引入依赖）
 6. 存储层（storage）
-本地 SQLite，sqlx（Rust）/ modernc.org/sqlite（Go，纯 Go 免 cgo）。
+本地 SQLite，rusqlite（Rust，bundled 免 cgo）/ modernc.org/sqlite（Go，纯 Go 免 cgo）。
 
 WAL 模式。
 
@@ -216,7 +216,7 @@ Repository 模式；Rust 用 OnceCell 单例。
 平台	路径
 配置	~/.config/polydb/
 数据	~/.local/share/polydb/
-日志	~/.local/state/polydb/polydb.log
+日志	~/.local/state/polydb/polydb.log（POLYDB_LOG_FILE 指定；缺省 stderr 交容器日志收集，POLYDB_LOG_LEVEL 控级，缺省 info）
 环境变量前缀	POLYDB_*
 错误码前缀	POLYDB_ERR_*
 7. 双实现一致性
@@ -293,6 +293,8 @@ module path：github.com/<org>/polydb。
 命名：snake_case（Rust/JSON 字段）、camelCase（Go 导出）、PascalCase（类型）。
 
 禁止在 driver/app-core 中 println! 调试输出，用 tracing（Rust）/ slog 或 zerolog（Go）。
+
+HTTP 访问日志记 `route`（ServeMux 模板，如 `POST /api/connections/{id}/query`）而非 `r.URL.Path`：模板基数固定，聚合与告警阈值才有意义；UUID 形态的 Path 每请求都新。请求体一律不记——msgpack 载荷里可能有 SQL 与凭据。
 
 禁止把密码/token 写进日志。
 
@@ -421,14 +423,17 @@ logger 名	polydb
 
 | # | AGENTS.md 声称 | 实际实现 | 状态 | 修复方向 |
 |---|---|---|---|---|
-| 1 | `SqlConnection` / `KvConnection` 类型存在 | 不存在，只有 `Connection` + `AsSQL()`/`AsKV()` 能力降级 | 已确认 | 若需要强类型连接，在 spec 中补 DTO 并重新生成 |
-| 2 | Rust `HttpTransport` 存在 | 不存在，只有 `LocalTransport`；Web 靠 Go/Rust server | 已确认 | 若需要 Rust HTTP transport，新建 crate 并补 trait |
-| 3 | Rust storage 用 `sqlx` | 实际用 `rusqlite`（bundled） | 已确认 | 迁移到 sqlx 或更新本节 |
-| 4 | 异步统一单运行时 | Rust 混用 tokio（server/SSH/tiberius/oracle）+ smol（主体） | 已知债 | 全局迁移到 smol 或 tokio，二选一 |
-| 5 | Arrow IPC 数据面 | 预留未实现，数据面一律 MessagePack | 已确认 | 实现 Arrow 旁路或删除声明 |
+| 1 | `SqlConnection` / `KvConnection` 类型存在 | 不存在，只有 `Connection` + `as_sql()`/`as_kv()` 能力降级 | 已确认 | 若需要强类型连接，在 spec 中补 DTO 并重新生成 |
+| 4 | 异步统一单运行时 | Rust 混用 tokio（server/SSH/tiberius/oracle）+ smol（block_on 站点）+ `async-trait` 装箱 | 已知债 | 全局迁移到 smol 或 tokio，二选一 |
+| 5 | Arrow IPC 数据面 | 预留未实现，数据面一律 MessagePack；`arrow 54` 已声明于 workspace Cargo.toml 但全仓零使用 | 未修复 | 实现 Arrow 旁路，或从 Cargo.toml 删除该依赖 |
 | 6 | `SqlDriver::begin() -> Transaction` | 实为 `begin_tx(TxMode) -> Box<dyn Any+Send>` | 已确认 | 迁移到 trait-object transaction |
 | 7 | 契约测试用 JSON fixture | 实为 Go 测试（`test/contract/`） | 已确认 | 统一为 JSON fixture 或更新本节 |
-| 8 | Rust/Go protocol 由 spec 生成 | 仅 TS 是真生成；Rust/Go 是手工维护 + 漂移检查 | 已确认 | 扩展 genprotocol 生成 Rust/Go |
+| 9 | `.qoder/skills/polydb/SKILL.md` 记录实现事实 | 被 `.gitignore` 排除（不入库、不随 tag 发布、无法被 CI 校验），且自身已漂移：称 `ImportModalParts.tsx` ~11k 行，实际 17 行 barrel re-export | 未修复 | 入库，或在文首标注「非权威，以代码为准」 |
+
+> 原第 2/3/8 条（Rust `HttpTransport` 存在、storage 用 `sqlx`、Rust/Go protocol 由 spec 生成）
+> 与第 9 条（Go 服务端无结构化日志）已于 2026-10-13 修复：第 2/3/8 节的正文已改为与实现
+> 一致，第 9 条改为实现 `logMiddleware`（记 `route`/`status`/`duration_ms`/`client`，按状态码
+> 分级，`/api/health` 静默）+ `POLYDB_LOG_LEVEL`/`POLYDB_LOG_FILE`，故均从本表删除。
 
 > 原第 9 条（`browse_rows_limits` 缺省 200 vs spec 100）已于 2026-10-12 修复：Go
 > `dbcore.BrowseRowsLimits` 与 Rust `browse_rows_limits` 均改为缺省 100，与

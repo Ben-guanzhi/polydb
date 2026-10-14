@@ -20,14 +20,37 @@ use polydb_storage::{keyring_ref, BlobStore, FileKeyring, Keyring, Storage};
 
 type Snapshot = schema_diff::Snapshot;
 type TableSnapshot = schema_diff::TableSnapshot;
+
+/// Per-engine metadata: default port, schema, host requirement, DSN style.
+/// Adding a new engine means adding one entry here.
+struct DriverSpec {
+    default_port: u16,
+    default_schema: &'static str,
+    needs_host: bool,
+}
+
+static SQLITE: DriverSpec = DriverSpec { default_port: 0, default_schema: "main", needs_host: false };
+static POSTGRES: DriverSpec = DriverSpec { default_port: 5432, default_schema: "public", needs_host: true };
+static MYSQL: DriverSpec = DriverSpec { default_port: 3306, default_schema: "", needs_host: true };
+static MSSQL: DriverSpec = DriverSpec { default_port: 1433, default_schema: "", needs_host: true };
+static ORACLE: DriverSpec = DriverSpec { default_port: 1521, default_schema: "", needs_host: true };
+static REDIS: DriverSpec = DriverSpec { default_port: 6379, default_schema: "", needs_host: true };
+
+fn spec(kind: DatabaseKind) -> &'static DriverSpec {
+    match kind {
+        DatabaseKind::Sqlite => &SQLITE,
+        DatabaseKind::Postgres => &POSTGRES,
+        DatabaseKind::MySql => &MYSQL,
+        DatabaseKind::Mssql => &MSSQL,
+        DatabaseKind::Oracle => &ORACLE,
+        DatabaseKind::Redis => &REDIS,
+    }
+}
+
 /// `schema` 省略时按种类取默认（behavior.md §14.5）。SQLite 驱动不做 schema 寻址，恒 `main`；
 /// 其余方言把空串直传给驱动，由驱动用自己的当前库/模式。
 fn default_schema(kind: DatabaseKind) -> &'static str {
-    match kind {
-        DatabaseKind::Sqlite => "main",
-        DatabaseKind::Postgres => "public",
-        _ => "",
-    }
+    spec(kind).default_schema
 }
 
 /// 线路选项 → 纯函数层选项：整体省略与逐字段省略都按 false 处理。
@@ -313,7 +336,7 @@ impl AppCore {
         let mut conn_info = info.clone();
         let mut tunnel: Option<Arc<Tunnel>> = None;
         if let Some(cfg) = &info.ssh_tunnel {
-            if info.kind != DatabaseKind::Sqlite {
+            if spec(info.kind).needs_host {
                 let ssh_pwd = self.secret(cfg.password_ref.as_deref().unwrap_or(""))?;
                 let passphrase =
                     self.secret(cfg.private_key_passphrase_ref.as_deref().unwrap_or(""))?;
@@ -823,7 +846,7 @@ impl AppCore {
         if ref_out.is_none() {
             *ref_out = Some(keyring_ref(scope));
         }
-        let r = ref_out.as_ref().unwrap().clone();
+        let r = ref_out.clone().expect("ref_out was just set");
         self.kr.set(&r, secret)
     }
 
@@ -960,16 +983,7 @@ fn redis_db_index(info: &ConnectionInfo) -> u32 {
 
 // target_host_port 返回隧道目标地址（含各驱动默认端口；与 Go 侧一致）。
 fn target_host_port(info: &ConnectionInfo) -> (String, u16) {
-    let host = host_of(info);
-    let port = info.port.unwrap_or(match info.kind {
-        DatabaseKind::Postgres => 5432,
-        DatabaseKind::MySql => 3306,
-        DatabaseKind::Mssql => 1433,
-        DatabaseKind::Oracle => 1521,
-        DatabaseKind::Redis => 6379,
-        DatabaseKind::Sqlite => 0,
-    });
-    (host, port)
+    (host_of(info), info.port.unwrap_or(spec(info.kind).default_port))
 }
 
 // split_local_addr 解析 "127.0.0.1:<port>"。

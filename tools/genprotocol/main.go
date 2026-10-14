@@ -23,9 +23,12 @@ func main() {
 	tsFile := flag.String("ts", filepath.Join(repo, "web", "src", "api", "index.ts"), "TS output file")
 	flag.Parse()
 
-	cmd := flag.Arg(0)
+	var cmd string
+	var rest []string
+	if args := flag.Args(); len(args) > 0 {
+		cmd, rest = args[0], args[1:]
+	}
 	check := false
-	rest := flag.Args()[1:]
 	for _, a := range rest {
 		if a == "--check" {
 			check = true

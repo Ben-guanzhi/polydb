@@ -195,3 +195,88 @@ fn failed_in_tx_execute_keeps_the_transaction_rollbackable() {
 
     app.disconnect(id);
 }
+
+#[test]
+fn concurrent_connect_is_thread_safe() {
+    // 并发 connect 同一 id：所有调用都必须成功返回，注册表里恰好一条连接。
+    // 与 Go 侧 TestConcurrentEnsureCoalescesToSingleConnection 对齐。
+    let app = std::sync::Arc::new(setup());
+    let info = app.create_connection(&sqlite_req("concurrent")).unwrap();
+    let id = info.id;
+
+    assert!(!app.connection_status(id).unwrap().connected);
+
+    const N: usize = 16;
+    let mut handles = Vec::with_capacity(N);
+    for _ in 0..N {
+        let app = std::sync::Arc::clone(&app);
+        handles.push(std::thread::spawn(move || {
+            app.connect(id)
+        }));
+    }
+
+    let mut failures = 0;
+    for h in handles {
+        if let Err(e) = h.join().unwrap() {
+            failures += 1;
+            eprintln!("connect failed: {e}");
+        }
+    }
+
+    assert_eq!(
+        failures, 0,
+        "concurrent connect failed {failures} times (should be 0)"
+    );
+    assert!(
+        app.connection_status(id).unwrap().connected,
+        "connection should be registered after concurrent connect"
+    );
+
+    app.disconnect(id);
+}
+
+#[test]
+fn concurrent_lazy_connect_via_execute() {
+    // 并发 execute 同一未连接 id：懒连接路径必须工作，所有调用成功。
+    // 与 Go 侧 ensure 的并发归并语义对齐（Rust 侧无 singleflight，但必须线程安全）。
+    let app = std::sync::Arc::new(setup());
+    let info = app.create_connection(&sqlite_req("lazy-concurrent")).unwrap();
+    let id = info.id;
+
+    assert!(!app.connection_status(id).unwrap().connected);
+
+    const N: usize = 8;
+    let mut handles = Vec::with_capacity(N);
+    for _ in 0..N {
+        let app = std::sync::Arc::clone(&app);
+        handles.push(std::thread::spawn(move || {
+            smol::block_on(async {
+                app.execute(id, "SELECT 42", &[]).await
+            })
+        }));
+    }
+
+    let mut failures = 0;
+    for h in handles {
+        match h.join().unwrap() {
+            Ok(result) => {
+                assert_eq!(result.rows[0][0], Value::Integer(42));
+            }
+            Err(e) => {
+                failures += 1;
+                eprintln!("execute failed: {e}");
+            }
+        }
+    }
+
+    assert_eq!(
+        failures, 0,
+        "concurrent lazy execute failed {failures} times (should be 0)"
+    );
+    assert!(
+        app.connection_status(id).unwrap().connected,
+        "connection should be registered after concurrent lazy execute"
+    );
+
+    app.disconnect(id);
+}

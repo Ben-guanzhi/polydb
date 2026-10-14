@@ -1,0 +1,245 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  id-token: write
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ── Rust: polydb-server + polydb-gui ──────────────────────
+  rust-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Build server (Linux)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          cd rust
+          cargo build --release --target x86_64-unknown-linux-gnu -p polydb-server
+          mkdir -p ../../dist
+          cp target/x86_64-unknown-linux-gnu/release/polydb-server ../../dist/
+
+      - name: Build server (Windows)
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        uses: actions/setup-go@v5
+        run: |
+          go install github.com/curlup/cargo-xwin@latest
+          . "$HOME/.cargo/env"
+          cd rust
+          cargo xwin build --release --target x86_64-pc-windows-msvc -p polydb-server
+          mkdir -p ../../dist
+          cp target/x86_64-pc-windows-msvc/release/polydb-server.exe ../../dist/
+
+      - name: Upload Rust artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: polydb-rust-${{ matrix.target }}
+          path: dist/
+
+  # ── Go: polydb-server, polydb-tui, polydb-cli, polydb-mcp ──
+  go-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: ""
+          - goos: linux
+            goarch: arm64
+            ext: ""
+          - goos: windows
+            goarch: amd64
+            ext: ".exe"
+          - goos: darwin
+            goarch: amd64
+            ext: ""
+          - goos: darwin
+            goarch: arm64
+            ext: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+          cache-dependency-path: go/go.sum
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Build Go binaries
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          mkdir -p dist
+          cd go
+          for cmd in polydb-server polydb-tui polydb-cli polydb-mcp; do
+            ext="${{ matrix.ext }}"
+            go build -trimpath -ldflags "-s -w -X main.Version=${VERSION}" -o "../dist/${cmd}${ext}" "./cmd/${cmd}"
+          done
+
+      - name: Upload Go artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: polydb-go-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/
+
+  # ── Docker image ──────────────────────────────────────────
+  docker-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            image: polydb-server
+          - platform: linux/arm64
+            image: polydb-server
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}
+            ghcr.io/${{ github.repository }}:latest
+          labels: |
+            org.opencontainers.image.version=${{ steps.version.outputs.VERSION }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+  # ── Sign, SBOM, and release ──────────────────────────────
+  sign-and-release:
+    needs: [rust-build, go-build, docker-build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+
+      - name: Flatten artifacts
+        run: |
+          find dist -type f -exec mv {} dist/ \;
+          find dist -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} \;
+
+      - name: Create checksums
+        run: sha256sum dist/* > dist/checksums.txt
+
+      - name: Sign checksums
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          echo "$GPG_PASSPHRASE" | gpg --batch --pinentry-mode loopback --detach-sign --armor --output dist/checksums.txt.asc dist/checksums.txt
+
+      - name: Generate SBOM (Go)
+        uses: anchore/sbom-action@v3
+        with:
+          output: dist/sbom-go.spdx.json
+          format: spdx-json
+          artifact-type: project
+          file: go/go.sum
+
+      - name: Generate SBOM (Rust)
+        uses: anchore/sbom-action@v3
+        with:
+          output: dist/sbom-rust.spdx.json
+          format: spdx-json
+          artifact-type: project
+          file: rust/Cargo.lock
+
+      - name: Generate SBOM (Web)
+        uses: anchore/sbom-action@v3
+        with:
+          output: dist/sbom-web.spdx.json
+          format: spdx-json
+          artifact-type: project
+          file: web/package-lock.json
+
+      - name: Setup OIDC token
+        id: fetch_token
+        uses: actions/oauth-token@v1
+        with:
+          oidc-audience: https://ghcr.io
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.5.0
+        with:
+          version: 'v2.4.1'
+
+      - name: Cosign sign Docker image
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+        run: |
+          cosign sign \
+            --oidc-provider https://token.actions.githubusercontent.com \
+            --attestation \
+            --yes \
+            "ghcr.io/${{ github.repository }}:${{ github.ref_name }}" \
+            "ghcr.io/${{ github.repository }}:latest"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: polydb ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -25,6 +25,27 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
+// driverSpec holds per-engine metadata: default port, schema, host requirement.
+// Adding a new engine means adding one entry to the driverSpecs map.
+type driverSpec struct {
+	defaultPort  int
+	defaultSchema string
+	needsHost    bool
+}
+
+var driverSpecs = map[protocol.DatabaseKind]driverSpec{
+	protocol.DatabaseKindSQLite:   {0, "main", false},
+	protocol.DatabaseKindPostgres: {5432, "public", true},
+	protocol.DatabaseKindMySQL:    {3306, "", true},
+	protocol.DatabaseKindMSSQL:    {1433, "", true},
+	protocol.DatabaseKindOracle:   {1521, "", true},
+	protocol.DatabaseKindRedis:    {6379, "", true},
+}
+
+func driverSpecFor(kind protocol.DatabaseKind) driverSpec {
+	return driverSpecs[kind]
+}
+
 // txEntry 保存单个进程内事务的运行时状态。同一 txEntry 内的
 // driver / tx 只在 Begin 时赋值，Commit / Rollback 之后 status 会迁移，
 // ExecuteInTx 依赖 status 判断事务是否仍可用。
@@ -158,7 +179,7 @@ func (a *AppCore) Connect(ctx context.Context, id string) error {
 
 	connInfo := info
 	var tunnel *sshtunnel.Tunnel
-	if info.SSHTunnel != nil && info.Kind != protocol.DatabaseKindSQLite {
+	if info.SSHTunnel != nil && driverSpecFor(info.Kind).needsHost {
 		sshPwd, err := a.secret(info.SSHTunnel.PasswordRef)
 		if err != nil {
 			return err
@@ -760,18 +781,7 @@ func targetHostPort(info protocol.ConnectionInfo) (string, int) {
 	}
 	port := info.Port
 	if port == 0 {
-		switch info.Kind {
-		case protocol.DatabaseKindPostgres:
-			port = 5432
-		case protocol.DatabaseKindMySQL:
-			port = 3306
-		case protocol.DatabaseKindMSSQL:
-			port = 1433
-		case protocol.DatabaseKindOracle:
-			port = 1521
-		case protocol.DatabaseKindRedis:
-			port = 6379
-		}
+		port = driverSpecFor(info.Kind).defaultPort
 	}
 	return host, port
 }

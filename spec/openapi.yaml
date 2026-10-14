@@ -6,9 +6,9 @@ info:
     PolyDB REST API — 多数据库客户端的控制面接口。
 
     ## 编码约定
-    - 控制面（连接管理、元数据、DDL）使用 **MessagePack** (`application/msgpack`)
-    - 数据面（查询结果）使用 **Arrow IPC** (`application/vnd.apache.arrow.stream`)
-    - JSON (`application/json`) 仅作为调试/握手 fallback
+     - 控制面（连接管理、元数据、DDL）使用 **MessagePack** (`application/msgpack`)
+     - 数据面（查询结果）使用 **MessagePack** (`application/msgpack`)；Arrow IPC 为预留扩展，未实现
+     - JSON (`application/json`) 仅作为调试/握手 fallback
     - 错误统一使用 `application/json` 格式
 
     ## 认证（M10 起，可选启用）
@@ -318,7 +318,7 @@ paths:
       summary: 执行 SQL 查询
       description: |
         执行 SQL 查询并返回结果。
-        响应使用 Arrow IPC 格式（大数据集高效传输）。
+        响应默认使用 MessagePack 格式（大数据集高效传输）。
         JSON 格式可用于调试（Content-Type: application/json）。
         若 body 携带 query_id，服务端在响应头 X-Query-ID 回显，可用于 POST /api/queries/{query_id}/cancel 取消。
       tags: [query]
@@ -340,11 +340,6 @@ paths:
               schema:
                 type: string
           content:
-            application/vnd.apache.arrow.stream:
-              schema:
-                type: string
-                format: binary
-                description: Arrow IPC stream
             application/msgpack:
               schema:
                 $ref: "schemas/query.json#/definitions/QueryResult"

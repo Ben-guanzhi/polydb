@@ -828,4 +828,398 @@ mod tests {
         assert_eq!(sql, "`n` IN (?, ?)");
         assert_eq!(args, vec![Value::Integer(1), Value::Integer(2)]);
     }
+
+    // ── Pagination limits ───────────────────────────────────────────────
+
+    #[test]
+    fn browse_rows_limits_clamps() {
+        assert_eq!(browse_rows_limits(0), 100);
+        assert_eq!(browse_rows_limits(1), 1);
+        assert_eq!(browse_rows_limits(100), 100);
+        assert_eq!(browse_rows_limits(10_000), 10_000);
+        assert_eq!(browse_rows_limits(10_001), 10_000);
+        assert_eq!(browse_rows_limits(u32::MAX), 10_000);
+    }
+
+    // ── qualify_table ───────────────────────────────────────────────────
+
+    #[test]
+    fn qualify_table_with_schema() {
+        assert_eq!(qualify_table(DIALECT_DEFAULT, "public", "users"), "\"public\".\"users\"");
+        assert_eq!(qualify_table(DIALECT_MYSQL, "mydb", "users"), "`mydb`.`users`");
+        assert_eq!(qualify_table(DIALECT_MSSQL, "dbo", "users"), "[dbo].[users]");
+    }
+
+    #[test]
+    fn qualify_table_empty_schema_omits_qualifier() {
+        assert_eq!(qualify_table(DIALECT_DEFAULT, "", "users"), "\"users\"");
+        assert_eq!(qualify_table(DIALECT_MYSQL, "", "users"), "`users`");
+    }
+
+    // ── build_order_by ──────────────────────────────────────────────────
+
+    #[test]
+    fn build_order_by_empty_returns_empty() {
+        let req = polydb_protocol::TableRowsRequest::default();
+        assert_eq!(build_order_by(DIALECT_DEFAULT, &req), "");
+    }
+
+    #[test]
+    fn build_order_by_single_column() {
+        let req = polydb_protocol::TableRowsRequest {
+            order_by: vec![polydb_protocol::OrderClause {
+                column: "name".to_string(),
+                dir: polydb_protocol::SortDirection::Asc,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(build_order_by(DIALECT_DEFAULT, &req), " ORDER BY \"name\" asc");
+        assert_eq!(build_order_by(DIALECT_MYSQL, &req), " ORDER BY `name` asc");
+        assert_eq!(build_order_by(DIALECT_MSSQL, &req), " ORDER BY [name] asc");
+    }
+
+    #[test]
+    fn build_order_by_multiple_columns() {
+        let req = polydb_protocol::TableRowsRequest {
+            order_by: vec![
+                polydb_protocol::OrderClause {
+                    column: "age".to_string(),
+                    dir: polydb_protocol::SortDirection::Desc,
+                },
+                polydb_protocol::OrderClause {
+                    column: "name".to_string(),
+                    dir: polydb_protocol::SortDirection::Asc,
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            build_order_by(DIALECT_DEFAULT, &req),
+            " ORDER BY \"age\" desc, \"name\" asc"
+        );
+    }
+
+    // ── build_rows_query ────────────────────────────────────────────────
+
+    fn req_with(lim: u32, off: u64, cols: Vec<&str>, order: Vec<(&str, polydb_protocol::SortDirection)>) -> polydb_protocol::TableRowsRequest {
+        polydb_protocol::TableRowsRequest {
+            columns: cols.into_iter().map(|s| s.to_string()).collect(),
+            conditions: vec![],
+            logic: None,
+            order_by: order.into_iter().map(|(c, d)| polydb_protocol::OrderClause { column: c.to_string(), dir: d }).collect(),
+            offset: off,
+            limit: lim,
+        }
+    }
+
+    #[test]
+    fn build_rows_query_select_star() {
+        let req = req_with(10, 0, vec![], vec![]);
+        let (sql, args) = build_rows_query(DIALECT_DEFAULT, "public", "users", &req).unwrap();
+        assert_eq!(sql, "SELECT * FROM \"public\".\"users\" LIMIT 11 OFFSET 0");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn build_rows_query_select_columns() {
+        let req = req_with(5, 10, vec!["id", "name"], vec![]);
+        let (sql, args) = build_rows_query(DIALECT_MYSQL, "", "users", &req).unwrap();
+        assert_eq!(sql, "SELECT `id`, `name` FROM `users` LIMIT 6 OFFSET 10");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn build_rows_query_mssql_order_by_fallback() {
+        let req = req_with(10, 0, vec![], vec![]);
+        let (sql, _) = build_rows_query(DIALECT_MSSQL, "", "users", &req).unwrap();
+        assert!(
+            sql.contains("ORDER BY (SELECT NULL)"),
+            "mssql needs ORDER BY fallback for pagination: {sql}"
+        );
+    }
+
+    #[test]
+    fn build_rows_query_oracle_offset_fetch() {
+        let req = req_with(10, 20, vec![], vec![]);
+        let (sql, _) = build_rows_query(DIALECT_ORACLE, "", "users", &req).unwrap();
+        assert!(sql.contains("OFFSET 20 ROWS FETCH NEXT 11 ROWS ONLY"), "oracle pagination: {sql}");
+    }
+
+    // ── build_rows_count_query ──────────────────────────────────────────
+
+    #[test]
+    fn build_rows_count_query_basic() {
+        let req = req_with(10, 0, vec![], vec![]);
+        let (sql, args) = build_rows_count_query(DIALECT_DEFAULT, "public", "users", &req).unwrap();
+        assert_eq!(sql, "SELECT COUNT(*) FROM \"public\".\"users\"");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn build_rows_count_query_with_where() {
+        let req = polydb_protocol::TableRowsRequest {
+            columns: vec![],
+            conditions: vec![cond("age", Op::Gt, Value::Integer(18))],
+            logic: None,
+            order_by: vec![],
+            offset: 0,
+            limit: 10,
+        };
+        let (sql, args) = build_rows_count_query(DIALECT_DEFAULT, "", "users", &req).unwrap();
+        assert_eq!(sql, "SELECT COUNT(*) FROM \"users\" WHERE \"age\" > ?");
+        assert_eq!(args, vec![Value::Integer(18)]);
+    }
+
+    // ── rows_result_to_browse_page ──────────────────────────────────────
+
+    #[test]
+    fn rows_result_to_browse_page_exactly_fits() {
+        let qr = polydb_protocol::QueryResult {
+            columns: vec![],
+            rows: vec![vec![Value::Integer(1)], vec![Value::Integer(2)]],
+            affected_rows: 0,
+            execution_time_ms: 1.0,
+            truncated: false,
+            total_rows: None,
+            has_more: false,
+            statement_type: None,
+        };
+        let page = rows_result_to_browse_page(qr, 0, 2);
+        assert_eq!(page.rows.len(), 2);
+        assert!(!page.has_more);
+        assert_eq!(page.offset, 0);
+    }
+
+    #[test]
+    fn rows_result_to_browse_page_truncates_extra_row() {
+        let qr = polydb_protocol::QueryResult {
+            columns: vec![],
+            rows: vec![vec![Value::Integer(1)], vec![Value::Integer(2)], vec![Value::Integer(3)]],
+            affected_rows: 0,
+            execution_time_ms: 1.0,
+            truncated: false,
+            total_rows: None,
+            has_more: false,
+            statement_type: None,
+        };
+        let page = rows_result_to_browse_page(qr, 0, 2);
+        assert_eq!(page.rows.len(), 2);
+        assert!(page.has_more);
+    }
+
+    #[test]
+    fn rows_result_to_browse_page_empty() {
+        let qr = polydb_protocol::QueryResult {
+            columns: vec![],
+            rows: vec![],
+            affected_rows: 0,
+            execution_time_ms: 0.0,
+            truncated: false,
+            total_rows: None,
+            has_more: false,
+            statement_type: None,
+        };
+        let page = rows_result_to_browse_page(qr, 0, 10);
+        assert!(page.rows.is_empty());
+        assert!(!page.has_more);
+    }
+
+    // ── count_result_to_u64 ─────────────────────────────────────────────
+
+    #[test]
+    fn count_result_from_integer() {
+        let qr = polydb_protocol::QueryResult {
+            columns: vec![],
+            rows: vec![vec![Value::Integer(42)]],
+            affected_rows: 0,
+            execution_time_ms: 0.0,
+            truncated: false,
+            total_rows: None,
+            has_more: false,
+            statement_type: None,
+        };
+        assert_eq!(count_result_to_u64(qr).unwrap(), 42);
+    }
+
+    #[test]
+    fn count_result_from_float() {
+        let qr = polydb_protocol::QueryResult {
+            columns: vec![],
+            rows: vec![vec![Value::Float(100.0)]],
+            affected_rows: 0,
+            execution_time_ms: 0.0,
+            truncated: false,
+            total_rows: None,
+            has_more: false,
+            statement_type: None,
+        };
+        assert_eq!(count_result_to_u64(qr).unwrap(), 100);
+    }
+
+    #[test]
+    fn count_result_from_string() {
+        let qr = polydb_protocol::QueryResult {
+            columns: vec![],
+            rows: vec![vec![Value::String("256".to_string())]],
+            affected_rows: 0,
+            execution_time_ms: 0.0,
+            truncated: false,
+            total_rows: None,
+            has_more: false,
+            statement_type: None,
+        };
+        assert_eq!(count_result_to_u64(qr).unwrap(), 256);
+    }
+
+    #[test]
+    fn count_result_from_string_with_whitespace() {
+        let qr = polydb_protocol::QueryResult {
+            columns: vec![],
+            rows: vec![vec![Value::String("  99  ".to_string())]],
+            affected_rows: 0,
+            execution_time_ms: 0.0,
+            truncated: false,
+            total_rows: None,
+            has_more: false,
+            statement_type: None,
+        };
+        assert_eq!(count_result_to_u64(qr).unwrap(), 99);
+    }
+
+    #[test]
+    fn count_result_empty_rows_errors() {
+        let qr = polydb_protocol::QueryResult {
+            columns: vec![],
+            rows: vec![],
+            affected_rows: 0,
+            execution_time_ms: 0.0,
+            truncated: false,
+            total_rows: None,
+            has_more: false,
+            statement_type: None,
+        };
+        assert!(count_result_to_u64(qr).is_err());
+    }
+
+    #[test]
+    fn count_result_non_numeric_string_errors() {
+        let qr = polydb_protocol::QueryResult {
+            columns: vec![],
+            rows: vec![vec![Value::String("not-a-number".to_string())]],
+            affected_rows: 0,
+            execution_time_ms: 0.0,
+            truncated: false,
+            total_rows: None,
+            has_more: false,
+            statement_type: None,
+        };
+        assert!(count_result_to_u64(qr).is_err());
+    }
+
+    #[test]
+    fn count_result_negative_integer_errors() {
+        let qr = polydb_protocol::QueryResult {
+            columns: vec![],
+            rows: vec![vec![Value::Integer(-1)]],
+            affected_rows: 0,
+            execution_time_ms: 0.0,
+            truncated: false,
+            total_rows: None,
+            has_more: false,
+            statement_type: None,
+        };
+        assert!(count_result_to_u64(qr).is_err());
+    }
+
+    // ── OR-logic join ───────────────────────────────────────────────────
+
+    #[test]
+    fn multiple_conditions_joined_with_and() {
+        let req = polydb_protocol::TableRowsRequest {
+            conditions: vec![
+                cond("a", Op::Eq, Value::Integer(1)),
+                cond("b", Op::Gt, Value::Integer(5)),
+            ],
+            logic: None,
+            ..Default::default()
+        };
+        let (sql, args) = build_rows_where(DIALECT_DEFAULT, &req).unwrap();
+        assert_eq!(sql, "\"a\" = ? AND \"b\" > ?");
+        assert_eq!(args, vec![Value::Integer(1), Value::Integer(5)]);
+    }
+
+    #[test]
+    fn multiple_conditions_joined_with_or() {
+        let req = polydb_protocol::TableRowsRequest {
+            conditions: vec![
+                cond("a", Op::Eq, Value::Integer(1)),
+                cond("b", Op::Gt, Value::Integer(5)),
+            ],
+            logic: Some(polydb_protocol::FilterLogic::Or),
+            ..Default::default()
+        };
+        let (sql, args) = build_rows_where(DIALECT_DEFAULT, &req).unwrap();
+        assert_eq!(sql, "\"a\" = ? OR \"b\" > ?");
+        assert_eq!(args, vec![Value::Integer(1), Value::Integer(5)]);
+    }
+
+    // ── browse_rows_validate ────────────────────────────────────────────
+
+    #[test]
+    fn validate_empty_column_rejected() {
+        let req = polydb_protocol::TableRowsRequest {
+            columns: vec!["".to_string()],
+            ..Default::default()
+        };
+        assert!(browse_rows_validate(&req).is_err());
+    }
+
+    #[test]
+    fn validate_unknown_op_rejected() {
+        let req = polydb_protocol::TableRowsRequest {
+            conditions: vec![cond("x", Op::Unknown, Value::Null)],
+            ..Default::default()
+        };
+        assert!(browse_rows_validate(&req).is_err());
+    }
+
+    #[test]
+    fn validate_in_without_values_rejected() {
+        let req = polydb_protocol::TableRowsRequest {
+            conditions: vec![cond("x", Op::In, Value::Null)],
+            ..Default::default()
+        };
+        assert!(browse_rows_validate(&req).is_err());
+    }
+
+    #[test]
+    fn validate_between_missing_values_rejected() {
+        let req = polydb_protocol::TableRowsRequest {
+            conditions: vec![cond("x", Op::Between, Value::Integer(1))],
+            ..Default::default()
+        };
+        assert!(browse_rows_validate(&req).is_err());
+    }
+
+    #[test]
+    fn validate_eq_without_value_rejected() {
+        let req = polydb_protocol::TableRowsRequest {
+            conditions: vec![cond("x", Op::Eq, Value::Null)],
+            ..Default::default()
+        };
+        assert!(browse_rows_validate(&req).is_err());
+    }
+
+    #[test]
+    fn validate_empty_and_null_ops_pass() {
+        let req = polydb_protocol::TableRowsRequest {
+            conditions: vec![
+                cond("x", Op::Empty, Value::Null),
+                cond("y", Op::Null, Value::Null),
+                cond("z", Op::NotNull, Value::Null),
+            ],
+            ..Default::default()
+        };
+        assert!(browse_rows_validate(&req).is_ok());
+    }
 }

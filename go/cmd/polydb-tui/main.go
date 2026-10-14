@@ -18,6 +18,9 @@ import (
 	"github.com/polydb/polydb/pkg/transport"
 )
 
+// Version is set at build time via -ldflags.
+var Version = "dev"
+
 func main() {
 	server := flag.String("server", os.Getenv("POLYDB_SERVER"), "远程 polydb-server 地址（如 http://127.0.0.1:8080）；缺省为本机直连模式")
 	token := flag.String("token", os.Getenv("POLYDB_SERVER_TOKEN"), "远程服务端 Bearer token（服务端启用 POLYDB_SERVER_TOKEN 时必填）")
