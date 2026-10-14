@@ -20,9 +20,22 @@ type Conn struct {
 	mu  sync.Mutex
 }
 
+// withPlaceholderParsing 给 DSN 补上 parse=true。go-mssqldb 只有在 parse=true
+// 时才把 ? 占位符翻译成 @p1 形式的参数；缺了它，本包里所有带 ? 的语句都会被
+// MSSQL 直接当成语法错误（Incorrect syntax near '?'，错误 102）。
+func withPlaceholderParsing(dsn string) string {
+	if strings.Contains(dsn, "parse=") {
+		return dsn
+	}
+	if i := strings.IndexByte(dsn, '?'); i >= 0 {
+		return dsn[:i+1] + "parse=true&" + dsn[i+1:]
+	}
+	return dsn + "?parse=true"
+}
+
 // Open 通过 DSN（sqlserver://user:pass@host:port?database=dbname）建立连接池。
 func Open(ctx context.Context, dsn string) (*Conn, error) {
-	db, err := sql.Open("sqlserver", dsn)
+	db, err := sql.Open("sqlserver", withPlaceholderParsing(dsn))
 	if err != nil {
 		return nil, fmt.Errorf("open mssql: %w", err)
 	}

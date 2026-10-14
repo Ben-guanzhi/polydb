@@ -31,7 +31,19 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libxcb1-dev libxcb-render0-dev libxcb-shape0-dev \
-            libxcb-xfixes0-dev libxcb-randr0-dev libxkbcommon-dev libssl-dev
+            libxcb-xfixes0-dev libxcb-randr0-dev libxkbcommon-dev libxkbcommon-x11-0 libssl-dev
+          # libxkbcommon-dev ships libxkbcommon.so but not the unversioned x11
+          # link name, while winit's X11 backend asks rustc for exactly
+          # -lxkbcommon-x11. Point it at the runtime .so.0.
+          if [ ! -e /usr/lib/x86_64-linux-gnu/libxkbcommon-x11.so ]; then
+            sudo ln -sf libxkbcommon-x11.so.0 /usr/lib/x86_64-linux-gnu/libxkbcommon-x11.so
+          fi
+          # Report what the linker will actually see, so a future package rename
+          # is diagnosable from the annotations instead of another blind round.
+          for lib in libxcb.so libxkbcommon.so libxkbcommon-x11.so; do
+            if [ -e "/usr/lib/x86_64-linux-gnu/$lib" ]; then st=yes; else st=MISSING; fi
+            echo "::notice title=$lib::found=$st"
+          done
       - name: fmt
         working-directory: rust
         run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" cargo fmt --all -- --check

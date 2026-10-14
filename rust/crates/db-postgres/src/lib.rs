@@ -74,6 +74,16 @@ impl PostgresConn {
         if let Ok(v) = row.try_get::<i64, _>(i) {
             return Value::Integer(v);
         }
+        // sqlx maps each wire width to its own Rust int, so only INT8 reaches
+        // the i64 above. SERIAL is INT4 and SMALLSERIAL is INT2, which would
+        // otherwise fall through to the "<INT4>" placeholder below and the value
+        // would be replaced by its type name.
+        if let Ok(v) = row.try_get::<i32, _>(i) {
+            return Value::Integer(i64::from(v));
+        }
+        if let Ok(v) = row.try_get::<i16, _>(i) {
+            return Value::Integer(i64::from(v));
+        }
         if let Ok(v) = row.try_get::<f64, _>(i) {
             return Value::Float(v);
         }
