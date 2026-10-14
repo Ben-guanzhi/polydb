@@ -183,17 +183,23 @@ jobs:
       - name: report container status
         if: always()
         run: |
-          docker ps -a --format '{{.Names}} | {{.Status}}' 2>/dev/null | while IFS= read -r line; do
-            echo "$line"
-            echo "::warning title=service container::$line"
-          done
-          # "(unhealthy)" only says *that* a healthcheck never passed, not why.
-          # sqlcmd may be missing, the password may be rejected, or the server
-          # may never have finished initialising, so pull each offender's log.
-          docker ps -aq --filter health=unhealthy 2>/dev/null | while IFS= read -r c; do
+          # Read the health state from inspect instead of parsing the Status
+          # column, and on failure pull .State.Health.Logs: healthcheck output
+          # never lands in `docker logs`, so that is the only place to see
+          # whether sqlcmd is missing, the password was rejected, or the server
+          # never finished initialising.
+          for c in $(docker ps -aq 2>/dev/null); do
             name=$(docker inspect --format '{{.Name}}' "$c" 2>/dev/null)
-            msg=$(docker logs --tail 25 "$c" 2>&1 | tr '\n' ' ' | sed 's/%/%25/g' | head -c 850)
-            echo "::error title=unhealthy $name::$msg"
+            health=$(docker inspect --format '{{.State.Health.Status}}' "$c" 2>/dev/null)
+            echo "${name} | health=${health:-none}"
+            echo "::warning title=service container::${name} | health=${health:-none}"
+            if [ "$health" = "unhealthy" ]; then
+              out=$(docker inspect --format '{{range .State.Health.Logs}}{{.Output}}{{end}}' "$c" 2>/dev/null | tail -c 600 | tr '\r\n' '  ')
+              out=$(printf '%s' "$out" | sed 's/%/%25/g')
+              echo "::error title=unhealthy healthcheck ${name}::${out}"
+              log=$(docker logs --tail 15 "$c" 2>&1 | tr '\r\n' '  ' | sed 's/%/%25/g' | head -c 600)
+              echo "::error title=container log ${name}::${log}"
+            fi
           done
       - name: contract tests
         working-directory: test/contract

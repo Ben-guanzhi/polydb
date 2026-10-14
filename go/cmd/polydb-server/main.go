@@ -23,7 +23,7 @@ var Version = "dev"
 func main() {
 	logw := newLogger()
 	slog.SetDefault(logw.logger)
-	defer logw.Close()
+	defer func() { _ = logw.Close() }()
 	logger := slog.Default()
 	logger.Info("polydb-server", "version", Version)
 
@@ -81,7 +81,7 @@ func newLogger() *logWriter {
 
 func newLoggerTo(w io.Writer) *logWriter {
 	opts := &slog.HandlerOptions{Level: parseLogLevel(os.Getenv("POLYDB_LOG_LEVEL"))}
-	var target io.Writer = w
+	var target = w
 	var file *os.File
 	if p := os.Getenv("POLYDB_LOG_FILE"); p != "" {
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {

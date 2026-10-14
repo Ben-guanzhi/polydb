@@ -38,7 +38,7 @@ func TestNewLoggerHonoursLogFileAndLevel(t *testing.T) {
 	t.Setenv("POLYDB_LOG_FILE", file)
 
 	logw := newLogger()
-	defer logw.Close()
+	defer func() { _ = logw.Close() }()
 	logw.Debug("probe", "route", "GET /api/health")
 	if err := logw.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -85,10 +85,10 @@ func TestNewLoggerFallsBackToStderrWhenDirCannotBeCreated(t *testing.T) {
 	logw := newLogger()
 	os.Stdout, os.Stderr = oldOut, oldErr
 	w.Close()
-	defer logw.Close()
+	defer func() { _ = logw.Close() }()
 
 	out, _ := io.ReadAll(r)
-	if out == nil || len(out) == 0 {
+	if len(out) == 0 {
 		t.Fatal("no stderr diagnostic for the unusable log path")
 	}
 	if !strings.Contains(string(out), "falling back to stderr") {

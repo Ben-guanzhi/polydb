@@ -194,7 +194,7 @@ pub fn base64_encode(input: &[u8]) -> String {
     let rem = input.len() % 3;
     let mut out = Vec::with_capacity(groups * 4 + if rem == 0 { 0 } else { 4 });
     let (whole, tail) = input.split_at(groups * 3);
-    for c in whole.chunks_exact(3) {
+    for c in whole.as_chunks::<3>().0 {
         let n = (u32::from(c[0]) << 16) | (u32::from(c[1]) << 8) | u32::from(c[2]);
         out.extend_from_slice(&[
             B64_ALPHABET[(n >> 18) as usize],

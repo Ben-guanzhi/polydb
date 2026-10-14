@@ -289,16 +289,6 @@ func (q *Queue) AddDelete(rowID string, originalRow Row) {
 	q.undoStack = append(q.undoStack, undoOp{isRow: true, key: keyOf(rowID, Delete)})
 }
 
-func (q *Queue) upsert(ch RowChange) {
-	k := keyOf(ch.RowID, ch.Type)
-	if i, ok := q.index[k]; ok {
-		q.changes[i] = ch
-		return
-	}
-	q.changes = append(q.changes, ch)
-	q.index[k] = len(q.changes) - 1
-}
-
 func (q *Queue) removeByKey(key string) {
 	out := q.changes[:0]
 	for _, c := range q.changes {

@@ -41,7 +41,9 @@ func run(args []string, in io.Reader, out io.Writer) error {
 		return err
 	}
 	if *version {
-		fmt.Fprintln(out, Version)
+		if _, err := fmt.Fprintln(out, Version); err != nil {
+			return err
+		}
 		return nil
 	}
 

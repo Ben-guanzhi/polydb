@@ -183,7 +183,7 @@ func TestLogMiddlewareRecordsRoutePatternAndSkipsHealth(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {})
 	mux.HandleFunc("GET /ok", func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, "fine")
+		_, _ = io.WriteString(w, "fine")
 	})
 	mux.HandleFunc("GET /api/connections/{id}", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
