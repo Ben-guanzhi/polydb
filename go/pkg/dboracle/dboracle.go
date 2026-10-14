@@ -55,6 +55,7 @@ func (c *Conn) ExecuteIn(exec dbcore.SQLTx, ctx context.Context, sql string, arg
 func (c *Conn) executeIn(ctx context.Context, exec dbcore.SQLTx, sql string, args []protocol.Value) (*protocol.QueryResult, error) {
 	start := timeNowMs()
 	stmtType := dbcore.DetectStatementType(sql)
+	sql = positional(sql)
 
 	if stmtType == protocol.StatementTypeSelect || stmtType == protocol.StatementTypeOther {
 		rows, err := exec.QueryContext(ctx, sql, dbcore.ValueArgs(args)...)
@@ -133,7 +134,7 @@ var maintainedSchemas = map[string]bool{
 }
 
 func (c *Conn) ListSchemas(ctx context.Context) ([]protocol.SchemaInfo, error) {
-	rows, err := c.db.QueryContext(ctx,
+	rows, err := c.queryCtx(ctx,
 		`SELECT username FROM all_users WHERE oracle_maintained = 'N' ORDER BY username`)
 	if err != nil {
 		// 低版本 Oracle 无 oracle_maintained 列，退化为排除清单。
@@ -141,7 +142,7 @@ func (c *Conn) ListSchemas(ctx context.Context) ([]protocol.SchemaInfo, error) {
 		for s := range maintainedSchemas {
 			where = append(where, fmt.Sprintf("'%s'", s))
 		}
-		rows, err = c.db.QueryContext(ctx,
+		rows, err = c.queryCtx(ctx,
 			"SELECT username FROM all_users WHERE username NOT IN ("+strings.Join(where, ",")+") ORDER BY username")
 		if err != nil {
 			return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
@@ -160,7 +161,7 @@ func (c *Conn) ListSchemas(ctx context.Context) ([]protocol.SchemaInfo, error) {
 }
 
 func (c *Conn) ListTables(ctx context.Context, schema string) ([]protocol.TableInfo, error) {
-	rows, err := c.db.QueryContext(ctx,
+	rows, err := c.queryCtx(ctx,
 		`SELECT table_name, 'table' FROM all_tables WHERE owner = ?
 		  UNION ALL
 		  SELECT view_name, 'view' FROM all_views WHERE owner = ?
@@ -181,7 +182,7 @@ func (c *Conn) ListTables(ctx context.Context, schema string) ([]protocol.TableI
 }
 
 func (c *Conn) ListColumns(ctx context.Context, schema, table string) ([]protocol.ColumnInfo, error) {
-	rows, err := c.db.QueryContext(ctx,
+	rows, err := c.queryCtx(ctx,
 		`SELECT c.column_name,
 		        c.data_type || CASE
 		          WHEN c.data_type IN ('VARCHAR2','VARCHAR','CHAR','NVARCHAR2','NCHAR')
@@ -220,7 +221,7 @@ func (c *Conn) ListColumns(ctx context.Context, schema, table string) ([]protoco
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	pkRows, err := c.db.QueryContext(ctx,
+	pkRows, err := c.queryCtx(ctx,
 		`SELECT cc.column_name
 		   FROM all_constraints c
 		   JOIN all_cons_columns cc ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name
@@ -247,7 +248,7 @@ func (c *Conn) ListColumns(ctx context.Context, schema, table string) ([]protoco
 }
 
 func (c *Conn) ListIndexes(ctx context.Context, schema, table string) ([]protocol.IndexInfo, error) {
-	rows, err := c.db.QueryContext(ctx,
+	rows, err := c.queryCtx(ctx,
 		`SELECT i.index_name, i.uniqueness, i.index_type, ic.column_name, ic.column_position
 		   FROM all_indexes i
 		   JOIN all_ind_columns ic ON ic.index_owner = i.owner AND ic.index_name = i.index_name
@@ -265,7 +266,7 @@ func (c *Conn) ListIndexes(ctx context.Context, schema, table string) ([]protoco
 	order := []string{}
 	groups := map[string]*idx{}
 	primary := map[string]bool{}
-	pc, err := c.db.QueryContext(ctx,
+	pc, err := c.queryCtx(ctx,
 		`SELECT constraint_name FROM all_constraints WHERE owner = ? AND table_name = ? AND constraint_type = 'P'`,
 		schema, table)
 	if err == nil {
@@ -316,7 +317,7 @@ func oracleIndexType(desc string) protocol.IndexType {
 }
 
 func (c *Conn) ListForeignKeys(ctx context.Context, schema, table string) ([]protocol.ForeignKeyInfo, error) {
-	rows, err := c.db.QueryContext(ctx,
+	rows, err := c.queryCtx(ctx,
 		`SELECT c.constraint_name, c1.column_name, rc.owner, rc.table_name, c2.column_name
 		   FROM all_constraints c
 		   JOIN all_cons_columns c1 ON c1.owner = c.owner AND c1.constraint_name = c.constraint_name
@@ -431,4 +432,27 @@ func (c *Conn) BrowseRowsCount(ctx context.Context, schema, table string, req *p
 		return 0, err
 	}
 	return dbcore.CountResultToUint64(res)
+}
+
+// positional 把 ? 占位符改写成 :1、:2 ...。go-ora v2 只认 :N 或 :Name 形式的
+// 绑定变量，不认 ?；不翻译的话每条带参数的语句都会被 Oracle 报
+// ORA-00911（= 之后出现无效字符）。本包的语句里 ? 只作占位符，不作 LIKE
+// 通配，所以按出现顺序改写是安全的。
+func positional(sql string) string {
+	var b strings.Builder
+	n := 0
+	for i := 0; i < len(sql); i++ {
+		if sql[i] == '?' {
+			n++
+			fmt.Fprintf(&b, ":%d", n)
+			continue
+		}
+		b.WriteByte(sql[i])
+	}
+	return b.String()
+}
+
+// queryCtx 在出包前统一翻译占位符，避免每个查询各写一遍。
+func (c *Conn) queryCtx(ctx context.Context, sql string, args ...any) (*sql.Rows, error) {
+	return c.db.QueryContext(ctx, positional(sql), args...)
 }
