@@ -256,11 +256,17 @@ mod blob_tests {
         // 1) 0..=512 的每一个长度都跑到（覆盖 chunks_exact 的整组数与 rem=0/1/2 三族），
         //    缓冲内容是位置相关的字节，能暴露任何一组移位/写入顺序写错。
         for len in 0..=512usize {
-            let buf: Vec<u8> = (0..len).map(|i| (i.wrapping_mul(37).wrapping_add(i / 3)) as u8).collect();
+            let buf: Vec<u8> = (0..len)
+                .map(|i| (i.wrapping_mul(37).wrapping_add(i / 3)) as u8)
+                .collect();
             let got = base64_encode(&buf);
             let want = reference_base64_encode(&buf);
             assert_eq!(got, want, "len={len}");
-            assert_eq!(got.len(), ((len + 2) / 3) * 4, "len={len} 输出宽度不是一组四位");
+            assert_eq!(
+                got.len(),
+                ((len + 2) / 3) * 4,
+                "len={len} 输出宽度不是一组四位"
+            );
         }
         // 2) 全 256 个字节值各作单字节输入（边界：0x00/0xFF、以及只在最后一组出现的
         //    半组形状 3k+1、3k+2）。
@@ -278,16 +284,24 @@ mod blob_tests {
         // 3) 固定种子随机缓冲：长度 0..4096，内容跨 0..=255。
         let mut state = 0x2545F4914F6CDD1Du64;
         for _ in 0..4000 {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let mut hi = state.wrapping_mul(0x9E3779B97F4A7C15) >> 33;
             let len = (hi % 4096) as usize;
             let mut buf = Vec::with_capacity(len);
             for _ in 0..len {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 hi = state >> 33;
                 buf.push(hi as u8);
             }
-            assert_eq!(base64_encode(&buf), reference_base64_encode(&buf), "len={len}");
+            assert_eq!(
+                base64_encode(&buf),
+                reference_base64_encode(&buf),
+                "len={len}"
+            );
         }
         // 4) 「机制必须命中」：整组路径必须真的被走到——长度 ≥3 时输出前四位
         //    只由头三个输入字节决定，与尾部长度无关（尾部走的是单独的 rem 分支）。

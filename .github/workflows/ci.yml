@@ -26,13 +26,13 @@ jobs:
           workspaces: rust
       - name: fmt
         working-directory: rust
-        run: cargo fmt --all --check
+        run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" cargo fmt --all -- --check
       - name: clippy
         working-directory: rust
-        run: cargo clippy --workspace -- -D warnings
+        run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" cargo clippy --workspace -- -D warnings
       - name: test
         working-directory: rust
-        run: cargo test --workspace
+        run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" cargo test --workspace
 
   go:
     name: Go (fmt / lint / vet / test)
@@ -45,10 +45,7 @@ jobs:
           cache-dependency-path: go/go.sum
       - name: protocol drift check (spec ↔ rust ↔ go ↔ ts)
         working-directory: tools/genprotocol
-        run: |
-          go run . ts --check
-          go run . check
-          go run . ops --check
+        run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" sh -c 'go run . ts --check && go run . check && go run . ops --check'
       - name: gofmt
         working-directory: go
         run: |
@@ -64,10 +61,10 @@ jobs:
           working-directory: go
       - name: vet
         working-directory: go
-        run: go vet ./...
+        run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" go vet ./...
       - name: test
         working-directory: go
-        run: go test ./...
+        run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" go test ./...
 
   web:
     name: Web (tsc / lint / test / build)
@@ -84,16 +81,16 @@ jobs:
         run: npm ci
       - name: typecheck
         working-directory: web
-        run: npm run check
+        run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" npm run check
       - name: lint
         working-directory: web
-        run: npm run lint
+        run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" npm run lint
       - name: test
         working-directory: web
-        run: npm run test
+        run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" npm run test
       - name: build
         working-directory: web
-        run: npm run build
+        run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" npm run build
 
   contract:
     name: Contract (dual-backend 对拍)
@@ -129,9 +126,10 @@ jobs:
           - 3306:3306
         options: >-
           --health-cmd "mysqladmin ping -h localhost -uroot"
-          --health-interval 5s
+          --health-interval 10s
           --health-timeout 5s
-          --health-retries 10
+          --health-retries 30
+          --health-start-period 60s
       mssql:
         image: mcr.microsoft.com/mssql/server:2022-latest
         env:
@@ -170,7 +168,19 @@ jobs:
           cache-dependency-path: test/contract/go.sum
       - name: build rust server
         working-directory: rust
-        run: cargo build -p polydb-server
+        run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" cargo build -p polydb-server
+
+      # `if: always()` overrides the default skip-on-failure, so this runs even
+      # when "Initialize containers" failed. Emitted as annotations because the
+      # raw log needs a GitHub login; this is the only way to learn which
+      # service never came up.
+      - name: report container status
+        if: always()
+        run: |
+          docker ps -a --format '{{.Names}} | {{.Status}}' 2>/dev/null | while IFS= read -r line; do
+            echo "$line"
+            echo "::warning title=service container::$line"
+          done
       - name: contract tests
         working-directory: test/contract
         env:

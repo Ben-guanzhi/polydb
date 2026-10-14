@@ -845,9 +845,18 @@ mod tests {
 
     #[test]
     fn qualify_table_with_schema() {
-        assert_eq!(qualify_table(DIALECT_DEFAULT, "public", "users"), "\"public\".\"users\"");
-        assert_eq!(qualify_table(DIALECT_MYSQL, "mydb", "users"), "`mydb`.`users`");
-        assert_eq!(qualify_table(DIALECT_MSSQL, "dbo", "users"), "[dbo].[users]");
+        assert_eq!(
+            qualify_table(DIALECT_DEFAULT, "public", "users"),
+            "\"public\".\"users\""
+        );
+        assert_eq!(
+            qualify_table(DIALECT_MYSQL, "mydb", "users"),
+            "`mydb`.`users`"
+        );
+        assert_eq!(
+            qualify_table(DIALECT_MSSQL, "dbo", "users"),
+            "[dbo].[users]"
+        );
     }
 
     #[test]
@@ -873,7 +882,10 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert_eq!(build_order_by(DIALECT_DEFAULT, &req), " ORDER BY \"name\" asc");
+        assert_eq!(
+            build_order_by(DIALECT_DEFAULT, &req),
+            " ORDER BY \"name\" asc"
+        );
         assert_eq!(build_order_by(DIALECT_MYSQL, &req), " ORDER BY `name` asc");
         assert_eq!(build_order_by(DIALECT_MSSQL, &req), " ORDER BY [name] asc");
     }
@@ -901,12 +913,23 @@ mod tests {
 
     // ── build_rows_query ────────────────────────────────────────────────
 
-    fn req_with(lim: u32, off: u64, cols: Vec<&str>, order: Vec<(&str, polydb_protocol::SortDirection)>) -> polydb_protocol::TableRowsRequest {
+    fn req_with(
+        lim: u32,
+        off: u64,
+        cols: Vec<&str>,
+        order: Vec<(&str, polydb_protocol::SortDirection)>,
+    ) -> polydb_protocol::TableRowsRequest {
         polydb_protocol::TableRowsRequest {
             columns: cols.into_iter().map(|s| s.to_string()).collect(),
             conditions: vec![],
             logic: None,
-            order_by: order.into_iter().map(|(c, d)| polydb_protocol::OrderClause { column: c.to_string(), dir: d }).collect(),
+            order_by: order
+                .into_iter()
+                .map(|(c, d)| polydb_protocol::OrderClause {
+                    column: c.to_string(),
+                    dir: d,
+                })
+                .collect(),
             offset: off,
             limit: lim,
         }
@@ -942,7 +965,10 @@ mod tests {
     fn build_rows_query_oracle_offset_fetch() {
         let req = req_with(10, 20, vec![], vec![]);
         let (sql, _) = build_rows_query(DIALECT_ORACLE, "", "users", &req).unwrap();
-        assert!(sql.contains("OFFSET 20 ROWS FETCH NEXT 11 ROWS ONLY"), "oracle pagination: {sql}");
+        assert!(
+            sql.contains("OFFSET 20 ROWS FETCH NEXT 11 ROWS ONLY"),
+            "oracle pagination: {sql}"
+        );
     }
 
     // ── build_rows_count_query ──────────────────────────────────────────
@@ -994,7 +1020,11 @@ mod tests {
     fn rows_result_to_browse_page_truncates_extra_row() {
         let qr = polydb_protocol::QueryResult {
             columns: vec![],
-            rows: vec![vec![Value::Integer(1)], vec![Value::Integer(2)], vec![Value::Integer(3)]],
+            rows: vec![
+                vec![Value::Integer(1)],
+                vec![Value::Integer(2)],
+                vec![Value::Integer(3)],
+            ],
             affected_rows: 0,
             execution_time_ms: 1.0,
             truncated: false,

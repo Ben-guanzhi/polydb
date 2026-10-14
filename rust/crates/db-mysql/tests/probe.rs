@@ -102,10 +102,18 @@ fn col_line(col: &polydb_core::ColumnInfo) -> String {
 }
 
 fn index_line(idx: &polydb_core::IndexInfo) -> String {
-    let cols: Vec<String> = idx.columns.iter().map(|c| format!("{}#{}", c.name, c.position)).collect();
+    let cols: Vec<String> = idx
+        .columns
+        .iter()
+        .map(|c| format!("{}#{}", c.name, c.position))
+        .collect();
     format!(
         "{} | unique={} primary={} type={:?} cols=[{}]",
-        idx.name, idx.unique, idx.primary, idx.index_type, cols.join(",")
+        idx.name,
+        idx.unique,
+        idx.primary,
+        idx.index_type,
+        cols.join(",")
     )
 }
 
@@ -171,7 +179,11 @@ async fn m7_auto_increment_readback() {
         )
         .await
     );
-    must_exec(&c, &["DROP TABLE IF EXISTS m7_a", "DROP TABLE IF EXISTS m7_b"]).await;
+    must_exec(
+        &c,
+        &["DROP TABLE IF EXISTS m7_a", "DROP TABLE IF EXISTS m7_b"],
+    )
+    .await;
 }
 
 /// M8（驱动事实）：索引名的形状——跨表撞车。
@@ -225,7 +237,11 @@ async fn m8_index_name_collision_across_tables() {
         primary_count, 1,
         "M8 形状不变式红：一张表读回 {primary_count} 个 Primary 索引（应为 1）"
     );
-    must_exec(&c, &["DROP TABLE IF EXISTS m8_a", "DROP TABLE IF EXISTS m8_b"]).await;
+    must_exec(
+        &c,
+        &["DROP TABLE IF EXISTS m8_a", "DROP TABLE IF EXISTS m8_b"],
+    )
+    .await;
 }
 
 /// M9（驱动事实）：外键动作回读。
@@ -269,7 +285,11 @@ async fn m9_foreign_key_actions_readback() {
     if fks[0].on_update.is_some() || fks[0].on_delete.is_some() {
         println!("OBS[m9.driver.note] 驱动已填动作 ⇒ §8-7 的读侧缺口在本版本已补，A.27 的记录要翻");
     }
-    must_exec(&c, &["DROP TABLE IF EXISTS m9_c", "DROP TABLE IF EXISTS m9_p"]).await;
+    must_exec(
+        &c,
+        &["DROP TABLE IF EXISTS m9_c", "DROP TABLE IF EXISTS m9_p"],
+    )
+    .await;
 }
 
 /// M10（驱动事实）：COLUMN_TYPE 的形状 + precision/scale 空槽。
@@ -471,7 +491,10 @@ async fn m12_driver_read_drifts() {
         "M12 形状不变式红：create_table_sql 回的不是 DDL 文本：{ddl:?}"
     );
     let oneline = ddl.split_whitespace().collect::<Vec<_>>().join(" ");
-    println!("OBS[m12.create_table_sql] length={} content={oneline}", oneline.len());
+    println!(
+        "OBS[m12.create_table_sql] length={} content={oneline}",
+        oneline.len()
+    );
 
     must_exec(&c, &["DROP TABLE IF EXISTS m12_t"]).await;
 }
@@ -517,7 +540,9 @@ async fn m13_dependency_catalog() {
     println!("OBS[m13.view_definition] {def:?}");
     println!(
         "OBS[m13.show_create_view] {}",
-        !scalar(&c, "SHOW CREATE VIEW m13_v").await.starts_with("ERR")
+        !scalar(&c, "SHOW CREATE VIEW m13_v")
+            .await
+            .starts_with("ERR")
     );
 
     let mv = scalar(
@@ -539,7 +564,11 @@ async fn m13_dependency_catalog() {
         .await
     );
 
-    must_exec(&c, &["DROP VIEW IF EXISTS m13_v", "DROP TABLE IF EXISTS m13_t"]).await;
+    must_exec(
+        &c,
+        &["DROP VIEW IF EXISTS m13_v", "DROP TABLE IF EXISTS m13_t"],
+    )
+    .await;
 }
 
 #[test]
@@ -560,18 +589,54 @@ fn strip_leading_comments_test() {
 fn detect_statement_type_test() {
     use polydb_core::StatementType;
 
-    assert_eq!(MySqlConn::detect_statement_type("SELECT 1"), StatementType::Select);
-    assert_eq!(MySqlConn::detect_statement_type("WITH x AS (SELECT 1) SELECT * FROM x"), StatementType::Select);
-    assert_eq!(MySqlConn::detect_statement_type("INSERT INTO t VALUES (1)"), StatementType::Insert);
-    assert_eq!(MySqlConn::detect_statement_type("UPDATE t SET x=1"), StatementType::Update);
-    assert_eq!(MySqlConn::detect_statement_type("DELETE FROM t"), StatementType::Delete);
-    assert_eq!(MySqlConn::detect_statement_type("CREATE TABLE t (id INT)"), StatementType::Ddl);
-    assert_eq!(MySqlConn::detect_statement_type("ALTER TABLE t ADD COLUMN x INT"), StatementType::Ddl);
-    assert_eq!(MySqlConn::detect_statement_type("DROP TABLE t"), StatementType::Ddl);
-    assert_eq!(MySqlConn::detect_statement_type("SHOW TABLES"), StatementType::Other);
-    assert_eq!(MySqlConn::detect_statement_type("-- comment\nSELECT 1"), StatementType::Select);
-    assert_eq!(MySqlConn::detect_statement_type("/* comment */SELECT 1"), StatementType::Select);
-    assert_eq!(MySqlConn::detect_statement_type("  select 1"), StatementType::Select);
+    assert_eq!(
+        MySqlConn::detect_statement_type("SELECT 1"),
+        StatementType::Select
+    );
+    assert_eq!(
+        MySqlConn::detect_statement_type("WITH x AS (SELECT 1) SELECT * FROM x"),
+        StatementType::Select
+    );
+    assert_eq!(
+        MySqlConn::detect_statement_type("INSERT INTO t VALUES (1)"),
+        StatementType::Insert
+    );
+    assert_eq!(
+        MySqlConn::detect_statement_type("UPDATE t SET x=1"),
+        StatementType::Update
+    );
+    assert_eq!(
+        MySqlConn::detect_statement_type("DELETE FROM t"),
+        StatementType::Delete
+    );
+    assert_eq!(
+        MySqlConn::detect_statement_type("CREATE TABLE t (id INT)"),
+        StatementType::Ddl
+    );
+    assert_eq!(
+        MySqlConn::detect_statement_type("ALTER TABLE t ADD COLUMN x INT"),
+        StatementType::Ddl
+    );
+    assert_eq!(
+        MySqlConn::detect_statement_type("DROP TABLE t"),
+        StatementType::Ddl
+    );
+    assert_eq!(
+        MySqlConn::detect_statement_type("SHOW TABLES"),
+        StatementType::Other
+    );
+    assert_eq!(
+        MySqlConn::detect_statement_type("-- comment\nSELECT 1"),
+        StatementType::Select
+    );
+    assert_eq!(
+        MySqlConn::detect_statement_type("/* comment */SELECT 1"),
+        StatementType::Select
+    );
+    assert_eq!(
+        MySqlConn::detect_statement_type("  select 1"),
+        StatementType::Select
+    );
 }
 
 /// 测试 begin_statement 的隔离级别映射
@@ -581,19 +646,27 @@ fn begin_statement_isolation_levels() {
     use polydb_db_core::TxMode;
 
     assert_eq!(
-        MySqlConn::begin_statement(TxMode { isolation_level: IsolationLevel::ReadCommitted }),
+        MySqlConn::begin_statement(TxMode {
+            isolation_level: IsolationLevel::ReadCommitted
+        }),
         Some("BEGIN ISOLATION LEVEL READ COMMITTED".to_string())
     );
     assert_eq!(
-        MySqlConn::begin_statement(TxMode { isolation_level: IsolationLevel::Serializable }),
+        MySqlConn::begin_statement(TxMode {
+            isolation_level: IsolationLevel::Serializable
+        }),
         Some("BEGIN ISOLATION LEVEL SERIALIZABLE".to_string())
     );
     assert_eq!(
-        MySqlConn::begin_statement(TxMode { isolation_level: IsolationLevel::ReadUncommitted }),
+        MySqlConn::begin_statement(TxMode {
+            isolation_level: IsolationLevel::ReadUncommitted
+        }),
         Some("BEGIN ISOLATION LEVEL READ UNCOMMITTED".to_string())
     );
     assert_eq!(
-        MySqlConn::begin_statement(TxMode { isolation_level: IsolationLevel::RepeatableRead }),
+        MySqlConn::begin_statement(TxMode {
+            isolation_level: IsolationLevel::RepeatableRead
+        }),
         Some("BEGIN ISOLATION LEVEL REPEATABLE READ".to_string())
     );
 }
@@ -608,7 +681,10 @@ fn bind_value_mapping() {
     let _q = MySqlConn::bind_value(sqlx::query::<sqlx::MySql>("SELECT ?"), &Value::Bool(true));
     let _q = MySqlConn::bind_value(sqlx::query::<sqlx::MySql>("SELECT ?"), &Value::Integer(42));
     let _q = MySqlConn::bind_value(sqlx::query::<sqlx::MySql>("SELECT ?"), &Value::Float(3.14));
-    let _q = MySqlConn::bind_value(sqlx::query::<sqlx::MySql>("SELECT ?"), &Value::String("hello".to_string()));
+    let _q = MySqlConn::bind_value(
+        sqlx::query::<sqlx::MySql>("SELECT ?"),
+        &Value::String("hello".to_string()),
+    );
 }
 
 /// 测试 DatabaseKind 返回 MySql

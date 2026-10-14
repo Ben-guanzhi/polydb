@@ -28,9 +28,9 @@ import (
 // driverSpec holds per-engine metadata: default port, schema, host requirement.
 // Adding a new engine means adding one entry to the driverSpecs map.
 type driverSpec struct {
-	defaultPort  int
+	defaultPort   int
 	defaultSchema string
-	needsHost    bool
+	needsHost     bool
 }
 
 var driverSpecs = map[protocol.DatabaseKind]driverSpec{

@@ -60,11 +60,14 @@ fn value_msgpack_roundtrip_containers() {
     let mut map = std::collections::HashMap::new();
     map.insert("a".to_string(), Value::Integer(1));
     map.insert("b".to_string(), Value::String("two".to_string()));
-    map.insert("nested".to_string(), Value::Object({
-        let mut m = std::collections::HashMap::new();
-        m.insert("inner".to_string(), Value::Null);
-        m
-    }));
+    map.insert(
+        "nested".to_string(),
+        Value::Object({
+            let mut m = std::collections::HashMap::new();
+            m.insert("inner".to_string(), Value::Null);
+            m
+        }),
+    );
     let v = Value::Object(map);
     assert_eq!(&mp_rt(&v), &v);
 }
@@ -434,7 +437,10 @@ fn pagination_params_defaults() {
 
 #[test]
 fn pagination_params_json_roundtrip() {
-    let p = PaginationParams { offset: 50, limit: 200 };
+    let p = PaginationParams {
+        offset: 50,
+        limit: 200,
+    };
     json_rt(&p);
 }
 
@@ -607,7 +613,9 @@ fn batch_query_request_stop_on_error_default() {
 
 #[test]
 fn schema_info_json_roundtrip() {
-    let s = SchemaInfo { name: "public".to_string() };
+    let s = SchemaInfo {
+        name: "public".to_string(),
+    };
     json_rt(&s);
 }
 

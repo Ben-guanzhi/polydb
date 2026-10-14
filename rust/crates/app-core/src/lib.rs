@@ -29,12 +29,36 @@ struct DriverSpec {
     needs_host: bool,
 }
 
-static SQLITE: DriverSpec = DriverSpec { default_port: 0, default_schema: "main", needs_host: false };
-static POSTGRES: DriverSpec = DriverSpec { default_port: 5432, default_schema: "public", needs_host: true };
-static MYSQL: DriverSpec = DriverSpec { default_port: 3306, default_schema: "", needs_host: true };
-static MSSQL: DriverSpec = DriverSpec { default_port: 1433, default_schema: "", needs_host: true };
-static ORACLE: DriverSpec = DriverSpec { default_port: 1521, default_schema: "", needs_host: true };
-static REDIS: DriverSpec = DriverSpec { default_port: 6379, default_schema: "", needs_host: true };
+static SQLITE: DriverSpec = DriverSpec {
+    default_port: 0,
+    default_schema: "main",
+    needs_host: false,
+};
+static POSTGRES: DriverSpec = DriverSpec {
+    default_port: 5432,
+    default_schema: "public",
+    needs_host: true,
+};
+static MYSQL: DriverSpec = DriverSpec {
+    default_port: 3306,
+    default_schema: "",
+    needs_host: true,
+};
+static MSSQL: DriverSpec = DriverSpec {
+    default_port: 1433,
+    default_schema: "",
+    needs_host: true,
+};
+static ORACLE: DriverSpec = DriverSpec {
+    default_port: 1521,
+    default_schema: "",
+    needs_host: true,
+};
+static REDIS: DriverSpec = DriverSpec {
+    default_port: 6379,
+    default_schema: "",
+    needs_host: true,
+};
 
 fn spec(kind: DatabaseKind) -> &'static DriverSpec {
     match kind {
@@ -983,7 +1007,10 @@ fn redis_db_index(info: &ConnectionInfo) -> u32 {
 
 // target_host_port 返回隧道目标地址（含各驱动默认端口；与 Go 侧一致）。
 fn target_host_port(info: &ConnectionInfo) -> (String, u16) {
-    (host_of(info), info.port.unwrap_or(spec(info.kind).default_port))
+    (
+        host_of(info),
+        info.port.unwrap_or(spec(info.kind).default_port),
+    )
 }
 
 // split_local_addr 解析 "127.0.0.1:<port>"。

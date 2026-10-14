@@ -210,9 +210,7 @@ fn concurrent_connect_is_thread_safe() {
     let mut handles = Vec::with_capacity(N);
     for _ in 0..N {
         let app = std::sync::Arc::clone(&app);
-        handles.push(std::thread::spawn(move || {
-            app.connect(id)
-        }));
+        handles.push(std::thread::spawn(move || app.connect(id)));
     }
 
     let mut failures = 0;
@@ -240,7 +238,9 @@ fn concurrent_lazy_connect_via_execute() {
     // 并发 execute 同一未连接 id：懒连接路径必须工作，所有调用成功。
     // 与 Go 侧 ensure 的并发归并语义对齐（Rust 侧无 singleflight，但必须线程安全）。
     let app = std::sync::Arc::new(setup());
-    let info = app.create_connection(&sqlite_req("lazy-concurrent")).unwrap();
+    let info = app
+        .create_connection(&sqlite_req("lazy-concurrent"))
+        .unwrap();
     let id = info.id;
 
     assert!(!app.connection_status(id).unwrap().connected);
@@ -250,9 +250,7 @@ fn concurrent_lazy_connect_via_execute() {
     for _ in 0..N {
         let app = std::sync::Arc::clone(&app);
         handles.push(std::thread::spawn(move || {
-            smol::block_on(async {
-                app.execute(id, "SELECT 42", &[]).await
-            })
+            smol::block_on(async { app.execute(id, "SELECT 42", &[]).await })
         }));
     }
 

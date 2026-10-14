@@ -410,10 +410,10 @@ fn bool_from_stored(v: i64) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use polydb_protocol::CreateConnectionRequest;
-    use std::sync::Arc;
     use parking_lot::Mutex;
+    use polydb_protocol::CreateConnectionRequest;
     use rusqlite::Connection as RusqliteConnection;
+    use std::sync::Arc;
 
     fn test_repo() -> ConnectionRepository {
         let conn = RusqliteConnection::open_in_memory().unwrap();
@@ -436,7 +436,8 @@ mod tests {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );",
-        ).unwrap();
+        )
+        .unwrap();
         ConnectionRepository::new(Arc::new(Mutex::new(conn)))
     }
 
@@ -615,7 +616,10 @@ mod tests {
             DatabaseKind::Mssql,
             DatabaseKind::Oracle,
             DatabaseKind::Redis,
-        ].iter().enumerate() {
+        ]
+        .iter()
+        .enumerate()
+        {
             let mut r = req(&format!("conn-{i}"));
             r.kind = *kind;
             let info = repo.create(&r).unwrap();

@@ -51,19 +51,36 @@ impl SqlDriver for SqlOnlyDriver {
     async fn list_tables(&self, _schema: &str) -> CoreResult<Vec<polydb_core::TableInfo>> {
         Ok(vec![])
     }
-    async fn list_columns(&self, _schema: &str, _table: &str) -> CoreResult<Vec<polydb_core::ColumnInfo>> {
+    async fn list_columns(
+        &self,
+        _schema: &str,
+        _table: &str,
+    ) -> CoreResult<Vec<polydb_core::ColumnInfo>> {
         Ok(vec![])
     }
-    async fn list_indexes(&self, _schema: &str, _table: &str) -> CoreResult<Vec<polydb_core::IndexInfo>> {
+    async fn list_indexes(
+        &self,
+        _schema: &str,
+        _table: &str,
+    ) -> CoreResult<Vec<polydb_core::IndexInfo>> {
         Ok(vec![])
     }
-    async fn list_foreign_keys(&self, _schema: &str, _table: &str) -> CoreResult<Vec<polydb_core::ForeignKeyInfo>> {
+    async fn list_foreign_keys(
+        &self,
+        _schema: &str,
+        _table: &str,
+    ) -> CoreResult<Vec<polydb_core::ForeignKeyInfo>> {
         Ok(vec![])
     }
     async fn create_table_sql(&self, _schema: &str, _table: &str) -> CoreResult<String> {
         Ok(String::new())
     }
-    async fn browse_rows(&self, _schema: &str, _table: &str, _req: &polydb_core::TableRowsRequest) -> CoreResult<polydb_core::TableRowsResult> {
+    async fn browse_rows(
+        &self,
+        _schema: &str,
+        _table: &str,
+        _req: &polydb_core::TableRowsRequest,
+    ) -> CoreResult<polydb_core::TableRowsResult> {
         Ok(polydb_core::TableRowsResult {
             columns: vec![],
             rows: vec![],
@@ -73,13 +90,26 @@ impl SqlDriver for SqlOnlyDriver {
             execution_time_ms: 0.0,
         })
     }
-    async fn browse_rows_count(&self, _schema: &str, _table: &str, _req: &polydb_core::TableRowsRequest) -> CoreResult<u64> {
+    async fn browse_rows_count(
+        &self,
+        _schema: &str,
+        _table: &str,
+        _req: &polydb_core::TableRowsRequest,
+    ) -> CoreResult<u64> {
         Ok(0)
     }
-    async fn begin_tx(&self, _mode: polydb_db_core::TxMode) -> CoreResult<Box<dyn std::any::Any + Send>> {
+    async fn begin_tx(
+        &self,
+        _mode: polydb_db_core::TxMode,
+    ) -> CoreResult<Box<dyn std::any::Any + Send>> {
         Err(CoreError::Driver("no tx".into()))
     }
-    async fn execute_in_tx(&self, _tx: &mut Box<dyn std::any::Any + Send>, _sql: &str, _params: &[Value]) -> CoreResult<QueryResult> {
+    async fn execute_in_tx(
+        &self,
+        _tx: &mut Box<dyn std::any::Any + Send>,
+        _sql: &str,
+        _params: &[Value],
+    ) -> CoreResult<QueryResult> {
         Err(CoreError::Driver("no tx".into()))
     }
     async fn commit(&self, _tx: Box<dyn std::any::Any + Send>) -> CoreResult<()> {
@@ -119,7 +149,12 @@ impl KvDriver for KvOnlyDriver {
     async fn select_db(&self, _index: u32) -> CoreResult<()> {
         Ok(())
     }
-    async fn scan_keys(&self, _cursor: u64, _pattern: &str, _count: u32) -> CoreResult<polydb_core::RedisScanPage> {
+    async fn scan_keys(
+        &self,
+        _cursor: u64,
+        _pattern: &str,
+        _count: u32,
+    ) -> CoreResult<polydb_core::RedisScanPage> {
         Ok(polydb_core::RedisScanPage {
             cursor: 0,
             db: None,
@@ -147,10 +182,14 @@ impl KvDriver for KvOnlyDriver {
 
 #[test]
 fn connection_kind_reflects_driver() {
-    let sql = Connection::new(Arc::new(SqlOnlyDriver { kind: DatabaseKind::Postgres }));
+    let sql = Connection::new(Arc::new(SqlOnlyDriver {
+        kind: DatabaseKind::Postgres,
+    }));
     assert_eq!(sql.kind(), DatabaseKind::Postgres);
 
-    let kv = Connection::new(Arc::new(KvOnlyDriver { kind: DatabaseKind::Redis }));
+    let kv = Connection::new(Arc::new(KvOnlyDriver {
+        kind: DatabaseKind::Redis,
+    }));
     assert_eq!(kv.kind(), DatabaseKind::Redis);
 }
 
@@ -158,15 +197,22 @@ fn connection_kind_reflects_driver() {
 
 #[test]
 fn as_sql_on_sql_driver_succeeds() {
-    let conn = Connection::new(Arc::new(SqlOnlyDriver { kind: DatabaseKind::MySql }));
-    let sql = conn.as_sql().ok().expect("SQL driver should support as_sql");
+    let conn = Connection::new(Arc::new(SqlOnlyDriver {
+        kind: DatabaseKind::MySql,
+    }));
+    let sql = conn
+        .as_sql()
+        .ok()
+        .expect("SQL driver should support as_sql");
     let kind = sql.kind();
     assert_eq!(kind, DatabaseKind::MySql);
 }
 
 #[test]
 fn as_sql_on_kv_driver_returns_not_supported() {
-    let conn = Connection::new(Arc::new(KvOnlyDriver { kind: DatabaseKind::Redis }));
+    let conn = Connection::new(Arc::new(KvOnlyDriver {
+        kind: DatabaseKind::Redis,
+    }));
     let err = conn.as_sql().err().unwrap();
     let msg = err.to_string();
     assert!(msg.contains("not a SQL database"), "unexpected: {msg}");
@@ -177,7 +223,9 @@ fn as_sql_on_kv_driver_returns_not_supported() {
 
 #[test]
 fn as_kv_on_kv_driver_succeeds() {
-    let conn = Connection::new(Arc::new(KvOnlyDriver { kind: DatabaseKind::Redis }));
+    let conn = Connection::new(Arc::new(KvOnlyDriver {
+        kind: DatabaseKind::Redis,
+    }));
     let kv = conn.as_kv().ok().expect("KV driver should support as_kv");
     let kind = kv.kind();
     assert_eq!(kind, DatabaseKind::Redis);
@@ -185,7 +233,9 @@ fn as_kv_on_kv_driver_succeeds() {
 
 #[test]
 fn as_kv_on_sql_driver_returns_not_supported() {
-    let conn = Connection::new(Arc::new(SqlOnlyDriver { kind: DatabaseKind::Postgres }));
+    let conn = Connection::new(Arc::new(SqlOnlyDriver {
+        kind: DatabaseKind::Postgres,
+    }));
     let err = conn.as_kv().err().unwrap();
     let msg = err.to_string();
     assert!(msg.contains("not a KV database"), "unexpected: {msg}");
@@ -196,14 +246,18 @@ fn as_kv_on_sql_driver_returns_not_supported() {
 
 #[test]
 fn sql_driver_arc_returns_arc() {
-    let conn = Connection::new(Arc::new(SqlOnlyDriver { kind: DatabaseKind::Sqlite }));
+    let conn = Connection::new(Arc::new(SqlOnlyDriver {
+        kind: DatabaseKind::Sqlite,
+    }));
     let arc = conn.sql_driver_arc().ok().expect("should succeed");
     assert_eq!(arc.kind(), DatabaseKind::Sqlite);
 }
 
 #[test]
 fn sql_driver_arc_on_kv_driver_returns_error() {
-    let conn = Connection::new(Arc::new(KvOnlyDriver { kind: DatabaseKind::Redis }));
+    let conn = Connection::new(Arc::new(KvOnlyDriver {
+        kind: DatabaseKind::Redis,
+    }));
     assert!(conn.sql_driver_arc().is_err());
 }
 
@@ -211,7 +265,9 @@ fn sql_driver_arc_on_kv_driver_returns_error() {
 
 #[test]
 fn driver_accessor_returns_trait_object() {
-    let conn = Connection::new(Arc::new(SqlOnlyDriver { kind: DatabaseKind::Oracle }));
+    let conn = Connection::new(Arc::new(SqlOnlyDriver {
+        kind: DatabaseKind::Oracle,
+    }));
     let driver = conn.driver();
     assert_eq!(driver.kind(), DatabaseKind::Oracle);
 }
@@ -220,7 +276,9 @@ fn driver_accessor_returns_trait_object() {
 
 #[test]
 fn driver_arc_returns_shared_reference() {
-    let conn = Connection::new(Arc::new(SqlOnlyDriver { kind: DatabaseKind::Mssql }));
+    let conn = Connection::new(Arc::new(SqlOnlyDriver {
+        kind: DatabaseKind::Mssql,
+    }));
     let arc = conn.driver_arc();
     assert_eq!(arc.kind(), DatabaseKind::Mssql);
 }
@@ -229,7 +287,9 @@ fn driver_arc_returns_shared_reference() {
 
 #[test]
 fn connection_is_clone() {
-    let original = Connection::new(Arc::new(SqlOnlyDriver { kind: DatabaseKind::Sqlite }));
+    let original = Connection::new(Arc::new(SqlOnlyDriver {
+        kind: DatabaseKind::Sqlite,
+    }));
     let cloned = original.clone();
     assert_eq!(original.kind(), cloned.kind());
 }
@@ -238,7 +298,9 @@ fn connection_is_clone() {
 
 #[test]
 fn not_supported_message_matches_go_pattern() {
-    let conn = Connection::new(Arc::new(KvOnlyDriver { kind: DatabaseKind::Redis }));
+    let conn = Connection::new(Arc::new(KvOnlyDriver {
+        kind: DatabaseKind::Redis,
+    }));
     let err = conn.as_sql().err().unwrap();
     let msg = err.to_string();
     // Go pattern: "redis is not a SQL database"
