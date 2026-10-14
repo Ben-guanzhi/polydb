@@ -32,7 +32,7 @@ if [ "$rc" -ne 0 ]; then
   sed 's/\x1B\[[0-9;]*[A-Za-z]//g; s/\x1B[()][0-9A-Za-z]//g' "$log" >"$clean"
 
   # 1st pass: hard errors and their source locations.
-  grep -nE 'error(\[|:)|-->|--- FAIL|FAILED|panicked at|^failures:|undefined:|no such file|not found|exit status [0-9]|command not found|\.go:[0-9]+:[0-9]+' "$clean" >"$dir/gate.err"
+  grep -nE 'error(\[|:)|-->|--- FAIL|FAILED|panicked at|^failures:|undefined:|no such file|not found|exit status [0-9]|command not found|\.go:[0-9]+:' "$clean" >"$dir/gate.err"
   # 2nd pass: warnings, which clippy promotes to errors via -D warnings.
   if [ ! -s "$dir/gate.err" ]; then
     grep -nE 'warning(\[|:)|-->|cannot find|unresolved import|expected [0-9]+ arguments|too many arguments' "$clean" >"$dir/gate.err"

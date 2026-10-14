@@ -32,7 +32,11 @@ jobs:
         run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" cargo clippy --workspace -- -D warnings
       - name: test
         working-directory: rust
-        run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" cargo test --workspace
+        # polydb-gui links winit/GPUI through X11, so its test binary needs
+        # libxcb/libxkbcommon at link time. It holds no tests, and the clippy
+        # step above already compiles it, so exclude it rather than apt-install
+        # the X11 dev headers on every run.
+        run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" cargo test --workspace --exclude polydb-gui
 
   go:
     name: Go (fmt / lint / vet / test)
@@ -41,7 +45,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          # Pinned, not floated: pkg/protocol's fastpath tests assert byte
+          # equality against encoding/json, and Go changed its invalid-UTF-8
+          # replacement behaviour between 1.25 and 1.27, which made
+          # TestAppendJSONStringMatchesEncodingJSON and
+          # TestValueConstructorsMatchJSONMarshal fail on CI only.
+          go-version: "1.27.1"
           cache-dependency-path: go/go.sum
       - name: protocol drift check (spec ↔ rust ↔ go ↔ ts)
         working-directory: tools/genprotocol
@@ -140,15 +149,18 @@ jobs:
           MSSQL_SA_PASSWORD: "PolyDb_Test_2026"
         ports:
           - 1433:1433
-        # First boot initialises the master DB from scratch, which has
-        # outgrown the 40s start-period + 20 retries (240s) budget; MSSQL
-        # needs the longest headroom of the five services here.
+        # The password is literal here on purpose. $${MSSQL_SA_PASSWORD} never
+        # reached the healthcheck shell, so sqlcmd authenticated with the wrong
+        # value and the server logged "Error 18456 ... Password did not match"
+        # on every single probe. The value is already plaintext in env: above,
+        # so this adds no exposure. A real start-period is still needed: MSSQL's
+        # first boot initialises the master DB from scratch.
         options: >-
-          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P $${MSSQL_SA_PASSWORD} -Q 'SELECT 1' -b -o /dev/null"
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'PolyDb_Test_2026' -Q 'SELECT 1' -b -o /dev/null"
           --health-interval 10s
           --health-timeout 5s
-          --health-retries 30
-          --health-start-period 2m
+          --health-retries 20
+          --health-start-period 60s
       oracle:
         image: gvenzl/oracle-free:23-slim
         env:
@@ -170,7 +182,7 @@ jobs:
           workspaces: rust
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.25"
+          go-version: "1.27.1"
           cache-dependency-path: test/contract/go.sum
       - name: build rust server
         working-directory: rust
