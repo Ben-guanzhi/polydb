@@ -24,6 +24,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
+      # polydb-ui-gui holds 75 unit tests and links winit/GPUI through X11, so
+      # its test binary needs the xcb and xkbcommon headers at link time. None
+      # of those tests open a window, so no display or Xvfb is required.
+      - name: install X11 dev deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb1-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxcb-randr0-dev libxkbcommon-dev libssl-dev
       - name: fmt
         working-directory: rust
         run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" cargo fmt --all -- --check
@@ -32,11 +40,9 @@ jobs:
         run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" cargo clippy --workspace -- -D warnings
       - name: test
         working-directory: rust
-        # polydb-gui links winit/GPUI through X11, so its test binary needs
-        # libxcb/libxkbcommon at link time. It holds no tests, and the clippy
-        # step above already compiles it, so exclude it rather than apt-install
-        # the X11 dev headers on every run.
-        run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" cargo test --workspace --exclude polydb-gui
+        # polydb-gui holds no tests but is still linked, so the X11 headers
+        # above cover both GUI crates.
+        run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" cargo test --workspace
 
   go:
     name: Go (fmt / lint / vet / test)
@@ -221,4 +227,7 @@ jobs:
           POLYDB_TEST_REDIS: localhost:6379
           POLYDB_TEST_MSSQL: mssql://sa:PolyDb_Test_2026@localhost:1433/master
           POLYDB_TEST_ORACLE: oracle://system:oracle@localhost:1521/ORCL
-        run: go test -count=1 -v ./...
+        # Wrapped in gate.sh so a failure names the assertion instead of only
+        # saying "exit code 1". This is the first step in the repo that has
+        # ever had real databases behind it, so the failure is otherwise opaque.
+        run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" go test -count=1 -v ./...
