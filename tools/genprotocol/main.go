@@ -12,6 +12,7 @@ import (
 //
 //	ts   —— 从 spec/ 生成 web/src/api/index.ts（--check 仅校验不写回）
 //	check —— spec ↔ Rust ↔ Go wire 形态比对，漂移即非零退出
+//	docs  —— 文档里反引号标出的 POLYDB_* 标识符必须存在于源码，防文档漂移
 func main() {
 	repo := repoRoot()
 	if repo == "" {
@@ -41,8 +42,10 @@ func main() {
 		runCheck(*specDir, *rustDir, *goDir)
 	case "ops":
 		runOps(repo, *specDir, check)
+	case "docs":
+		runDocs(repo)
 	default:
-		fmt.Fprintln(os.Stderr, "usage: genprotocol ts [--check] | genprotocol check | genprotocol ops [--check]")
+		fmt.Fprintln(os.Stderr, "usage: genprotocol ts [--check] | genprotocol check | genprotocol ops [--check] | genprotocol docs")
 		os.Exit(2)
 	}
 }

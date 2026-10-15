@@ -70,9 +70,9 @@ jobs:
           # TestValueConstructorsMatchJSONMarshal fail on CI only.
           go-version: "1.27.1"
           cache-dependency-path: go/go.sum
-      - name: protocol drift check (spec ↔ rust ↔ go ↔ ts)
+      - name: drift check (spec ↔ rust ↔ go ↔ ts, docs ↔ source)
         working-directory: tools/genprotocol
-        run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" sh -c 'go run . ts --check && go run . check && go run . ops --check'
+        run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" sh -c 'go run . ts --check && go run . check && go run . ops --check && go run . docs'
       - name: gofmt
         working-directory: go
         run: |
