@@ -128,7 +128,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/connections/{id}/blobs/{blob_id}", s.getBlob)
 
-	return logMiddleware(panicMiddleware(s.authMiddleware(mux)))
+	return logMiddleware(panicMiddleware(corsMiddleware(bodyLimitMiddleware(maxBodyBytes, s.authMiddleware(mux)))))
 }
 
 // authMiddleware 按 behavior.md §12.1 校验 Bearer token。豁免：/api/health 与 /ws
@@ -745,6 +745,8 @@ var errToStatus = map[string]int{
 	protocol.ErrTimeout:             http.StatusRequestTimeout,
 	protocol.ErrUnauthorized:        http.StatusUnauthorized,
 	protocol.ErrReadOnly:            http.StatusConflict,
+	protocol.ErrPayloadTooLarge:     http.StatusRequestEntityTooLarge,
+	protocol.ErrPermissionDenied:    http.StatusForbidden,
 }
 
 func writeError(w http.ResponseWriter, err error) {

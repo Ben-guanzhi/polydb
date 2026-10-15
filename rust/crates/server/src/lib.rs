@@ -4,9 +4,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use axum::extract::{Path, State};
-use axum::http::header::{ACCEPT_RANGES, CONTENT_RANGE, CONTENT_TYPE, RANGE};
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::http::header::{
+    ACCEPT_RANGES, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
+    ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_MAX_AGE, CONTENT_RANGE, CONTENT_TYPE, HOST, ORIGIN,
+    RANGE, VARY,
+};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{body::Bytes, Router};
@@ -30,6 +34,12 @@ use uuid::Uuid;
 const CONTENT_MSGPACK: &str = "application/msgpack";
 const CONTENT_JSON: &str = "application/json";
 const HEADER_X_QUERY_ID: &str = "X-Query-ID";
+
+// 请求体上限，与 Go 侧 maxBodyBytes 对齐。axum 缺省只有 2 MiB；请求体只装 SQL
+// 文本与参数，16 MiB 远超正常量级又不至于成为放大器。大文件走 blobs 旁路。
+// 注意 axum 的 413 不带 PolyDB 错误包络（Go 侧会带），这是有意的取舍：换取
+// DefaultBodyLimit 在收包阶段就掐断，不用为了包络自己重放整个请求。
+const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 /// Application state passed via Axum's `State` extractor.
 ///
@@ -144,7 +154,9 @@ pub fn router_with_token(app: Arc<AppCore>, token: Option<String>) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
-        ));
+        ))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(axum::middleware::from_fn(cors_middleware));
     typed.with_state(state)
 }
 
@@ -176,6 +188,62 @@ async fn auth_middleware(
             PolyDBError::new(codes::UNAUTHORIZED, "missing or invalid bearer token"),
         )
     }
+}
+
+/// CORS 中间件，与 Go 侧 corsMiddleware 对齐。此前 HTTP 侧完全没有 CORS，只有
+/// WS 有 Origin 校验；生产环境把前端放到独立域名后所有跨源请求都会被浏览器拦下。
+/// 判定规则复用 ws::origin_allowed，两处白名单不会各写一遍后漂移。
+async fn cors_middleware(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let headers = req.headers().clone();
+    let origin = headers
+        .get(ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .filter(|o| !o.is_empty())
+        .map(str::to_owned);
+    let host = headers
+        .get(HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let allowed = origin
+        .as_deref()
+        .is_some_and(|o| ws::origin_allowed(host.as_deref(), Some(o)));
+
+    // 预检不携带 Bearer token，必须在任何鉴权之前被应答，否则浏览器拒绝后续请求。
+    if req.method() == Method::OPTIONS {
+        let mut resp = StatusCode::NO_CONTENT.into_response();
+        set_cors_headers(&mut resp, allowed, origin.as_deref());
+        return resp;
+    }
+    let mut resp = next.run(req).await;
+    set_cors_headers(&mut resp, allowed, origin.as_deref());
+    resp
+}
+
+/// 回具体 Origin，不用通配符：通配符会把 API 重新开放给所有网页。
+fn set_cors_headers(resp: &mut Response, allowed: bool, origin: Option<&str>) {
+    if !allowed {
+        return;
+    }
+    let Some(origin) = origin else {
+        return;
+    };
+    let Ok(v) = HeaderValue::from_str(origin) else {
+        return;
+    };
+    let h = resp.headers_mut();
+    h.insert(ACCESS_CONTROL_ALLOW_ORIGIN, v);
+    h.insert(VARY, HeaderValue::from_static("Origin"));
+    h.insert(
+        ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET, POST, PUT, DELETE, OPTIONS"),
+    );
+    // Authorization 与带 charset 的 Content-Type 都不是 CORS 安全列表内的请求头，
+    // 漏掉它们预检会直接失败，Bearer 鉴权在跨源部署下会卡死。
+    h.insert(
+        ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("Authorization, Content-Type"),
+    );
+    h.insert(ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("600"));
 }
 
 // ─── 响应辅助 ───────────────────────────────────────────────

@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::Router;
+use bytes::Bytes;
 use serde::Deserialize;
 use serde_json::json;
 use serde_json::Value;
@@ -14,6 +15,8 @@ use polydb_app_core::AppCore;
 use polydb_storage::{FileKeyring, Keyring, Storage};
 
 use crate::router;
+use crate::ws::origin_allowed;
+use crate::MAX_BODY_BYTES;
 
 // 慢查询：2e8 次递归。debug 构建下 rusqlite（C 未开优化）约需数十秒，
 // 保证超时（300ms）与取消窗口确定性先于查询完成。
@@ -1030,4 +1033,193 @@ async fn blob_range_serving_matches_go() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "bad conn id 400");
     assert_eq!(err_code(&body), "POLYDB_ERR_INVALID_PARAM");
+}
+
+// ─── CORS 与请求体上限（与 Go 侧 middleware_test.go 对拍）────────
+
+/// 指定方法与自定义头的 oneshot 请求。do_req 固定 JSON 形态，不足以驱动
+/// 预检与超限用例；超限用例里 to_bytes 会因 DefaultBodyLimit 报错，
+/// 此时返回空体而非 panic。
+async fn req_with(
+    router: Router,
+    method: &str,
+    uri: &str,
+    headers: &[(&str, &str)],
+    body: Bytes,
+) -> (StatusCode, Vec<u8>, HeaderMap) {
+    let mut b = Request::builder().method(method).uri(uri);
+    for (k, v) in headers {
+        b = b.header(*k, *v);
+    }
+    let req = b.body(axum::body::Body::from(body)).unwrap();
+    let resp = router.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let raw = match axum::body::to_bytes(resp.into_body(), usize::MAX).await {
+        Ok(b) => b.to_vec(),
+        Err(_) => Vec::new(),
+    };
+    (status, raw, headers)
+}
+
+#[test]
+fn origin_allowed_matches_go() {
+    let none: Option<&str> = None;
+    assert!(
+        origin_allowed(Some("localhost:8080"), none),
+        "no Origin = non-browser client"
+    );
+    assert!(
+        origin_allowed(Some("localhost:8080"), Some("http://localhost:8080")),
+        "same origin"
+    );
+    assert!(
+        !origin_allowed(Some("localhost:8080"), Some("http://evil.example")),
+        "cross origin"
+    );
+}
+
+#[test]
+fn origin_allowed_honours_the_env_allowlist() {
+    std::env::set_var(
+        "POLYDB_ALLOWED_ORIGINS",
+        "http://vite.dev:5173, http://other:123",
+    );
+    assert!(origin_allowed(
+        Some("localhost:8080"),
+        Some("http://vite.dev:5173")
+    ));
+    assert!(!origin_allowed(
+        Some("localhost:8080"),
+        Some("http://not-listed:9999")
+    ));
+}
+
+#[tokio::test]
+async fn cors_grants_trusted_origins_only() {
+    let router = new_test_router();
+    let none: Option<String> = None;
+    for case in [
+        (Some("http://localhost:8080".to_string()), true),
+        (Some("http://evil.example".to_string()), false),
+        (none, false),
+    ] {
+        let (status, body, headers) = req_with(
+            router.clone(),
+            "POST",
+            "/api/connections",
+            &[
+                ("host", "localhost:8080"),
+                ("origin", case.0.as_deref().unwrap_or("")),
+            ],
+            Bytes::new(),
+        )
+        .await;
+        let got = headers
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        // 允许的 Origin 原样回显；拒绝的拿不到 Access-Control-Allow-Origin。
+        let want = if case.1 {
+            case.0.as_deref().unwrap_or("")
+        } else {
+            ""
+        };
+        assert_eq!(got.as_str(), want, "grant for {case:?}");
+        // 断言「请求到达了处理器」而非具体状态码：空体解码失败会给 400，
+        // 但 405 说明中间件把请求吞了。
+        assert_ne!(
+            status,
+            StatusCode::METHOD_NOT_ALLOWED,
+            "non-preflight must reach the handler"
+        );
+        assert!(!body.is_empty(), "handler must still answer");
+    }
+}
+
+#[tokio::test]
+async fn cors_answers_preflight_without_auth() {
+    let (router, _app) = new_blob_test_app();
+    // 走一个需要鉴权才会被拦的路径：预检必须在鉴权之前拿到 204。
+    let (status, body, _) = req_with(
+        router,
+        "OPTIONS",
+        "/api/connections/00000000-0000-0000-0000-000000000000/query",
+        &[
+            ("host", "localhost:8080"),
+            ("origin", "http://localhost:8080"),
+        ],
+        Bytes::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "preflight must be 204");
+    assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn cors_grants_authorized_headers() {
+    let router = new_test_router();
+    let (_, _, headers) = req_with(
+        router,
+        "POST",
+        "/api/health",
+        &[
+            ("host", "localhost:8080"),
+            ("origin", "http://localhost:8080"),
+        ],
+        Bytes::new(),
+    )
+    .await;
+    let allowed = headers
+        .get("access-control-allow-headers")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    // Authorization 与带 charset 的 Content-Type 都不是 CORS 安全列表内的请求头，
+    // 漏掉它们预检会直接失败，Bearer 鉴权在跨源部署下会卡死。
+    for need in ["Authorization", "Content-Type"] {
+        assert!(
+            allowed.split(',').any(|h| h.trim() == need),
+            "Access-Control-Allow-Headers = {allowed:?}, want {need}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn body_over_the_limit_is_rejected() {
+    let router = new_test_router();
+    let big = Bytes::from_static(&[0u8; MAX_BODY_BYTES + 1]);
+    let (status, _, _) = req_with(
+        router,
+        "POST",
+        "/api/connections/x/query",
+        &[("content-type", "application/json")],
+        big,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "16 MiB + 1 must be 413, not a real query"
+    );
+}
+
+#[tokio::test]
+async fn body_under_the_limit_reaches_the_handler() {
+    let router = new_test_router();
+    let (status, body, _) = req_with(
+        router,
+        "POST",
+        "/api/connections/00000000-0000-0000-0000-000000000000/query",
+        &[("content-type", "application/json")],
+        Bytes::from_static(br#"{"sql":"SELECT 1"}"#),
+    )
+    .await;
+    // 连接不存在 → 404；关键是没被 413 拦下。
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "small body must not hit the limit"
+    );
+    assert_eq!(err_code(&body), "POLYDB_ERR_CONNECTION_NOT_FOUND");
 }

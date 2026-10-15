@@ -22,13 +22,17 @@ type AppRef = Arc<AppCore>;
 
 const SERVER_VERSION: &str = "0.1.0";
 
+// 单条 WS 消息上限，与 Go 侧 maxWSMessageBytes 对齐。axum 缺省 max_message_size
+// 为 64 MiB、max_frame_size 为 16 MiB，这里显式收紧。WS 消息只装查询文本与参数，
+// 正常量级在 KB。
+const MAX_WS_MESSAGE: usize = 16 * 1024 * 1024;
+
 pub async fn ws_upgrade(
     State(state): State<AppState>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    // 防浏览器跨站 WebSocket 劫持（CSWSH），契约同 Go 侧 checkWSOrigin：
-    // 无 Origin（非浏览器）、同源、POLYDB_ALLOWED_ORIGINS 白名单放行，其余拒绝。
+    // 防浏览器跨站 WebSocket 劫持（CSWSH），判定规则见 origin_allowed。
     if !check_origin(&headers) {
         return (
             StatusCode::FORBIDDEN,
@@ -38,16 +42,18 @@ pub async fn ws_upgrade(
     }
     let app = state.app.clone();
     let token = state.token.clone();
-    ws.on_upgrade(move |socket| session(app, token, socket))
+    ws.max_message_size(MAX_WS_MESSAGE)
+        .max_frame_size(MAX_WS_MESSAGE)
+        .on_upgrade(move |socket| session(app, token, socket))
 }
 
-/// Origin 校验（behavior.md §12.2）：无 Origin 头放行（TUI/CLI 等非浏览器客户端）；
-/// Origin host 与请求 Host 一致（同源，覆盖服务端自托管 Web 前端）放行；
-/// 命中 POLYDB_ALLOWED_ORIGINS（逗号分隔）白名单放行；其余拒绝。
-fn check_origin(headers: &HeaderMap) -> bool {
-    let origin = match headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
-        Some(o) if !o.is_empty() => o,
-        _ => return true,
+/// Origin 是否可信（behavior.md §12.2）：无 Origin 头放行（TUI/CLI 等非浏览器
+/// 客户端）；命中 POLYDB_ALLOWED_ORIGINS（逗号分隔）白名单放行；Origin host 与
+/// 请求 Host 一致（同源，覆盖服务端自托管 Web 前端）放行；其余拒绝。
+/// HTTP CORS 中间件与 WS 升级共用这一份，避免两处白名单各写一遍后漂移。
+pub(super) fn origin_allowed(host: Option<&str>, origin: Option<&str>) -> bool {
+    let Some(origin) = origin.filter(|o| !o.is_empty()) else {
+        return true;
     };
     if let Some(allowed) = std::env::var("POLYDB_ALLOWED_ORIGINS")
         .ok()
@@ -60,14 +66,14 @@ fn check_origin(headers: &HeaderMap) -> bool {
             return true;
         }
     }
-    let origin_host = match origin_host(origin) {
-        Some(h) => h,
-        None => return false,
-    };
-    headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|host| host.eq_ignore_ascii_case(origin_host))
+    host.is_some_and(|h| origin_host(origin).is_some_and(|o| o.eq_ignore_ascii_case(h)))
+}
+
+/// 从请求头判定 Origin 是否可信。
+pub(super) fn check_origin(headers: &HeaderMap) -> bool {
+    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
+    let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
+    origin_allowed(host, origin)
 }
 
 /// 取 Origin 的 host[:port] 部分：剥离 `scheme://` 前缀，其余即 host。

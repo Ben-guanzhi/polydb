@@ -57,4 +57,5 @@ const (
 	ErrUnauthorized        = "POLYDB_ERR_UNAUTHORIZED"
 	ErrReadOnly            = "POLYDB_ERR_READ_ONLY"
 	ErrBlobNotFound        = "POLYDB_ERR_BLOB_NOT_FOUND"
+	ErrPayloadTooLarge     = "POLYDB_ERR_PAYLOAD_TOO_LARGE"
 )

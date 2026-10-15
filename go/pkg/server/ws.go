@@ -4,9 +4,6 @@ import (
 	"bytes"
 	"context"
 	"net/http"
-	"net/url"
-	"os"
-	"strings"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -18,34 +15,22 @@ import (
 
 const wsServerVersion = "0.1.0"
 
+// maxWSMessageBytes 是单条 WS 消息的上限。gorilla 缺省不限，恶意客户端可以用
+// 超大消息打爆内存；这里与 Rust 侧 axum 的 max_message_size 对齐。WS 消息只装
+// 查询文本与参数，正常量级在 KB，16 MiB 留足余量。
+//
+// gorilla 的 Upgrader 没有消息上限字段（ReadBufferSize 只管 I/O 缓冲，官方注释
+// 明说它不限制消息大小），所以上限必须在升级后对每条连接调 Conn.SetReadLimit。
+const maxWSMessageBytes = int64(16 << 20)
+
 var wsUpgrader = websocket.Upgrader{
 	CheckOrigin: checkWSOrigin,
 }
 
-// checkWSOrigin 防浏览器跨站 WebSocket 劫持（CSWSH）：
-//   - 无 Origin 头（TUI/CLI 等非浏览器客户端）放行；
-//   - 同源（Origin 的 host 与请求 Host 一致，覆盖服务端自托管 Web 前端）放行；
-//   - POLYDB_ALLOWED_ORIGINS（逗号分隔）显式白名单放行（vite dev 等跨源前端）。
-//
-// 其余一律拒绝。
+// checkWSOrigin 防浏览器跨站 WebSocket 劫持（CSWSH）。判定规则与 HTTP CORS 共用
+// allowedOrigin，两边白名单不会各写一遍后漂移。
 func checkWSOrigin(r *http.Request) bool {
-	origin := r.Header.Get("Origin")
-	if origin == "" {
-		return true
-	}
-	u, err := url.Parse(origin)
-	if err != nil || u.Host == "" {
-		return false
-	}
-	if strings.EqualFold(u.Host, r.Host) {
-		return true
-	}
-	for _, allowed := range strings.Split(os.Getenv("POLYDB_ALLOWED_ORIGINS"), ",") {
-		if allowed = strings.TrimSpace(allowed); allowed != "" && strings.EqualFold(allowed, origin) {
-			return true
-		}
-	}
-	return false
+	return allowedOrigin(r.Header.Get("Origin"), r.Host)
 }
 
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
@@ -58,6 +43,9 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { _ = conn.Close() }()
+	// Upgrader 只能设 MsgBufferSize，消息大小上限必须由 Conn.SetReadLimit 给，
+	// 否则超大消息仍会整条读进来。设在升级之后，覆盖 runInbound 每条 ReadMessage。
+	conn.SetReadLimit(maxWSMessageBytes)
 
 	sess := &wsSession{
 		conn:     conn,
