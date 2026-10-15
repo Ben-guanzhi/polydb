@@ -15,7 +15,7 @@ concurrency:
 jobs:
   rust:
     name: Rust (fmt / clippy / test)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -58,7 +58,7 @@ jobs:
 
   go:
     name: Go (fmt / lint / vet / test)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -98,7 +98,7 @@ jobs:
 
   web:
     name: Web (tsc / lint / test / build)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -124,7 +124,7 @@ jobs:
 
   contract:
     name: Contract (dual-backend 对拍)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: postgres:16-alpine

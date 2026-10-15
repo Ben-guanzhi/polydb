@@ -17,13 +17,13 @@ concurrency:
 jobs:
   # ── Rust: polydb-server + polydb-gui ──────────────────────
   rust-build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     steps:
@@ -66,7 +66,7 @@ jobs:
 
   # ── Go: polydb-server, polydb-tui, polydb-cli, polydb-mcp ──
   go-build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -120,7 +120,7 @@ jobs:
 
   # ── Docker image ──────────────────────────────────────────
   docker-build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -160,7 +160,7 @@ jobs:
   # ── Sign, SBOM, and release ──────────────────────────────
   sign-and-release:
     needs: [rust-build, go-build, docker-build]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
