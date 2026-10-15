@@ -199,7 +199,7 @@ JSON 仅作为调试/握手 fallback，可保留 application/json。
 用途	Rust	Go
 MessagePack	rmp-serde	vmihailenco/msgpack
 CBOR	预留（未引入依赖）	预留（未引入依赖）
-Arrow	Rust `arrow 54` 已声明于 workspace 但零使用	预留（未引入依赖）
+Arrow	预留（未引入依赖）	预留（未引入依赖）
 压缩	预留（未引入依赖）	预留（未引入依赖）
 6. 存储层（storage）
 本地 SQLite，rusqlite（Rust，bundled 免 cgo）/ modernc.org/sqlite（Go，纯 Go 免 cgo）。
@@ -425,10 +425,15 @@ logger 名	polydb
 |---|---|---|---|---|
 | 1 | `SqlConnection` / `KvConnection` 类型存在 | 不存在，只有 `Connection` + `as_sql()`/`as_kv()` 能力降级 | 已确认 | 若需要强类型连接，在 spec 中补 DTO 并重新生成 |
 | 4 | 异步统一单运行时 | Rust 混用 tokio（server/SSH/tiberius/oracle）+ smol（block_on 站点）+ `async-trait` 装箱 | 已知债 | 全局迁移到 smol 或 tokio，二选一 |
-| 5 | Arrow IPC 数据面 | 预留未实现，数据面一律 MessagePack；`arrow 54` 已声明于 workspace Cargo.toml 但全仓零使用 | 未修复 | 实现 Arrow 旁路，或从 Cargo.toml 删除该依赖 |
 | 6 | `SqlDriver::begin() -> Transaction` | 实为 `begin_tx(TxMode) -> Box<dyn Any+Send>` | 已确认 | 迁移到 trait-object transaction |
 | 7 | 契约测试用 JSON fixture | 实为 Go 测试（`test/contract/`） | 已确认 | 统一为 JSON fixture 或更新本节 |
 | 9 | `.qoder/skills/polydb/SKILL.md` 记录实现事实 | 被 `.gitignore` 排除（不入库、不随 tag 发布、无法被 CI 校验），且自身已漂移：称 `ImportModalParts.tsx` ~11k 行，实际 17 行 barrel re-export | 未修复 | 入库，或在文首标注「非权威，以代码为准」 |
+
+> 原第 5 条（Arrow IPC 数据面）已于 2026-10-15 修复：`arrow 54` 从 workspace
+> `Cargo.toml` 的 `[workspace.dependencies]` 删除（无任何 crate 依赖，也未进
+> `Cargo.lock`），§5 编码格式库表的 Arrow 行同步改为「预留（未引入依赖）」。
+> Arrow 旁路本身仍未实现，数据面一律 MessagePack——两端一致，故不再算偏差。
+> 同批清理了另两个零引用的 workspace pin：`anyhow`、`async-lock`。
 
 > 原第 2/3/8 条（Rust `HttpTransport` 存在、storage 用 `sqlx`、Rust/Go protocol 由 spec 生成）
 > 与第 9 条（Go 服务端无结构化日志）已于 2026-10-13 修复：第 2/3/8 节的正文已改为与实现

@@ -46,13 +46,11 @@ bytes = "1"
 # Async
 async-trait = "0.1"
 smol = "2"
-async-lock = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
 axum = "0.8"
 
 # Error handling
 thiserror = "2"
-anyhow = "1"
 
 # Logging
 tracing = "0.1"
@@ -63,9 +61,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 # Date/time
 chrono = { version = "0.4", features = ["serde"] }
-
-# Arrow
-arrow = { version = "54" }
 
 # Database
 rusqlite = { version = "0.32", features = ["bundled", "functions"] }
