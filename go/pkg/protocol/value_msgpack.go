@@ -585,9 +585,60 @@ func TryGetInt(v Value) (int64, bool) {
 	if v.IsNull() {
 		return 0, false
 	}
+	// 整数字面量单元格占绝大多数：直接扫原文求值，不进 json.Unmarshal
+	// （与 TryGetString 的直通同型，数字文法扫描复用 encode 侧的
+	// digitsToUint64）。接受集与 Unmarshal 到 int64 完全一致：无小数/指数、
+	// 无前导 0、带符号、在 int64 范围内；任何可疑形状照旧回落。
+	if i, ok := parseInt64JSONLiteral(bytes.TrimSpace(v.raw)); ok {
+		return i, true
+	}
 	var i int64
 	if err := json.Unmarshal(v.raw, &i); err == nil {
 		return i, true
+	}
+	return 0, false
+}
+
+// parseInt64JSONLiteral 求值一个 JSON 整数字面量；不认识就返回 false，由
+// 调用方回落 json.Unmarshal（错误文案也在那边给出，此处绝不自造）。
+func parseInt64JSONLiteral(t []byte) (int64, bool) {
+	if len(t) == 0 {
+		return 0, false
+	}
+	i := 0
+	neg := false
+	if t[0] == '-' {
+		i, neg = 1, true
+	}
+	if i >= len(t) || !isDigit(t[i]) {
+		return 0, false
+	}
+	// 整数才可能被 int64 接受；小数点/指数一律回落。
+	for k := i; k < len(t); k++ {
+		if c := t[k]; c == '.' || c == 'e' || c == 'E' {
+			return 0, false
+		}
+	}
+	// JSON 文法禁止前导 0（"0" 除外），json.Unmarshal 也报错。
+	if len(t)-i > 1 && t[i] == '0' {
+		return 0, false
+	}
+	u, overflow := digitsToUint64(t[i:])
+	if overflow {
+		return 0, false
+	}
+	if neg {
+		switch {
+		case u <= math.MaxInt64:
+			return -int64(u), true
+		case u == uint64(math.MaxInt64)+1:
+			// MinInt64 的绝对值没有对应的正数，Unmarshal 接受它。
+			return math.MinInt64, true
+		}
+		return 0, false
+	}
+	if u <= math.MaxInt64 {
+		return int64(u), true
 	}
 	return 0, false
 }

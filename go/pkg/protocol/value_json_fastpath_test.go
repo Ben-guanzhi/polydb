@@ -568,3 +568,89 @@ func TestMarshalJSONValueUnchanged(t *testing.T) {
 		t.Fatalf("JSON 通道被改写：%s", b)
 	}
 }
+
+// tryGetIntLegacy 是改动前 TryGetInt 的逐字拷贝（对照臂），其忠实度由
+// 下面的等价矩阵逐形状对拍钉住：直通接受集必须与它完全一致。
+func tryGetIntLegacy(v Value) (int64, bool) {
+	if v.IsNull() {
+		return 0, false
+	}
+	var i int64
+	if err := json.Unmarshal(v.raw, &i); err == nil {
+		return i, true
+	}
+	return 0, false
+}
+
+// TestTryGetIntFastPathIsTaken 是 TryGetInt 直通的「必须命中」断言：入口判据
+// parseInt64JSONLiteral 对每一格整型文本都返回 ok=true（关分支的形态是它
+// 开始 decline 整型格），并钉住分配上限——走 Unmarshal 的整型格带一遍完整
+// JSON 扫描，直通后应为 0 次分配。
+func TestTryGetIntFastPathIsTaken(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want int64
+	}{
+		{`0`, 0}, {`-0`, 0}, {`424242`, 424242},
+		{`9223372036854775807`, math.MaxInt64},
+		{`-9223372036854775808`, math.MinInt64},
+	} {
+		if _, ok := parseInt64JSONLiteral([]byte(tc.raw)); !ok {
+			t.Errorf("TryGetInt 的入口 %s 没被直通接受", tc.raw)
+			continue
+		}
+		if got, good := TryGetInt(Value{raw: json.RawMessage(tc.raw)}); !good || got != tc.want {
+			t.Errorf("TryGetInt(%s) = %d,%v want %d,true", tc.raw, got, good, tc.want)
+		}
+	}
+	v := Value{raw: json.RawMessage(`424242`)}
+	if n := testing.AllocsPerRun(500, func() {
+		var i int64
+		var ok bool
+		if i, ok = TryGetInt(v); !ok {
+			t.Fatal("not taken")
+		}
+		sinkInt = i
+	}); n > 0 {
+		t.Errorf("TryGetInt 直通分配 %.0f 次，want 0（回落 Unmarshal 了？）", n)
+	}
+	// 等价矩阵：直通接受集与对照臂（旧实现逐字拷贝）完全一致——接受的形状
+	// 两边同值，拒绝的形状两边同败。null 容器走 IsNull 守卫，两边同败。
+	for _, raw := range []string{
+		`0`, `-0`, `1`, `-1`, `424242`, `9223372036854775807`, `-9223372036854775808`,
+		`9223372036854775808`, `18446744073709551615`, `-9223372036854775809`,
+		`1.5`, `1.0`, `1e3`, `1E3`, `01`, `+1`, `-`, `true`, `null`, `"42"`,
+		`{}`, `[]`, ` 42 `, `42 `, ` 42`, `12x4`, `1e999`, `nan`, `Infinity`,
+	} {
+		fastI, fastOK := TryGetInt(Value{raw: json.RawMessage(raw)})
+		legI, legOK := tryGetIntLegacy(Value{raw: json.RawMessage(raw)})
+		if fastOK != legOK {
+			t.Errorf("%q: fast ok=%v, legacy ok=%v（接受集不一致）", raw, fastOK, legOK)
+			continue
+		}
+		if fastOK && fastI != legI {
+			t.Errorf("%q: fast=%d legacy=%d", raw, fastI, legI)
+		}
+	}
+}
+
+var sinkInt int64
+
+// BenchmarkTryGetInt 对照臂：直通 vs 旧 Unmarshal 臂（逐字拷贝），供量化复跑。
+func BenchmarkTryGetInt(b *testing.B) {
+	v := Value{raw: json.RawMessage(`424242`)}
+	b.Run("fast", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			if n, ok := TryGetInt(v); ok {
+				sinkInt = n
+			}
+		}
+	})
+	b.Run("legacyUnmarshal", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			if n, ok := tryGetIntLegacy(v); ok {
+				sinkInt = n
+			}
+		}
+	})
+}
