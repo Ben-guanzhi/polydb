@@ -573,3 +573,118 @@ func TestColResizeSurvivesFrameRefresh(t *testing.T) {
 		t.Fatalf("override lost across frame clamp: %v", tv.colWidths)
 	}
 }
+
+// --- column sort (P1 grid enhancement) -------------------------------------
+
+// sortTestFrame builds a frame whose first column is a key out of order and
+// whose second column is a label aligned with the key, so sort order is easy
+// to read from either column.
+func sortTestFrame() *tuidata.Frame {
+	f := tuidata.New("n", "label")
+	f.AppendRow([]any{"3", "c"})
+	f.AppendRow([]any{"1", "a"})
+	f.AppendRow([]any{"2", "b"})
+	return f
+}
+
+func TestSortByAscendingOrder(t *testing.T) {
+	f := sortTestFrame()
+	tv := &TableView{}
+	tv.SortBy(f, 0)
+	if !tv.sorted || tv.sortCol != 0 || tv.sortDir != 1 {
+		t.Fatalf("sort state = sorted=%v col=%d dir=%d, want true/0/1", tv.sorted, tv.sortCol, tv.sortDir)
+	}
+	want := []string{"1", "2", "3"}
+	for d, w := range want {
+		if got := f.CellString(tv.SrcRow(d), 0); got != w {
+			t.Fatalf("display row %d: SrcRow=%d, cell=%q, want %q", d, tv.SrcRow(d), got, w)
+		}
+	}
+}
+
+func TestSortByTogglesDirection(t *testing.T) {
+	f := sortTestFrame()
+	tv := &TableView{}
+	tv.SortBy(f, 0) // ascending
+	tv.SortBy(f, 0) // toggle -> descending
+	if tv.sortDir != -1 {
+		t.Fatalf("expected descending dir -1, got %d", tv.sortDir)
+	}
+	want := []string{"3", "2", "1"}
+	for d, w := range want {
+		if got := f.CellString(tv.SrcRow(d), 0); got != w {
+			t.Fatalf("display row %d: cell=%q, want %q", d, got, w)
+		}
+	}
+	// Sorting a different column resets direction to ascending.
+	tv.SortBy(f, 1)
+	if tv.sortCol != 1 || tv.sortDir != 1 {
+		t.Fatalf("switching column should reset dir to ascending, got col=%d dir=%d", tv.sortCol, tv.sortDir)
+	}
+	if got := f.CellString(tv.SrcRow(0), 1); got != "a" {
+		t.Fatalf("first label after sorting column 1 should be a, got %q", got)
+	}
+}
+
+func TestSortByNumericVsText(t *testing.T) {
+	// Numeric columns compare by value, not lexically ("10" < "2").
+	if cellLess("10", "2", 1) {
+		t.Fatal("numeric: 10 should NOT sort before 2")
+	}
+	if !cellLess("2", "10", 1) {
+		t.Fatal("numeric: 2 should sort before 10")
+	}
+	// Text falls back to case-insensitive comparison.
+	if !cellLess("abc", "abd", 1) {
+		t.Fatal("text: abc should sort before abd")
+	}
+	if cellLess("ABD", "abc", 1) {
+		t.Fatal("text: comparison should be case-insensitive")
+	}
+}
+
+func TestSortClearedByReset(t *testing.T) {
+	f := sortTestFrame()
+	tv := &TableView{}
+	tv.SortBy(f, 0)
+	tv.Reset()
+	if tv.sorted || tv.order != nil {
+		t.Fatalf("Reset must drop the sort: sorted=%v order=%v", tv.sorted, tv.order)
+	}
+	// SrcRow is identity once the sort is gone.
+	if tv.SrcRow(1) != 1 {
+		t.Fatalf("SrcRow should be identity after reset, got %d", tv.SrcRow(1))
+	}
+}
+
+func TestSortSurvivesClampToSameFrame(t *testing.T) {
+	f := sortTestFrame()
+	tv := &TableView{}
+	tv.SortBy(f, 0)
+	// ClampTo on a refresh uses the same frame shape -> order recomputed, kept.
+	tv.ClampTo(f)
+	if !tv.sorted {
+		t.Fatal("sort should survive ClampTo with the same frame")
+	}
+	if got := f.CellString(tv.SrcRow(0), 0); got != "1" {
+		t.Fatalf("sort order not preserved after ClampTo: first cell %q", got)
+	}
+}
+
+func TestSortRenderShowsArrowAndOrderedBody(t *testing.T) {
+	f := sortTestFrame()
+	th := theme.Default()
+	o := RenderOpts{Width: 40, Height: 10, Theme: th, NoEllipsis: true}
+	tv := &TableView{}
+	tv.SortBy(f, 0)
+	out := tv.Render(f, o)
+	if !strings.Contains(out, sortArrowAsc) {
+		t.Fatalf("sorted header should show the ascending arrow:\n%s", out)
+	}
+	// The first body line (line 1) must lead with the smallest key "1".
+	lines := strings.Split(out, "\n")
+	body := ansi.Strip(lines[1])
+	if !strings.HasPrefix(strings.TrimSpace(body), "1") {
+		t.Fatalf("first body row should be the min key 1, got %q", body)
+	}
+}

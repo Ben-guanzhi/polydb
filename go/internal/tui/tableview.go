@@ -49,6 +49,16 @@ type TableView struct {
 	// layout so a widened column stays wide until the user resets it. The map
 	// survives frame refreshes (same columns) but is dropped by Reset.
 	colWidths map[int]int
+
+	// sorted marks whether a column sort is active. sortCol is the ORIGINAL
+	// column index sorted; sortDir is +1 ascending / -1 descending. order maps
+	// a display row to its source row index (nil = identity). Sorting is
+	// render-only and is dropped by Reset. The explicit `sorted` flag (rather
+	// than a -1 sentinel) avoids the int zero value reading as "column 0".
+	sorted  bool
+	sortCol int
+	sortDir int
+	order   []int
 }
 
 // colWidthMax is the ceiling for a manual column width (chars).
@@ -90,6 +100,78 @@ func (tv *TableView) applyWidthOverrides(nat []int) {
 			nat[c] = clamp(w, 1, colWidthMax)
 		}
 	}
+}
+
+// --- column sort (P1 grid enhancement) -------------------------------------
+
+// sortCol is the ORIGINAL column index currently sorted (-1 = none); sortDir
+// is +1 ascending / -1 descending. Sorting is a render-time row permutation
+// (order), never a frame rewrite, so it stays copy-free and composes with the
+// windowed-subframe and multi-select invariants. order maps a display row to
+// its source row index in the (unchanged) frame.
+var (
+	sortArrowAsc  = " ▲"
+	sortArrowDesc = " ▼"
+)
+
+func (tv *TableView) SortBy(f *tuidata.Frame, col int) {
+	if col < 0 || col >= f.NumCols() {
+		return
+	}
+	if tv.sorted && tv.sortCol == col {
+		tv.sortDir = -tv.sortDir
+	} else {
+		tv.sorted = true
+		tv.sortCol = col
+		tv.sortDir = 1
+	}
+	tv.recomputeOrder(f)
+}
+
+// recomputeOrder rebuilds the display→source permutation from the current
+// sort column/direction. A frame with no rows or an out-of-range column
+// clears the sort.
+func (tv *TableView) recomputeOrder(f *tuidata.Frame) {
+	if !tv.sorted || tv.sortCol < 0 || tv.sortCol >= f.NumCols() {
+		tv.sorted = false
+		tv.order = nil
+		return
+	}
+	n := f.NumRows()
+	if n == 0 {
+		tv.order = nil
+		return
+	}
+	ord := make([]int, n)
+	for i := range ord {
+		ord[i] = i
+	}
+	col, dir := tv.sortCol, tv.sortDir
+	sort.SliceStable(ord, func(a, b int) bool {
+		return cellLess(f.CellString(ord[a], col), f.CellString(ord[b], col), dir)
+	})
+	tv.order = ord
+}
+
+// SrcRow maps a display (visible) row to its source row in the frame. When no
+// sort is active it is the identity.
+func (tv *TableView) SrcRow(display int) int {
+	if tv.order != nil && display >= 0 && display < len(tv.order) {
+		return tv.order[display]
+	}
+	return display
+}
+
+// cellLess compares two cell strings for the sort direction: numerically when
+// both parse as floats, otherwise case-insensitively as text. The result is
+// scaled by dir so dir=-1 yields descending order.
+func cellLess(a, b string, dir int) bool {
+	if af, err1 := strconv.ParseFloat(strings.TrimSpace(a), 64); err1 == nil {
+		if bf, err2 := strconv.ParseFloat(strings.TrimSpace(b), 64); err2 == nil {
+			return (af-bf)*float64(dir) < 0
+		}
+	}
+	return strings.Compare(strings.ToLower(a), strings.ToLower(b))*dir < 0
 }
 
 // selectMarker is drawn in the gutter (or the leading tag column when there
@@ -156,6 +238,10 @@ func (tv *TableView) Reset() {
 	tv.modeSet = false
 	tv.ClearSelect()
 	tv.ResetColWidths()
+	tv.sorted = false
+	tv.sortCol = 0
+	tv.sortDir = 1
+	tv.order = nil
 }
 
 // ClampTo clamps selection and cursor to the bounds of f (used when the
@@ -171,6 +257,17 @@ func (tv *TableView) ClampTo(f *tuidata.Frame) {
 	tv.colCursor = clamp(tv.colCursor, 0, f.NumCols()-1)
 	tv.colOff = clamp(tv.colOff, 0, max(0, f.NumCols()-1))
 	tv.ClearSelect()
+	// A sort survives a frame refresh (same columns) so a sorted column stays
+	// ordered after reloading; it is cleared when the row count or column set
+	// changed (the permutation would otherwise be stale).
+	if tv.sorted {
+		if tv.order != nil && len(tv.order) == f.NumRows() && tv.sortCol < f.NumCols() {
+			tv.recomputeOrder(f)
+		} else {
+			tv.sorted = false
+			tv.order = nil
+		}
+	}
 }
 
 // --- navigation ------------------------------------------------------------
@@ -448,6 +545,28 @@ func (tv *TableView) Render(f *tuidata.Frame, o RenderOpts) string {
 		}
 	}
 
+	// Reserve the sort-arrow width on the sorted column so its header shows
+	// the ▲/▼ marker instead of being truncated to "…". We widen the sorted
+	// column by the arrow's display width and shave the same amount off the
+	// last column, keeping the total row budget (and thus column alignment)
+	// constant.
+	if tv.sorted && tv.sortCol >= 0 {
+		for j, c := range cols {
+			if c == tv.sortCol {
+				arrowLen := ansi.StringWidth(sortArrowAsc)
+				widths[j] += arrowLen
+				if last := len(widths) - 1; last != j && last >= 0 {
+					if widths[last] > arrowLen {
+						widths[last] -= arrowLen
+					} else {
+						widths[last] = 1
+					}
+				}
+				break
+			}
+		}
+	}
+
 	var b strings.Builder
 	if o.ShowBorders {
 		b.WriteString(th.Border.Render("╭" + strings.Repeat("─", inner) + "╮"))
@@ -463,6 +582,13 @@ func (tv *TableView) Render(f *tuidata.Frame, o RenderOpts) string {
 			hb.WriteString(th.Header.Render(" "))
 		}
 		name := f.Columns[c].Name
+		if tv.sorted && c == tv.sortCol {
+			if tv.sortDir < 0 {
+				name += sortArrowDesc
+			} else {
+				name += sortArrowAsc
+			}
+		}
 		cell := padCell(name, widths[i])
 		// Highlight the cursor column with a soft warm tint; other columns use plain header style.
 		if c == o.HeaderCur {
@@ -525,7 +651,7 @@ func (tv *TableView) Render(f *tuidata.Frame, o RenderOpts) string {
 				rowStyle = th.RowOdd
 			}
 			if severityColIdx >= 0 && r != tv.sel && !sel {
-				sev := strings.ToUpper(origFrame.CellString(r, severityColIdx))
+				sev := strings.ToUpper(origFrame.CellString(tv.SrcRow(r), severityColIdx))
 				if c := severityColor(sev); c != "" {
 					rowStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(c))
 					gstyle = rowStyle
@@ -535,7 +661,7 @@ func (tv *TableView) Render(f *tuidata.Frame, o RenderOpts) string {
 			for j, c := range cols {
 				// 绝对行号 r（= tv.rowOff+i）→ 窗口坐标 r-rowBase；非限定列那一支 rowBase==0，
 				// 这一行与 pristine 逐字同义（r 仍受 :433 的 `r >= nrows` 守卫，nrows 是父帧行数）。
-				val := f.CellString(r-rowBase, c)
+				val := f.CellString(tv.SrcRow(r)-rowBase, c)
 				// Apply character-level scroll to the last column when active.
 				if o.HScroll > 0 && j == len(cols)-1 && len(o.TableCols) > 0 {
 					val = ansi.TruncateLeft(val, o.HScroll, "")

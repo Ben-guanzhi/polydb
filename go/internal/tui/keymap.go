@@ -56,6 +56,7 @@ const (
 	ActColGrow      = "col-grow"
 	ActColShrink    = "col-shrink"
 	ActColReset     = "col-reset"
+	ActSort         = "sort"
 )
 
 // GlobalBindings apply in every non-overlay mode.
@@ -102,6 +103,7 @@ var TableBindings = []Binding{
 	{Keys: []string{"=", "+"}, Action: ActColGrow, Help: "widen current column"},
 	{Keys: []string{"-"}, Action: ActColShrink, Help: "narrow current column"},
 	{Keys: []string{"\\"}, Action: ActColReset, Help: "reset column widths"},
+	{Keys: []string{"S", "shift+s"}, Action: ActSort, Help: "sort by cursor column (toggle dir)"},
 }
 
 // SheetBindings apply in sheet mode.

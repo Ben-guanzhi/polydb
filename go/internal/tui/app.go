@@ -412,9 +412,12 @@ func (a *App) renderBody(w, h int) string {
 	if a.search.Active() {
 		frame = a.search.Preview()
 	}
+	// A sorted grid renders rows in a permuted order; the sheet/JSON detail
+	// views read the (unchanged) frame by the source row, not the display row.
+	srcRow := p.Table.SrcRow(p.Table.Sel())
 
 	if p.Mode == ModeJsonView && frame != nil && frame.NumRows() > 0 {
-		return renderJsonView(frame, p.Table.Sel(), p.JsonViewOff, w, h, a.th)
+		return renderJsonView(frame, srcRow, p.JsonViewOff, w, h, a.th)
 	}
 
 	if p.Mode == ModeSheet && frame != nil && frame.NumRows() > 0 {
@@ -425,13 +428,13 @@ func (a *App) renderBody(w, h int) string {
 			if len(matched) > 0 {
 				actualCol = matched[clamp(p.SheetField, 0, len(matched)-1)]
 			}
-			leftContent := renderSheetKeyPanel(frame, p.Table.Sel(), p.SheetOff, keyW, h, p.SheetField,
+			leftContent := renderSheetKeyPanel(frame, srcRow, p.SheetOff, keyW, h, p.SheetField,
 				p.SheetFilter.String(), p.SheetFiltering, a.th)
-			rightContent := renderSheetDrawer(frame, p.Table.Sel(), actualCol,
+			rightContent := renderSheetDrawer(frame, srcRow, actualCol,
 				[]rune(p.SheetEdit.String()), p.SheetEdit.Cursor(), p.SheetValOff, valW, h, a.cursorFieldType(), a.th)
 			return joinDrawerSplit(leftContent, rightContent, keyW, valW, h, a.th)
 		}
-		return renderSheet(frame, p.Table.Sel(), p.SheetOff, w, h, p.SheetField,
+		return renderSheet(frame, srcRow, p.SheetOff, w, h, p.SheetField,
 			false, nil, 0, p.SheetValOff,
 			p.SheetFilter.String(), p.SheetFiltering, a.th)
 	}
@@ -655,7 +658,7 @@ func (a *App) edgeFollowSheet(f *tuidata.Frame, p *Pane) {
 	if visible < 1 {
 		visible = 1
 	}
-	dataRow := p.Table.Sel()
+	dataRow := p.Table.SrcRow(p.Table.Sel())
 	// Single Θ(m) scan builds a prefix sum; count/offset/end are all O(1)
 	// (SICP-style memoization).
 	heights := sheetBodyEntryHeightsCols(f, matched, dataRow, keyW, valW)
@@ -702,10 +705,10 @@ func (a *App) handleSheetEditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		a.pendingEdit = &PendingEdit{
 			Frame:     f,
-			Row:       p.Table.Sel(),
+			Row:       p.Table.SrcRow(p.Table.Sel()),
 			Col:       p.SheetField,
 			ColName:   f.Columns[p.SheetField].Name,
-			OldValue:  f.CellString(p.Table.Sel(), p.SheetField),
+			OldValue:  f.CellString(p.Table.SrcRow(p.Table.Sel()), p.SheetField),
 			NewValue:  p.SheetEdit.String(),
 			Table:     a.BaseCrumb(),
 			Namespace: a.CurrentTableNamespace(),
@@ -846,6 +849,10 @@ func (a *App) dispatch(action, key string) tea.Cmd {
 		}
 	case ActColReset:
 		p.Table.ResetColWidths()
+	case ActSort:
+		if f != nil && ncols > 0 {
+			p.Table.SortBy(f, p.Table.ColCursor())
+		}
 	case ActEdit:
 		// Toggle inline edit on the cursored sheet field. Only meaningful in
 		// sheet mode; in table mode e is unbound. While already editing, e is
@@ -856,7 +863,7 @@ func (a *App) dispatch(action, key string) tea.Cmd {
 		if p.SheetEditing {
 			return nil
 		}
-		val := f.CellString(p.Table.Sel(), p.SheetField)
+		val := f.CellString(p.Table.SrcRow(p.Table.Sel()), p.SheetField)
 		p.SheetEdit = NewLineInput(val)
 		p.SheetEditing = true
 		p.SheetValOff = 0
@@ -961,14 +968,14 @@ func (a *App) dispatch(action, key string) tea.Cmd {
 		}
 		a.edgeFollowSheet(f, p)
 	case ActCopy:
-		text := rowClipboardText(f, p.Table.Sel())
+		text := rowClipboardText(f, p.Table.SrcRow(p.Table.Sel()))
 		return tea.Batch(tea.SetClipboard(text), a.setToast("copied to clipboard"))
 	case ActCopyCell:
 		if nrows == 0 || ncols == 0 {
 			return nil
 		}
 		c := clamp(p.Table.ColCursor(), 0, ncols-1)
-		r := clamp(p.Table.Sel(), 0, nrows-1)
+		r := clamp(p.Table.SrcRow(p.Table.Sel()), 0, nrows-1)
 		return tea.Batch(
 			tea.SetClipboard(f.CellString(r, c)),
 			a.setToast("copied cell "+f.Columns[c].Name),
@@ -977,7 +984,7 @@ func (a *App) dispatch(action, key string) tea.Cmd {
 		if nrows == 0 {
 			return nil
 		}
-		r := clamp(p.Table.Sel(), 0, nrows-1)
+		r := clamp(p.Table.SrcRow(p.Table.Sel()), 0, nrows-1)
 		return tea.Batch(
 			tea.SetClipboard(rowClipboardText(f, r)),
 			a.setToast(fmt.Sprintf("copied row %d", r+1)),
@@ -1042,6 +1049,11 @@ func (a *App) startDelete() tea.Cmd {
 	rows := p.Table.SelectedRows()
 	if len(rows) == 0 {
 		rows = []int{clamp(p.Table.Sel(), 0, nrows-1)}
+	}
+	// The grid may be sorted (render-time permutation); map display rows to
+	// the source row each delete targets in the (unchanged) frame.
+	for i := range rows {
+		rows[i] = p.Table.SrcRow(rows[i])
 	}
 	if a.backend != nil {
 		table := a.BaseCrumb()
