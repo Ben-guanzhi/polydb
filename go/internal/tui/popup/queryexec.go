@@ -14,12 +14,12 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/polydb/polydb/internal/tuidata"
 	"github.com/polydb/polydb/internal/complete"
-	"github.com/polydb/polydb/pkg/changes"
-	"github.com/polydb/polydb/pkg/protocol"
 	"github.com/polydb/polydb/internal/theme"
 	"github.com/polydb/polydb/internal/tui"
+	"github.com/polydb/polydb/internal/tuidata"
+	"github.com/polydb/polydb/pkg/changes"
+	"github.com/polydb/polydb/pkg/protocol"
 )
 
 // qxExecInfo describes the outcome of a statement that returned no rows.
@@ -57,10 +57,13 @@ func qxRunCmd(ctx tui.AppContext, sqlText string, onFrame func(*tuidata.Frame) t
 		case err != nil:
 			return tui.ErrorMsg{Err: err}
 		case frame != nil:
+			qxRecordHistory(ctx, sqlText)
 			return onFrame(frame)
 		case info != nil:
+			qxRecordHistory(ctx, sqlText)
 			return tui.ToastMsg{Text: fmt.Sprintf("%d rows affected", info.rowsAffected)}
 		default:
+			qxRecordHistory(ctx, sqlText)
 			return tui.ToastMsg{Text: "ok"}
 		}
 	}
