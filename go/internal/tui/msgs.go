@@ -88,6 +88,15 @@ type ExecProcessMsg struct {
 // CopyTextMsg copies text to the system clipboard via OSC52.
 type CopyTextMsg struct{ Text string }
 
+// QxEditDoneMsg delivers a frame re-imported after an external $EDITOR
+// session (the "edit" command). The editor writes a temp CSV; on exit the
+// popup's ExecProcessMsg callback re-parses it and returns this message,
+// which the app turns into a new tab and closes the overlay.
+type QxEditDoneMsg struct {
+	Frame *tuidata.Frame
+	Err   error
+}
+
 // columnMetaMsg delivers asynchronously-fetched column metadata for a table so
 // the sheet view can display the real column type. The cache stores it under
 // the table name when the err is nil and the backend still matches.

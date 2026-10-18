@@ -237,6 +237,20 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case CopyTextMsg:
 		return a, tea.Batch(tea.SetClipboard(m.Text), a.setToast("copied to clipboard"))
 
+	case QxEditDoneMsg:
+		if m.Err != nil {
+			return a, func() tea.Msg { return ErrorMsg{Err: m.Err} }
+		}
+		return a, tea.Batch(CloseOverlay, func() tea.Msg {
+			return ApplyFrameMsg{
+				Frame:    m.Frame,
+				Crumb:    "edit",
+				NewTab:   true,
+				TabTitle: "edit",
+				PaneID:   a.ActivePaneID(),
+			}
+		})
+
 	case columnMetaMsg:
 		// An async ColumnsMeta fetch finished. On success store the metadata
 		// into the completion cache so the next View shows the real type
