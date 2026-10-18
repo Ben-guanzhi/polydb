@@ -7,8 +7,8 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/polydb/polydb/internal/tuidata"
 	"github.com/polydb/polydb/internal/theme"
+	"github.com/polydb/polydb/internal/tuidata"
 )
 
 func testFrame(rows int) *tuidata.Frame {
@@ -470,5 +470,106 @@ func TestRenderCursorKeepsMarkerWhenSelected(t *testing.T) {
 	body2 := strings.Split(out, "\n")[3]
 	if !strings.ContainsRune(body2, []rune(selectMarker)[0]) {
 		t.Fatalf("cursor+selected row 2 missing marker:\n%s", out)
+	}
+}
+
+// --- column resize (P1 grid enhancement) -----------------------------------
+
+func TestResizeColClamps(t *testing.T) {
+	tv := &TableView{}
+	tv.ResizeCol(2, 50)
+	if tv.colWidths[2] != 50 {
+		t.Fatalf("expected 50, got %d", tv.colWidths[2])
+	}
+	// shrink below the floor: clamps to 1, keeps the override
+	tv.ResizeCol(2, -200)
+	if tv.colWidths[2] != 1 {
+		t.Fatalf("expected clamp to 1, got %d", tv.colWidths[2])
+	}
+	// grow above the ceiling: clamps to colWidthMax
+	tv.ResizeCol(2, 1000)
+	if tv.colWidths[2] != colWidthMax {
+		t.Fatalf("expected clamp to %d, got %d", colWidthMax, tv.colWidths[2])
+	}
+	tv.ResetColWidths()
+	if tv.colWidths != nil {
+		t.Fatalf("expected nil map after reset, got %v", tv.colWidths)
+	}
+}
+
+func TestApplyWidthOverrides(t *testing.T) {
+	tv := &TableView{}
+	tv.colWidths = map[int]int{1: 42, 9: 99} // 9 is out of range
+	nat := []int{10, 10, 10}
+	tv.applyWidthOverrides(nat)
+	if nat[1] != 42 {
+		t.Fatalf("override not applied: %v", nat)
+	}
+	if nat[0] != 10 || nat[2] != 10 {
+		t.Fatalf("unrelated columns changed: %v", nat)
+	}
+	if nat[0] != 10 {
+		t.Fatalf("out-of-range override leaked: %v", nat)
+	}
+}
+
+// leadingRunes counts the run of consecutive r runes at the start of the
+// first body data line (line index 1; line 0 is the header). ANSI styling is
+// stripped first so it does not break the count. Used to read a column's
+// rendered width from a NoEllipsis render.
+func leadingRunes(s string, r rune) int {
+	lines := strings.Split(s, "\n")
+	if len(lines) < 2 {
+		return 0
+	}
+	plain := ansi.Strip(lines[1])
+	n := 0
+	for _, c := range plain {
+		if c == r {
+			n++
+		} else {
+			break
+		}
+	}
+	return n
+}
+
+func TestColResizeRenderHonorsWidth(t *testing.T) {
+	f := wideFrame(1)
+	th := theme.Default()
+	o := RenderOpts{Width: 200, Height: 10, Theme: th, ShowBorders: false, NoEllipsis: true}
+	tv := &TableView{}
+	tv.modeSet = true
+	tv.expanded = true // force wide mode so nat is used directly
+
+	// No override: column 0's natural width equals its 30-char cell content.
+	base := tv.Render(f, o)
+	if got := leadingRunes(base, 'a'); got != 30 {
+		t.Fatalf("expected natural column 0 width 30, got %d", got)
+	}
+
+	// Override column 0 to 15: the leading 'a' run must shrink to 15.
+	tv.ResizeCol(0, 15)
+	wide := tv.Render(f, o)
+	if got := leadingRunes(wide, 'a'); got != 15 {
+		t.Fatalf("expected overridden column 0 width 15, got %d", got)
+	}
+
+	// Reset restores the auto-fit width.
+	tv.ResetColWidths()
+	if got := leadingRunes(tv.Render(f, o), 'a'); got != 30 {
+		t.Fatalf("expected reset to restore width 30, got %d", got)
+	}
+}
+
+func TestColResizeSurvivesFrameRefresh(t *testing.T) {
+	// ClampTo is called on every refresh (same columns); overrides must
+	// survive it so a resized column stays wide after reloading data.
+	tv := &TableView{}
+	tv.colWidths = map[int]int{0: 15}
+	f := wideFrame(3)
+	tv.ClampTo(f)
+	if tv.colWidths[0] != 15 {
+		t.Fatalf("override lost across frame clamp: %v", tv.colWidths)
 	}
 }

@@ -836,6 +836,16 @@ func (a *App) dispatch(action, key string) tea.Cmd {
 		p.Table.LastCol(ncols)
 	case ActExpand:
 		p.Table.ToggleExpanded()
+	case ActColGrow:
+		if ncols > 0 {
+			p.Table.ResizeCol(p.Table.ColCursor(), colWidthStep)
+		}
+	case ActColShrink:
+		if ncols > 0 {
+			p.Table.ResizeCol(p.Table.ColCursor(), -colWidthStep)
+		}
+	case ActColReset:
+		p.Table.ResetColWidths()
 	case ActEdit:
 		// Toggle inline edit on the cursored sheet field. Only meaningful in
 		// sheet mode; in table mode e is unbound. While already editing, e is

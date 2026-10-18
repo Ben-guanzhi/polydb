@@ -53,6 +53,9 @@ const (
 	ActNextPage     = "next-page"
 	ActPrevPage     = "prev-page"
 	ActColFocus     = "col-focus"
+	ActColGrow      = "col-grow"
+	ActColShrink    = "col-shrink"
+	ActColReset     = "col-reset"
 )
 
 // GlobalBindings apply in every non-overlay mode.
@@ -96,6 +99,9 @@ var TableBindings = []Binding{
 	{Keys: []string{">"}, Action: ActNextPage, Help: "next page"},
 	{Keys: []string{"<"}, Action: ActPrevPage, Help: "prev page"},
 	{Keys: []string{"z"}, Action: ActColFocus, Help: "zoom current column (h/l to scroll)"},
+	{Keys: []string{"=", "+"}, Action: ActColGrow, Help: "widen current column"},
+	{Keys: []string{"-"}, Action: ActColShrink, Help: "narrow current column"},
+	{Keys: []string{"\\"}, Action: ActColReset, Help: "reset column widths"},
 }
 
 // SheetBindings apply in sheet mode.

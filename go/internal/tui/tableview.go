@@ -9,8 +9,8 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/polydb/polydb/internal/tuidata"
 	"github.com/polydb/polydb/internal/theme"
+	"github.com/polydb/polydb/internal/tuidata"
 )
 
 const (
@@ -42,6 +42,54 @@ type TableView struct {
 	tcWidths tableColsWidthCache
 
 	selected map[int]bool // multi-select membership; lazy-init; nil = none
+
+	// colWidths holds manual width overrides keyed by ORIGINAL frame column
+	// index (nil = none). An override locks a column to an exact display
+	// width; it is applied on top of the natural width before the fit/expanded
+	// layout so a widened column stays wide until the user resets it. The map
+	// survives frame refreshes (same columns) but is dropped by Reset.
+	colWidths map[int]int
+}
+
+// colWidthMax is the ceiling for a manual column width (chars).
+const colWidthMax = 240
+
+// colWidthStep is how many cells one = / - press changes a column by.
+const colWidthStep = 5
+
+// ResizeCol changes the manual width of column col by delta cells (clamped to
+// [1, colWidthMax]). Shaking a column down to its floor keeps the override so
+// a later = grows it back from exactly 1.
+func (tv *TableView) ResizeCol(col, delta int) {
+	if tv.colWidths == nil {
+		tv.colWidths = map[int]int{}
+	}
+	w := tv.colWidths[col] + delta
+	if w < 1 {
+		w = 1
+	}
+	if w > colWidthMax {
+		w = colWidthMax
+	}
+	tv.colWidths[col] = w
+}
+
+// ResetColWidths drops every manual column width, returning the view to the
+// auto-fit layout.
+func (tv *TableView) ResetColWidths() {
+	tv.colWidths = nil
+}
+
+// applyWidthOverrides writes any manual column widths into nat in place. nat
+// is a freshly allocated per-render slice (naturalWidthsFor builds it with
+// make), so mutating it never disturbs the width cache. Columns outside nat's
+// range (e.g. after a frame with fewer columns) are ignored.
+func (tv *TableView) applyWidthOverrides(nat []int) {
+	for c, w := range tv.colWidths {
+		if c >= 0 && c < len(nat) {
+			nat[c] = clamp(w, 1, colWidthMax)
+		}
+	}
 }
 
 // selectMarker is drawn in the gutter (or the leading tag column when there
@@ -107,6 +155,7 @@ func (tv *TableView) Reset() {
 	tv.snapCursor = false
 	tv.modeSet = false
 	tv.ClearSelect()
+	tv.ResetColWidths()
 }
 
 // ClampTo clamps selection and cursor to the bounds of f (used when the
@@ -353,6 +402,7 @@ func (tv *TableView) Render(f *tuidata.Frame, o RenderOpts) string {
 	if !tv.modeSet {
 		tv.modeSet = true
 		nat := tv.naturalWidthsFor(f, origFrame, o.TableCols, rowBase, mlo, mhi, compactColCap, wc)
+		tv.applyWidthOverrides(nat)
 		tv.expanded = autoExpand(nat, fitWidths(nat, avail-(ncols-1)))
 	}
 
@@ -360,6 +410,7 @@ func (tv *TableView) Render(f *tuidata.Frame, o RenderOpts) string {
 	var widths []int // display width per visible column
 	if tv.expanded {
 		nat := tv.naturalWidthsFor(f, origFrame, o.TableCols, rowBase, mlo, mhi, expandedColCap, wc)
+		tv.applyWidthOverrides(nat)
 		tv.colCursor = clamp(tv.colCursor, 0, ncols-1)
 		tv.colOff = clamp(tv.colOff, 0, ncols-1)
 		if tv.snapCursor {
@@ -373,6 +424,7 @@ func (tv *TableView) Render(f *tuidata.Frame, o RenderOpts) string {
 		}
 	} else {
 		nat := tv.naturalWidthsFor(f, origFrame, o.TableCols, rowBase, mlo, mhi, compactColCap, wc)
+		tv.applyWidthOverrides(nat)
 		fitted := fitWidths(nat, avail-(ncols-1))
 		tv.colCursor = clamp(tv.colCursor, 0, ncols-1)
 		cols = make([]int, ncols)
