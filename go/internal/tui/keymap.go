@@ -53,7 +53,6 @@ const (
 	ActNextPage     = "next-page"
 	ActPrevPage     = "prev-page"
 	ActColFocus     = "col-focus"
-	ActOobeCols     = "oobe-cols"
 )
 
 // GlobalBindings apply in every non-overlay mode.
@@ -97,7 +96,6 @@ var TableBindings = []Binding{
 	{Keys: []string{">"}, Action: ActNextPage, Help: "next page"},
 	{Keys: []string{"<"}, Action: ActPrevPage, Help: "prev page"},
 	{Keys: []string{"z"}, Action: ActColFocus, Help: "zoom current column (h/l to scroll)"},
-	{Keys: []string{"v"}, Action: ActOobeCols, Help: "select display columns (OpenObserve)"},
 }
 
 // SheetBindings apply in sheet mode.

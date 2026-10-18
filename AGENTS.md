@@ -39,6 +39,10 @@ text
 2. 前端**只**通过 `app-core`（进程内）或 `transport`（网络）访问数据。
 3. driver 层**不得**包含任何 UI 假设。
 4. `core` / `protocol` 层**不得**有 IO。
+5. 密码**只**经 `keyring`（OS 凭据管理器优先，加密文件 `keyring.bin` 兜底），明文密码永不下发、永不在 DTO 中往返（`password` 字段仅创建/更新时一次性接受并由服务端写入 keyring）。
+6. **契约优先**：任何接口/字段变更须先改 `spec/` 再改代码；合并前**必须**跑 `tools/genprotocol` 四门禁（`ts --check` / `check` / `ops` / `docs`），漂移即拦截。
+7. **MCP 以 Go 端 `go/pkg/mcp` + `cmd/polydb-mcp` 为唯一实现**（stdio JSON-RPC，只读工具集，符合只读安全模型）；dbstudio 的 Rust `crates/mcp` 为冗余实现，**不并入**。
+8. **dbstudio 能力并入须先扩 spec 再改代码**；Rust GUI 端回填统一走 `rust/crates/ui-gui` + `apps/polydb-gui`，密码层复用 `rust/crates/storage/src/keyring.rs`（禁止各项目自带 keyring 实现）。
 
 ---
 
@@ -78,7 +82,11 @@ polydb/
 │ │ ├── dbsqlite/ dbmysql/ dbpostgres/ dbmssql/ dboracle/ dbredis/
 │ │ ├── transport/ # 前端数据访问：Client 接口 + Local(进程内) / Remote(REST)
 │ │ └── core/ # 预留空目录
-│ └── internal/tui/
+│ └── internal/tui/        # bubbletea v2 TUI（合并自 sqltui 框架 + polydb dbmode）
+│     ├── dbmode/          # 连接表单/选择器/Redis 包装；注册 overlay 工厂
+│     ├── backend/         # Backend 契约 + Adapter（transport.Client → Backend）
+│     ├── popup/           # schema/queryexec/queryeditor/info/prompts 等弹窗
+│     └── complete/        # SQL 补全（独立包，供 popup 复用）
 ├── web/ # 前端只写一次（React/Vue + Monaco）
 │ └── src/api/ # 由 spec 生成 TS 类型（@polydb/api）
 ├── test/contract/ # 双后端对拍
