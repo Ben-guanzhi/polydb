@@ -57,6 +57,8 @@ const (
 	ActColShrink    = "col-shrink"
 	ActColReset     = "col-reset"
 	ActSort         = "sort"
+	ActColPageLeft  = "col-page-left"
+	ActColPageRight = "col-page-right"
 )
 
 // GlobalBindings apply in every non-overlay mode.
@@ -104,6 +106,8 @@ var TableBindings = []Binding{
 	{Keys: []string{"-"}, Action: ActColShrink, Help: "narrow current column"},
 	{Keys: []string{"\\"}, Action: ActColReset, Help: "reset column widths"},
 	{Keys: []string{"S", "shift+s"}, Action: ActSort, Help: "sort by cursor column (toggle dir)"},
+	{Keys: []string{"ctrl+left"}, Action: ActColPageLeft, Help: "scroll columns left a screen"},
+	{Keys: []string{"ctrl+right"}, Action: ActColPageRight, Help: "scroll columns right a screen"},
 }
 
 // SheetBindings apply in sheet mode.

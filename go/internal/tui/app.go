@@ -853,6 +853,10 @@ func (a *App) dispatch(action, key string) tea.Cmd {
 		if f != nil && ncols > 0 {
 			p.Table.SortBy(f, p.Table.ColCursor())
 		}
+	case ActColPageLeft:
+		p.Table.PageColLeft(ncols)
+	case ActColPageRight:
+		p.Table.PageColRight(ncols)
 	case ActEdit:
 		// Toggle inline edit on the cursored sheet field. Only meaningful in
 		// sheet mode; in table mode e is unbound. While already editing, e is

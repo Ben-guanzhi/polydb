@@ -26,6 +26,7 @@ type TableView struct {
 	rowOff    int  // first visible row
 	colOff    int  // first visible column (expanded mode)
 	colCursor int  // cursored column (expanded mode)
+	visCount  int  // visible column count from the last render (for paging)
 	expanded  bool // column mode
 	modeSet   bool // column mode already picked (auto at first render, or manual 'e')
 
@@ -324,6 +325,40 @@ func (tv *TableView) PrevCol(ncols int) {
 	tv.snapCursor = true
 }
 
+// pageStep returns how many columns a single page-left/right should advance:
+// one less than the visible count so the column that was at the edge stays
+// visible. Falls back to 1 before the first render has measured the window.
+func (tv *TableView) pageStep() int {
+	if tv.visCount > 1 {
+		return tv.visCount - 1
+	}
+	return 1
+}
+
+// PageColRight scrolls the visible column window right by roughly one screen
+// width (overlapping by one column) and keeps the cursor on the leading edge
+// of the new window so it stays in view.
+func (tv *TableView) PageColRight(ncols int) {
+	if ncols <= 0 {
+		return
+	}
+	step := tv.pageStep()
+	tv.colOff = clamp(tv.colOff+step, 0, ncols-1)
+	tv.colCursor = clamp(tv.colCursor+step, 0, ncols-1)
+	tv.snapCursor = true
+}
+
+// PageColLeft scrolls the visible column window left by roughly one screen.
+func (tv *TableView) PageColLeft(ncols int) {
+	if ncols <= 0 {
+		return
+	}
+	step := tv.pageStep()
+	tv.colOff = clamp(tv.colOff-step, 0, ncols-1)
+	tv.colCursor = clamp(tv.colCursor-step, 0, ncols-1)
+	tv.snapCursor = true
+}
+
 func (tv *TableView) FirstCol() {
 	tv.colCursor = 0
 	tv.snapCursor = true
@@ -530,6 +565,8 @@ func (tv *TableView) Render(f *tuidata.Frame, o RenderOpts) string {
 		}
 		widths = fitted
 	}
+
+	tv.visCount = len(cols)
 
 	// When a column subset is active (e.g. OpenObserve timestamp+body),
 	// stretch the last column to fill all remaining terminal space so the

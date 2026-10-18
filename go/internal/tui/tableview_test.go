@@ -688,3 +688,89 @@ func TestSortRenderShowsArrowAndOrderedBody(t *testing.T) {
 		t.Fatalf("first body row should be the min key 1, got %q", body)
 	}
 }
+
+// --- horizontal page scroll (P1 grid enhancement) --------------------------
+
+// manyCols builds a frame with n columns, each a fixed-width block of content,
+// so the expanded-mode viewport shows only a few columns at a time.
+func manyCols(n, w int) *tuidata.Frame {
+	names := make([]string, n)
+	row := make([]any, n)
+	for i := 0; i < n; i++ {
+		names[i] = strings.Repeat("c", w) // header, length w
+		row[i] = strings.Repeat(string(rune('a'+i%26)), w)
+	}
+	f := tuidata.New(names...)
+	for r := 0; r < 5; r++ {
+		f.AppendRow(row)
+	}
+	return f
+}
+
+func renderExpanded(tv *TableView, f *tuidata.Frame) {
+	tv.modeSet = true
+	tv.expanded = true
+	tv.Render(f, RenderOpts{Width: 50, Height: 10, Theme: theme.Default(), NoEllipsis: true})
+}
+
+func TestPageStepUsesVisibleCount(t *testing.T) {
+	f := manyCols(20, 10)
+	tv := &TableView{}
+	renderExpanded(tv, f)
+	if tv.visCount <= 1 {
+		t.Fatalf("expected a multi-column window, visCount=%d", tv.visCount)
+	}
+	if got := tv.pageStep(); got != tv.visCount-1 {
+		t.Fatalf("pageStep = %d, want visCount-1 = %d", got, tv.visCount-1)
+	}
+}
+
+func TestPageColRightAdvancesWindow(t *testing.T) {
+	f := manyCols(20, 10)
+	tv := &TableView{}
+	renderExpanded(tv, f)
+	start := tv.ColOff()
+	tv.PageColRight(f.NumCols())
+	renderExpanded(tv, f)
+	if tv.ColOff() <= start {
+		t.Fatalf("PageColRight did not scroll the window: off %d -> %d", start, tv.ColOff())
+	}
+	// The cursor travelled with the window and stays within it.
+	if tv.ColCursor() < tv.ColOff() {
+		t.Fatalf("cursor %d fell behind window start %d", tv.ColCursor(), tv.ColOff())
+	}
+}
+
+func TestPageColLeftReturnsToStart(t *testing.T) {
+	f := manyCols(20, 10)
+	tv := &TableView{}
+	renderExpanded(tv, f)
+	tv.PageColRight(f.NumCols())
+	renderExpanded(tv, f)
+	afterRight := tv.ColOff()
+	tv.PageColLeft(f.NumCols())
+	renderExpanded(tv, f)
+	if tv.ColOff() >= afterRight {
+		t.Fatalf("PageColLeft did not move the window left: off %d -> %d", afterRight, tv.ColOff())
+	}
+}
+
+func TestPageColClampsAtEnds(t *testing.T) {
+	f := manyCols(20, 10)
+	tv := &TableView{}
+	renderExpanded(tv, f)
+	for i := 0; i < 50; i++ {
+		tv.PageColRight(f.NumCols())
+		renderExpanded(tv, f)
+	}
+	if tv.ColOff() != f.NumCols()-1 && tv.ColCursor() != f.NumCols()-1 {
+		t.Fatalf("paging past the end not clamped: off=%d cursor=%d ncols=%d", tv.ColOff(), tv.ColCursor(), f.NumCols())
+	}
+	for i := 0; i < 50; i++ {
+		tv.PageColLeft(f.NumCols())
+		renderExpanded(tv, f)
+	}
+	if tv.ColOff() != 0 || tv.ColCursor() != 0 {
+		t.Fatalf("paging before the start not clamped: off=%d cursor=%d", tv.ColOff(), tv.ColCursor())
+	}
+}
