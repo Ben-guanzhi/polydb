@@ -38,6 +38,7 @@ var Commands = []Command{
 	{Name: "histogram", Aliases: nil, Description: "build a histogram of a column"},
 	{Name: "scatterplot", Aliases: nil, Description: "build a scatter plot of two columns"},
 	{Name: "edit", Aliases: nil, Description: "edit frame in $EDITOR, reimport on save"},
+	{Name: "format", Aliases: nil, Description: "beautify SQL in the editor"},
 	{Name: "theme", Aliases: []string{"themeselector"}, Description: "theme selector with live preview"},
 	{Name: "toggleborders", Aliases: nil, Description: "toggle table borders"},
 	{Name: "togglerownumbers", Aliases: nil, Description: "toggle row-number gutter"},

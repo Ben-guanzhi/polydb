@@ -5,10 +5,11 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/polydb/polydb/internal/tuidata"
 	"github.com/polydb/polydb/internal/complete"
 	"github.com/polydb/polydb/internal/theme"
 	"github.com/polydb/polydb/internal/tui"
+	"github.com/polydb/polydb/internal/tuidata"
+	"github.com/polydb/polydb/pkg/sqlformat"
 )
 
 func init() {
@@ -118,6 +119,11 @@ func (e *qxEditor) Update(msg tea.Msg) (tui.Overlay, tea.Cmd) {
 		}
 		return e, tui.CloseOverlay
 
+	case "ctrl+f":
+		e.FormatSQL()
+		e.sug.clear()
+		return e, e.warmDotCmd()
+
 	case "tab", "down":
 		if e.sug.open() {
 			e.sug.cycle(1)
@@ -176,3 +182,15 @@ func (e *qxEditor) View(width, height int, th *theme.Theme) string {
 }
 
 var _ tui.OverlayIniter = (*qxEditor)(nil)
+var _ tui.FormattableOverlay = (*qxEditor)(nil)
+
+// FormatSQL beautifies the SQL in the editor line: collapsing whitespace,
+// uppercasing keywords, and laying clauses out on their own indented lines.
+// Empty or whitespace-only input is left untouched.
+func (e *qxEditor) FormatSQL() {
+	s := strings.TrimSpace(e.in.String())
+	if s == "" {
+		return
+	}
+	e.in.Set(sqlformat.Format(s))
+}

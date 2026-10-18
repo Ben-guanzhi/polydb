@@ -36,6 +36,14 @@ type CloseOverlayMsg struct{}
 // CloseOverlay is a convenience command that emits CloseOverlayMsg.
 func CloseOverlay() tea.Msg { return CloseOverlayMsg{} }
 
+// FormattableOverlay is an optional extension of Overlay: an overlay that
+// holds editable text which can be normalized (whitespace collapsed, keywords
+// uppercased, clauses on their own indented lines) implements FormatSQL. The
+// "format" built-in command calls it on the top overlay when present.
+type FormattableOverlay interface {
+	FormatSQL()
+}
+
 // PushOverlayMsg pushes a new overlay onto the stack.
 type PushOverlayMsg struct{ Overlay Overlay }
 

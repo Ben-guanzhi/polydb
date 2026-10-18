@@ -1135,6 +1135,15 @@ func (a *App) runCommand(name, arg string) tea.Cmd {
 			p.Table.ClearSelect()
 		}
 		return nil
+	case "format":
+		if len(a.overlays) == 0 {
+			return a.setToast("nothing to format")
+		}
+		if f, ok := a.overlays[len(a.overlays)-1].(FormattableOverlay); ok {
+			f.FormatSQL()
+			return a.setToast("formatted")
+		}
+		return a.setToast("current view cannot be formatted")
 	}
 
 	factory, ok := Factories[name]
