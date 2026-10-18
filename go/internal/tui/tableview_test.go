@@ -774,3 +774,92 @@ func TestPageColClampsAtEnds(t *testing.T) {
 		t.Fatalf("paging before the start not clamped: off=%d cursor=%d", tv.ColOff(), tv.ColCursor())
 	}
 }
+
+// --- frozen first column (P1 grid enhancement) -----------------------------
+
+// firstBodyCell returns the (stripped) leading cell text of the first body
+// line after rendering: the column shown at the far left.
+func firstBodyCell(tv *TableView, f *tuidata.Frame) string {
+	out := renderExpandedReturn(tv, f)
+	return strings.TrimSpace(ansi.Strip(strings.Split(out, "\n")[1]))
+}
+
+func renderExpandedReturn(tv *TableView, f *tuidata.Frame) string {
+	tv.modeSet = true
+	tv.expanded = true
+	return tv.Render(f, RenderOpts{Width: 50, Height: 10, Theme: theme.Default(), NoEllipsis: true})
+}
+
+func TestFreezePinsFirstColumnThroughScroll(t *testing.T) {
+	f := manyCols(20, 10)
+	tv := &TableView{}
+
+	// Without freeze, one screen-right scrolls column 0 (the "a" column) away.
+	renderExpanded(tv, f)
+	tv.PageColRight(f.NumCols())
+	renderExpanded(tv, f)
+	if strings.HasPrefix(firstBodyCell(tv, f), strings.Repeat("a", 10)) {
+		t.Fatalf("expected column 0 to scroll away before freezing, got %q", firstBodyCell(tv, f))
+	}
+
+	// Freeze the first column: it must stay at the left edge no matter how
+	// far we scroll.
+	tv.ToggleFreeze(f.NumCols())
+	if tv.frozenCols != 1 {
+		t.Fatalf("freeze did not engage, frozenCols=%d", tv.frozenCols)
+	}
+	renderExpanded(tv, f)
+	if !strings.HasPrefix(firstBodyCell(tv, f), strings.Repeat("a", 10)) {
+		t.Fatalf("frozen column 0 not pinned after freeze, got %q", firstBodyCell(tv, f))
+	}
+	startOff := tv.ColOff()
+	for i := 0; i < 10; i++ {
+		tv.PageColRight(f.NumCols())
+		renderExpanded(tv, f)
+		if !strings.HasPrefix(firstBodyCell(tv, f), strings.Repeat("a", 10)) {
+			t.Fatalf("frozen column 0 scrolled away at page %d: %q", i, firstBodyCell(tv, f))
+		}
+	}
+	if tv.ColOff() <= startOff {
+		t.Fatalf("window did not scroll under freeze: off %d -> %d", startOff, tv.ColOff())
+	}
+}
+
+func TestFreezeToggleOff(t *testing.T) {
+	f := manyCols(20, 10)
+	tv := &TableView{}
+	renderExpanded(tv, f)
+	tv.ToggleFreeze(f.NumCols())
+	if tv.frozenCols != 1 {
+		t.Fatal("freeze did not engage")
+	}
+	tv.ToggleFreeze(f.NumCols())
+	if tv.frozenCols != 0 {
+		t.Fatalf("second toggle should unfreeze, frozenCols=%d", tv.frozenCols)
+	}
+}
+
+func TestFreezeClearedByReset(t *testing.T) {
+	f := manyCols(20, 10)
+	tv := &TableView{}
+	renderExpanded(tv, f)
+	tv.ToggleFreeze(f.NumCols())
+	tv.Reset()
+	if tv.frozenCols != 0 {
+		t.Fatalf("Reset must drop the frozen columns, got %d", tv.frozenCols)
+	}
+}
+
+func TestFreezeIgnoredForSingleColumn(t *testing.T) {
+	f := manyCols(1, 10)
+	tv := &TableView{}
+	renderExpanded(tv, f)
+	tv.ToggleFreeze(f.NumCols()) // ncols == 1: no-op
+	if tv.frozenCols != 0 {
+		t.Fatalf("freeze must be a no-op with a single column, got %d", tv.frozenCols)
+	}
+	// Must still render without panicking.
+	if out := renderExpandedReturn(tv, f); out == "" {
+		t.Fatal("render produced no output with a single column")
+	}
+}

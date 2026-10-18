@@ -59,6 +59,7 @@ const (
 	ActSort         = "sort"
 	ActColPageLeft  = "col-page-left"
 	ActColPageRight = "col-page-right"
+	ActFreezeToggle = "freeze-toggle"
 )
 
 // GlobalBindings apply in every non-overlay mode.
@@ -108,6 +109,7 @@ var TableBindings = []Binding{
 	{Keys: []string{"S", "shift+s"}, Action: ActSort, Help: "sort by cursor column (toggle dir)"},
 	{Keys: []string{"ctrl+left"}, Action: ActColPageLeft, Help: "scroll columns left a screen"},
 	{Keys: []string{"ctrl+right"}, Action: ActColPageRight, Help: "scroll columns right a screen"},
+	{Keys: []string{"F", "shift+f"}, Action: ActFreezeToggle, Help: "freeze/unfreeze first column"},
 }
 
 // SheetBindings apply in sheet mode.

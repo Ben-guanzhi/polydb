@@ -22,13 +22,14 @@ const (
 // TableView holds the scroll/selection state of one table widget. Rendering
 // is stateless apart from remembering the last page size for paging keys.
 type TableView struct {
-	sel       int  // selected row
-	rowOff    int  // first visible row
-	colOff    int  // first visible column (expanded mode)
-	colCursor int  // cursored column (expanded mode)
-	visCount  int  // visible column count from the last render (for paging)
-	expanded  bool // column mode
-	modeSet   bool // column mode already picked (auto at first render, or manual 'e')
+	sel        int  // selected row
+	rowOff     int  // first visible row
+	colOff     int  // first visible column (expanded mode)
+	colCursor  int  // cursored column (expanded mode)
+	visCount   int  // visible column count from the last render (for paging)
+	frozenCols int  // number of leading columns pinned during horizontal scroll
+	expanded   bool // column mode
+	modeSet    bool // column mode already picked (auto at first render, or manual 'e')
 
 	snapCursor bool // scroll colCursor into view on next render
 	lastRows   int  // page size observed at last render
@@ -243,6 +244,7 @@ func (tv *TableView) Reset() {
 	tv.sortCol = 0
 	tv.sortDir = 1
 	tv.order = nil
+	tv.frozenCols = 0
 }
 
 // ClampTo clamps selection and cursor to the bounds of f (used when the
@@ -357,6 +359,22 @@ func (tv *TableView) PageColLeft(ncols int) {
 	tv.colOff = clamp(tv.colOff-step, 0, ncols-1)
 	tv.colCursor = clamp(tv.colCursor-step, 0, ncols-1)
 	tv.snapCursor = true
+}
+
+// ToggleFreeze pins (or unpins) the first column so it stays visible during
+// horizontal scroll. Freezing only makes sense with more than one column.
+func (tv *TableView) ToggleFreeze(ncols int) {
+	if tv.frozenCols > 0 {
+		tv.frozenCols = 0
+		return
+	}
+	if ncols > 1 {
+		tv.frozenCols = 1
+		if tv.colOff < tv.frozenCols {
+			tv.colOff = tv.frozenCols
+			tv.snapCursor = true
+		}
+	}
 }
 
 func (tv *TableView) FirstCol() {
@@ -544,12 +562,48 @@ func (tv *TableView) Render(f *tuidata.Frame, o RenderOpts) string {
 		nat := tv.naturalWidthsFor(f, origFrame, o.TableCols, rowBase, mlo, mhi, expandedColCap, wc)
 		tv.applyWidthOverrides(nat)
 		tv.colCursor = clamp(tv.colCursor, 0, ncols-1)
-		tv.colOff = clamp(tv.colOff, 0, ncols-1)
-		if tv.snapCursor {
-			tv.colOff = scrollColIntoView(nat, tv.colOff, tv.colCursor, avail)
-			tv.snapCursor = false
+
+		// Frozen leading columns stay pinned at the left while the rest of
+		// the table scrolls horizontally. Their width is subtracted from the
+		// scrollable budget so the window math is unchanged.
+		frozen := tv.frozenCols
+		if frozen >= ncols {
+			frozen = 0
 		}
-		cols, widths = visibleColumns(nat, tv.colOff, avail)
+		if frozen > 0 {
+			fw := 0
+			for c := 0; c < frozen; c++ {
+				if c > 0 {
+					fw++
+				}
+				fw += nat[c]
+			}
+			scrollAvail := avail - fw
+			if scrollAvail < 1 {
+				scrollAvail = 1
+			}
+			tv.colOff = clamp(tv.colOff, frozen, ncols-1)
+			if tv.snapCursor {
+				tv.colOff = scrollColIntoView(nat, tv.colOff, tv.colCursor, scrollAvail)
+				tv.snapCursor = false
+			}
+			sc, sw := visibleColumns(nat, tv.colOff, scrollAvail)
+			cols = make([]int, 0, frozen+len(sc))
+			widths = make([]int, 0, frozen+len(sw))
+			for c := 0; c < frozen; c++ {
+				cols = append(cols, c)
+				widths = append(widths, nat[c])
+			}
+			cols = append(cols, sc...)
+			widths = append(widths, sw...)
+		} else {
+			tv.colOff = clamp(tv.colOff, 0, ncols-1)
+			if tv.snapCursor {
+				tv.colOff = scrollColIntoView(nat, tv.colOff, tv.colCursor, avail)
+				tv.snapCursor = false
+			}
+			cols, widths = visibleColumns(nat, tv.colOff, avail)
+		}
 		// After a resize (or any window change) keep the cursor visible.
 		if len(cols) > 0 {
 			tv.colCursor = clamp(tv.colCursor, cols[0], cols[len(cols)-1])

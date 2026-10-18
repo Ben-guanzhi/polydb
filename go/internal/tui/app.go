@@ -857,6 +857,8 @@ func (a *App) dispatch(action, key string) tea.Cmd {
 		p.Table.PageColLeft(ncols)
 	case ActColPageRight:
 		p.Table.PageColRight(ncols)
+	case ActFreezeToggle:
+		p.Table.ToggleFreeze(ncols)
 	case ActEdit:
 		// Toggle inline edit on the cursored sheet field. Only meaningful in
 		// sheet mode; in table mode e is unbound. While already editing, e is
