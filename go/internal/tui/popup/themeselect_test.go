@@ -10,6 +10,7 @@ import (
 	"github.com/polydb/polydb/internal/tui/backend"
 	"github.com/polydb/polydb/internal/theme"
 	"github.com/polydb/polydb/internal/tui"
+	"github.com/polydb/polydb/pkg/transport"
 )
 
 // themeTestCtx is a minimal AppContext for exercising the factory.
@@ -34,6 +35,7 @@ func (c themeTestCtx) ActiveTab() int                   { return 0 }
 func (c themeTestCtx) ActivePaneID() int                { return 0 }
 func (c themeTestCtx) PendingEdit() *tui.PendingEdit     { return nil }
 func (c themeTestCtx) PendingDelete() *tui.PendingDelete { return nil }
+func (c themeTestCtx) Client() transport.Client        { return nil }
 
 // themeCollectMsgs runs a command (flattening batches) and returns every
 // message it produces.

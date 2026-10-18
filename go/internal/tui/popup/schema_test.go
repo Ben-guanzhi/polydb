@@ -13,6 +13,7 @@ import (
 	"github.com/polydb/polydb/internal/tui/backend"
 	"github.com/polydb/polydb/internal/theme"
 	"github.com/polydb/polydb/internal/tui"
+	"github.com/polydb/polydb/pkg/transport"
 )
 
 // schemaTestBackend is a stub backend.Backend for schema overlay tests. It does
@@ -84,6 +85,7 @@ func (c schemaTestCtx) ActiveTab() int                   { return c.active }
 func (c schemaTestCtx) ActivePaneID() int                { return 0 }
 func (c schemaTestCtx) PendingEdit() *tui.PendingEdit     { return nil }
 func (c schemaTestCtx) PendingDelete() *tui.PendingDelete { return nil }
+func (c schemaTestCtx) Client() transport.Client        { return nil }
 
 // schemaTestMsgs runs a cmd (possibly a batch) and collects all messages.
 func schemaTestMsgs(t *testing.T, cmd tea.Cmd) []tea.Msg {

@@ -12,6 +12,7 @@ import (
 	"github.com/polydb/polydb/internal/tui/backend"
 	"github.com/polydb/polydb/internal/theme"
 	"github.com/polydb/polydb/internal/tui"
+	"github.com/polydb/polydb/pkg/transport"
 )
 
 // confirmTestCtx is a self-contained AppContext stub for the confirm overlay
@@ -41,6 +42,7 @@ func (c *confirmTestCtx) ActiveTab() int                   { return 0 }
 func (c *confirmTestCtx) ActivePaneID() int                { return 0 }
 func (c *confirmTestCtx) PendingEdit() *tui.PendingEdit     { return c.pe }
 func (c *confirmTestCtx) PendingDelete() *tui.PendingDelete { return c.pd }
+func (c *confirmTestCtx) Client() transport.Client        { return nil }
 
 // confirmDrain runs a command tree, expanding tea.Batch and tea.Sequence, and
 // collects the leaf messages. Mirrors the reflective unwrap in schema_test.go.

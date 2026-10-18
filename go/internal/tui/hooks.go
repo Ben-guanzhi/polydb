@@ -4,6 +4,7 @@ import (
 	"github.com/polydb/polydb/internal/theme"
 	"github.com/polydb/polydb/internal/tui/backend"
 	"github.com/polydb/polydb/internal/tuidata"
+	"github.com/polydb/polydb/pkg/transport"
 )
 
 // TabInfo is a summary of one open tab for switchers and schema listings.
@@ -35,6 +36,9 @@ type AppContext interface {
 	ActivePaneID() int // stable identity of the active pane (0 if no tabs)
 	PendingEdit() *PendingEdit
 	PendingDelete() *PendingDelete
+	// Client 暴露 transport.Client（铁律 2：UI 只经 transport 访问数据）。
+	// 连接表单/选择器用它做连接 CRUD。
+	Client() transport.Client
 }
 
 // Factories maps command names to overlay constructors. Popup packages

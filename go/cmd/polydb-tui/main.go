@@ -12,6 +12,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/polydb/polydb/internal/tui"
+	"github.com/polydb/polydb/internal/tui/dbmode"
 	"github.com/polydb/polydb/pkg/appcore"
 	"github.com/polydb/polydb/pkg/keyring"
 	"github.com/polydb/polydb/pkg/storage"
@@ -55,10 +56,13 @@ func main() {
 		client = transport.NewLocal(app)
 	}
 
-	// P3 将在此注入连接列表 flow（transport.ListConnections → 连接表单 →
-	// SetBackendMsg{Adapter}）；当前合并阶段先以空工作区启动。
-	_ = client
-	p := tea.NewProgram(tui.New(tui.Options{}))
+	// 数据库模式：注册 dbmode 的 overlay 工厂，启动时压栈连接选择器
+	//（saved connections → 连接表单 → SetBackendMsg{Adapter} → schema 浏览）。
+	dbmode.RegisterFactories()
+	app := tui.New(tui.Options{Client: client})
+	app.PushOverlay(dbmode.NewConnectOverlay(app))
+
+	p := tea.NewProgram(app)
 	if _, err := p.Run(); err != nil {
 		slog.Error("tui stopped", "error", err)
 		os.Exit(1)

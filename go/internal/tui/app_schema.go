@@ -6,8 +6,9 @@ package tui
 import (
 	"sync"
 
-	"github.com/polydb/polydb/internal/tuidata"
+	"github.com/polydb/polydb/internal/complete"
 	"github.com/polydb/polydb/internal/tui/backend"
+	"github.com/polydb/polydb/internal/tuidata"
 )
 
 // schemaCache is the lazily-filled snapshot of a live connection's catalog.
@@ -25,7 +26,7 @@ type schemaCache struct {
 	fetched map[string]bool            // column fetch attempted (even if empty)
 
 	// ver bumps whenever anything above changes the answer CompletionSchema
-	// would compute; snap is the last assembled completionSchema, keyed by
+	// would compute; snap is the last assembled complete.Schema, keyed by
 	// (ver, backend, frame under view, engine schema generation). The SQL
 	// editor calls CompletionSchema once per keystroke while nothing changes
 	// between keys, so the Θ(tables + Σ columns) rebuild must be paid once
@@ -37,7 +38,7 @@ type schemaCache struct {
 	// does with Tables) only touches the caller's copy.
 	ver        int
 	builds     int // snapshot builds; tests pin the must-hit property
-	snap       completionSchema
+	snap       complete.Schema
 	snapOK     bool
 	snapVer    int
 	snapBe     backend.Backend
@@ -67,14 +68,6 @@ func (c *schemaCache) resetFor(be backend.Backend) {
 	c.snapOK = false
 }
 
-// completionSchema is the TUI-local completion schema: the engine name, the
-// columns of the frame under view, and per-table column lists.
-type completionSchema struct {
-	Engine  string
-	Current []string
-	Tables  map[string][]string
-}
-
 // CompletionSchema builds the completion schema without ever blocking on
 // the live connection: engine tables come from the engine's Register-time
 // column cache (cheap, safe on the update loop), live tables come from
@@ -85,7 +78,7 @@ type completionSchema struct {
 // is memoized on schemaCache.snap and handed back as-is (shared map,
 // read-only contract); any catalog mutation, connection swap or frame
 // switch misses the memo and rebuilds.
-func (a *App) CompletionSchema() completionSchema {
+func (a *App) CompletionSchema() complete.Schema {
 	f := a.CurrentFrame()
 	be := a.backend
 
@@ -97,7 +90,7 @@ func (a *App) CompletionSchema() completionSchema {
 		return c.snap
 	}
 
-	sc := completionSchema{}
+	sc := complete.Schema{}
 	if f != nil {
 		sc.Current = f.ColumnNames()
 	}

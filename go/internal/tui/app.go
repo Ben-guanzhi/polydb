@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/polydb/polydb/internal/theme"
 	"github.com/polydb/polydb/internal/tui/backend"
 	"github.com/polydb/polydb/internal/tuidata"
+	"github.com/polydb/polydb/pkg/transport"
 )
 
 const toastDuration = 2500 * time.Millisecond
@@ -26,6 +28,7 @@ type Options struct {
 	Frames  []NamedFrame      // initial tabs
 	Backend backend.Backend   // live SQL connection (nil when none open)
 	KV      backend.KVBackend // live redis connection (nil otherwise)
+	Client  transport.Client  // 数据面（铁律 2）；nil 时连接相关功能不可用
 
 	ThemeName      string
 	ShowBorders    bool
@@ -54,6 +57,7 @@ type App struct {
 
 	backend backend.Backend
 	kv      backend.KVBackend
+	cli     transport.Client
 
 	// pendingEdit/pendingDelete hold an in-flight cell edit / row delete that
 	// a confirm popup is about to commit. They are set by the dispatch cases
@@ -72,8 +76,13 @@ type toastExpiredMsg struct{ id int }
 
 // New builds the app from options. Each frame becomes a tab.
 func New(opts Options) *App {
-	th, ok := theme.Builtin(opts.ThemeName)
-	name := opts.ThemeName
+	// 主题名解析优先级：显式传入 > 环境变量 POLYDB_TUI_THEME > 默认。
+	themeName := opts.ThemeName
+	if env := os.Getenv("POLYDB_TUI_THEME"); env != "" {
+		themeName = env
+	}
+	th, ok := theme.Builtin(themeName)
+	name := themeName
 	if !ok {
 		th = theme.Default()
 		name = th.Palette.Name
@@ -85,6 +94,7 @@ func New(opts Options) *App {
 		showRowNumbers: opts.ShowRowNumbers,
 		backend:        opts.Backend,
 		kv:             opts.KV,
+		cli:            opts.Client,
 		schemaC:        &schemaCache{},
 		width:          80,
 		height:         24,
@@ -1391,6 +1401,9 @@ func (a *App) TableNames() []string {
 
 func (a *App) Backend() backend.Backend { return a.backend }
 func (a *App) KV() backend.KVBackend    { return a.kv }
+
+// Client 实现 AppContext：暴露 transport.Client 给连接表单/选择器。
+func (a *App) Client() transport.Client { return a.cli }
 
 func (a *App) Theme() *theme.Theme { return a.th }
 func (a *App) ThemeName() string   { return a.themeName }
