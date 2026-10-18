@@ -1,4 +1,4 @@
-// polydb-tui 是 polydb 的终端客户端（M4，bubbletea）。
+// polydb-tui 是 polydb 的终端客户端（bubbletea v2）。
 // 两种模式（均只经 transport 访问数据，符合 AGENTS.md 铁律 2）：
 //   - 默认（本机）：与 server 共用同一份连接元数据存储（storage.DataDir），进程内直连 app-core；
 //   - 远程（-server http://host:port）：通过 REST 连远程 polydb-server，适合多人共享服务端。
@@ -10,7 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/polydb/polydb/internal/tui"
 	"github.com/polydb/polydb/pkg/appcore"
 	"github.com/polydb/polydb/pkg/keyring"
@@ -23,13 +23,10 @@ var Version = "dev"
 
 func main() {
 	server := flag.String("server", os.Getenv("POLYDB_SERVER"), "远程 polydb-server 地址（如 http://127.0.0.1:8080）；缺省为本机直连模式")
-	token := flag.String("token", os.Getenv("POLYDB_SERVER_TOKEN"), "远程服务端 Bearer token（服务端启用 POLYDB_SERVER_TOKEN 时必填）")
+	token := flag.String("token", os.Getenv("POLYDB_SERVER_TOKEN"), "远程服务端启用 POLYDB_SERVER_TOKEN 时必填")
 	flag.Parse()
 
 	var client transport.Client
-	// 查询历史 JSONL 落在数据目录（两种模式都用本地目录）；
-	// 由组合根注入解析器，internal/tui 不再直接 import pkg/storage。
-	tui.SetDataDirFunc(storage.DataDir)
 	if *server != "" {
 		// 远程模式：无需本地存储/密钥环（连接与密码都归属服务端）。
 		remote := transport.NewRemote(*server)
@@ -58,7 +55,10 @@ func main() {
 		client = transport.NewLocal(app)
 	}
 
-	p := tea.NewProgram(tui.New(client))
+	// P3 将在此注入连接列表 flow（transport.ListConnections → 连接表单 →
+	// SetBackendMsg{Adapter}）；当前合并阶段先以空工作区启动。
+	_ = client
+	p := tea.NewProgram(tui.New(tui.Options{}))
 	if _, err := p.Run(); err != nil {
 		slog.Error("tui stopped", "error", err)
 		os.Exit(1)
