@@ -71,16 +71,47 @@ type App struct {
 	schemaC *schemaCache
 }
 
+// resolveThemeName 决定生效主题名：环境变量 POLYDB_TUI_THEME > 显式传入。
+// 传入空串表示「不指定」，由调用方回落到默认主题。
+//
+// getenv 做成参数是为了可测（测试注入固定值，不依赖真实环境）。
+func resolveThemeName(optsName string, getenv func(string) string) string {
+	if getenv == nil {
+		getenv = os.Getenv
+	}
+	name := optsName
+	if env := strings.TrimSpace(getenv(envThemeName)); env != "" {
+		name = env
+	}
+	return themeAlias(name)
+}
+
+// envThemeName 是覆盖主题的环境变量名。
+const envThemeName = "POLYDB_TUI_THEME"
+
+// themeAliases 把上游（sqltui）的旧主题名映射到 polydb 已注册的同义主题，
+// 这样老脚本/老配置里的 POLYDB_TUI_THEME=dark 不会因为名字不存在而静默回落到
+// 默认主题 —— 那种回落看起来像「主题没生效」的 bug。
+var themeAliases = map[string]string{
+	"dark":  "sorbet",
+	"light": "catppuccin-latte",
+}
+
+// themeAlias 返回主题名的别名映射结果；没有别名则原样返回。
+func themeAlias(name string) string {
+	if a, ok := themeAliases[strings.ToLower(strings.TrimSpace(name))]; ok {
+		return a
+	}
+	return name
+}
+
 // toastExpiredMsg clears a toast after its timer fires.
 type toastExpiredMsg struct{ id int }
 
 // New builds the app from options. Each frame becomes a tab.
 func New(opts Options) *App {
-	// 主题名解析优先级：显式传入 > 环境变量 POLYDB_TUI_THEME > 默认。
-	themeName := opts.ThemeName
-	if env := os.Getenv("POLYDB_TUI_THEME"); env != "" {
-		themeName = env
-	}
+	// 主题名解析优先级：环境变量 POLYDB_TUI_THEME > 显式传入 > 默认。
+	themeName := resolveThemeName(opts.ThemeName, os.Getenv)
 	th, ok := theme.Builtin(themeName)
 	name := themeName
 	if !ok {
