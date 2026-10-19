@@ -136,7 +136,7 @@ func commitCellEdit(ctx AppContext, pe PendingEdit) tea.Cmd {
 		return func() tea.Msg { return ErrorMsg{Err: e} }
 	}
 	return func() tea.Msg {
-		res, err := be.Run(stmt)
+		res, err := runInTx(be, stmt)
 		if err != nil {
 			return cellSavedMsg{err: err}
 		}
@@ -146,6 +146,32 @@ func commitCellEdit(ctx AppContext, pe PendingEdit) tea.Cmd {
 		}
 		return cellSavedMsg{rows: n}
 	}
+}
+
+// runInTx 在事务里跑一条写语句：成功才提交，任一步失败都回滚，保证编辑是
+// 原子的（要么全成、要么全不改），而不是半途生效。
+//
+// 后端不支持事务时退回直接执行（be.Run）—— 不支持不是错误，只是退化成
+// 原来的非原子行为。
+func runInTx(be backend.Backend, stmt string) (backend.Result, error) {
+	tx, ok := be.(backend.TxRunner)
+	if !ok {
+		return be.Run(stmt)
+	}
+	id, err := tx.Begin()
+	if err != nil {
+		return backend.Result{}, err
+	}
+	res, err := tx.ExecuteInTx(id, stmt)
+	if err != nil {
+		_ = tx.Rollback(id)
+		return backend.Result{}, err
+	}
+	if err := tx.Commit(id); err != nil {
+		_ = tx.Rollback(id)
+		return backend.Result{}, err
+	}
+	return res, nil
 }
 
 // commitRowDelete runs the delete described by pd: it issues a PK-keyed
@@ -167,7 +193,7 @@ func commitRowDelete(ctx AppContext, pd PendingDelete) tea.Cmd {
 		return func() tea.Msg { return ErrorMsg{Err: e} }
 	}
 	return func() tea.Msg {
-		res, err := be.Run(stmt)
+		res, err := runInTx(be, stmt)
 		if err != nil {
 			return rowsDeletedMsg{err: err}
 		}

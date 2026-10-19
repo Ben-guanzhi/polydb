@@ -113,6 +113,39 @@ func (a *Adapter) FetchTableWithFilters(namespace, table string, limit int, cond
 	return a.browse(namespace, table, limit, conds)
 }
 
+// Begin 实现 backend.TxRunner。
+func (a *Adapter) Begin() (string, error) {
+	info, err := a.cli.BeginTransaction(context.Background(), a.connID)
+	if err != nil {
+		return "", err
+	}
+	if info == nil {
+		return "", fmt.Errorf("begin: 服务端未返回事务信息")
+	}
+	return info.ID, nil
+}
+
+// ExecuteInTx 实现 backend.TxRunner。
+func (a *Adapter) ExecuteInTx(txID, stmt string) (Result, error) {
+	res, err := a.cli.ExecuteInTx(context.Background(), txID, stmt)
+	if err != nil {
+		return Result{}, err
+	}
+	return resultFromQuery(res), nil
+}
+
+// Commit 实现 backend.TxRunner。
+func (a *Adapter) Commit(txID string) error {
+	_, err := a.cli.CommitTransaction(context.Background(), txID)
+	return err
+}
+
+// Rollback 实现 backend.TxRunner。
+func (a *Adapter) Rollback(txID string) error {
+	_, err := a.cli.RollbackTransaction(context.Background(), txID)
+	return err
+}
+
 // browse 是上面两个方法的共同实现。
 func (a *Adapter) browse(namespace, table string, limit int, conds []protocol.FilterCondition) (*tuidata.Frame, error) {
 	if limit <= 0 {

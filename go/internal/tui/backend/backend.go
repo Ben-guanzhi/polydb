@@ -105,6 +105,21 @@ type Filtered interface {
 	FetchTableWithFilters(namespace, table string, limit int, conds []protocol.FilterCondition) (*tuidata.Frame, error)
 }
 
+// TxRunner is an optional Backend capability: run statements inside an
+// explicit transaction, so a write is atomic (all-or-nothing) instead of a
+// bare statement that partially applies if something fails midway.
+//
+// Optional because not every engine/transport offers transactions (and the
+// Local transport's semantics differ); the UI falls back to a plain Run.
+type TxRunner interface {
+	// Begin opens a transaction and returns its id.
+	Begin() (string, error)
+	// ExecuteInTx runs one statement inside the transaction.
+	ExecuteInTx(txID, stmt string) (Result, error)
+	Commit(txID string) error
+	Rollback(txID string) error
+}
+
 // KVBackend is a live key-value store connection (Redis).
 type KVBackend interface {
 	// Title is a short human label for the connection.
