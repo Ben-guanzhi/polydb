@@ -25,6 +25,7 @@ type infoTestCtx struct {
 func (c infoTestCtx) CurrentFrame() *tuidata.Frame     { return c.frame }
 func (c infoTestCtx) CurrentRow() int               { return 0 }
 func (c infoTestCtx) SheetFieldCursor() int         { return 0 }
+func (c infoTestCtx) SheetFilter() string         { return "" }
 func (c infoTestCtx) CurrentTableNamespace() string { return c.ns }
 func (c infoTestCtx) BaseCrumb() string {
 	if len(c.crumbs) > 0 {

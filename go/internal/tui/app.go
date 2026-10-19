@@ -1359,6 +1359,15 @@ func (a *App) SheetFieldCursor() int {
 	return 0
 }
 
+// SheetFilter 实现 AppContext：当前标签的字段过滤文本（"/" 后输入的内容），
+// 无过滤时为空串。表格取数据此把过滤下推到服务端（见 tablefetch.go）。
+func (a *App) SheetFilter() string {
+	if p := a.pane(); p != nil {
+		return strings.TrimSpace(p.SheetFilter.String())
+	}
+	return ""
+}
+
 // CurrentTableNamespace reports the namespace the active table was loaded
 // from, so the refresh command can re-fetch the same table. It consults the
 // completion cache's table-to-namespace map first, then falls back to the

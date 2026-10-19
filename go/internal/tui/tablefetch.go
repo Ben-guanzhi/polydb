@@ -8,11 +8,13 @@
 package tui
 
 import (
+	"strings"
+
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/polydb/polydb/internal/tuidata"
-	"github.com/polydb/polydb/internal/tui/backend"
 	"github.com/polydb/polydb/internal/theme"
+	"github.com/polydb/polydb/internal/tui/backend"
+	"github.com/polydb/polydb/internal/tuidata"
 )
 
 // TableFetchLimit caps how many rows a table fetch loads, matching the legacy
@@ -46,10 +48,37 @@ func NewTableLoader(ctx AppContext, be backend.Backend, ns, table string, refres
 
 func (o *TableLoader) Init() tea.Cmd {
 	be, ns, table := o.Be, o.NS, o.Table
+	filter := tabFilter(o.Ctx)
 	return func() tea.Msg {
-		f, err := be.FetchTable(ns, table, TableFetchLimit)
+		f, err := fetchTableWithFilter(be, ns, table, filter)
 		return TableLoadedMsg{Table: table, Frame: f, Err: err}
 	}
+}
+
+// tabFilter 取当前标签的过滤文本；ctx 可能为 nil（测试里直接构造 loader）。
+func tabFilter(ctx AppContext) string {
+	if ctx == nil {
+		return ""
+	}
+	return strings.TrimSpace(ctx.SheetFilter())
+}
+
+// fetchTableWithFilter 尽量把过滤下推到服务端：只有「过滤文本能解析成条件」
+// 且「后端支持下推」时才走 FetchTableWithFilters；否则退回整页取回，过滤仍由
+// UI 客户端完成 —— 下推失败绝不能让取数本身报错。
+func fetchTableWithFilter(be backend.Backend, ns, table, filter string) (*tuidata.Frame, error) {
+	if filter == "" {
+		return be.FetchTable(ns, table, TableFetchLimit)
+	}
+	conds, err := ParseFilterConditions(filter)
+	if err != nil || len(conds) == 0 {
+		return be.FetchTable(ns, table, TableFetchLimit)
+	}
+	fb, ok := be.(backend.Filtered)
+	if !ok {
+		return be.FetchTable(ns, table, TableFetchLimit)
+	}
+	return fb.FetchTableWithFilters(ns, table, TableFetchLimit, conds)
 }
 
 func (o *TableLoader) Update(msg tea.Msg) (Overlay, tea.Cmd) {

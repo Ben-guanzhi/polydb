@@ -8,10 +8,10 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/polydb/polydb/internal/tuidata"
-	"github.com/polydb/polydb/internal/tui/backend"
 	"github.com/polydb/polydb/internal/theme"
 	"github.com/polydb/polydb/internal/tui"
+	"github.com/polydb/polydb/internal/tui/backend"
+	"github.com/polydb/polydb/internal/tuidata"
 	"github.com/polydb/polydb/pkg/transport"
 )
 
@@ -23,26 +23,27 @@ type confirmTestCtx struct {
 	be backend.Backend
 }
 
-func (c *confirmTestCtx) CurrentFrame() *tuidata.Frame        { return nil }
-func (c *confirmTestCtx) CurrentRow() int                  { return 0 }
-func (c *confirmTestCtx) SheetFieldCursor() int            { return 0 }
-func (c *confirmTestCtx) CurrentTableNamespace() string    { return "" }
-func (c *confirmTestCtx) BaseCrumb() string                { return "users" }
-func (c *confirmTestCtx) Crumbs() []string                 { return nil }
-func (c *confirmTestCtx) ColumnNames() []string            { return nil }
-func (c *confirmTestCtx) TableNames() []string             { return nil }
-func (c *confirmTestCtx) Backend() backend.Backend              { return c.be }
-func (c *confirmTestCtx) KV() backend.KVBackend                 { return nil }
-func (c *confirmTestCtx) Theme() *theme.Theme              { return nil }
-func (c *confirmTestCtx) ThemeName() string                { return "" }
-func (c *confirmTestCtx) ShowBorders() bool                { return false }
-func (c *confirmTestCtx) ShowRowNumbers() bool             { return false }
+func (c *confirmTestCtx) CurrentFrame() *tuidata.Frame      { return nil }
+func (c *confirmTestCtx) CurrentRow() int                   { return 0 }
+func (c *confirmTestCtx) SheetFieldCursor() int             { return 0 }
+func (c *confirmTestCtx) SheetFilter() string               { return "" }
+func (c *confirmTestCtx) CurrentTableNamespace() string     { return "" }
+func (c *confirmTestCtx) BaseCrumb() string                 { return "users" }
+func (c *confirmTestCtx) Crumbs() []string                  { return nil }
+func (c *confirmTestCtx) ColumnNames() []string             { return nil }
+func (c *confirmTestCtx) TableNames() []string              { return nil }
+func (c *confirmTestCtx) Backend() backend.Backend          { return c.be }
+func (c *confirmTestCtx) KV() backend.KVBackend             { return nil }
+func (c *confirmTestCtx) Theme() *theme.Theme               { return nil }
+func (c *confirmTestCtx) ThemeName() string                 { return "" }
+func (c *confirmTestCtx) ShowBorders() bool                 { return false }
+func (c *confirmTestCtx) ShowRowNumbers() bool              { return false }
 func (c *confirmTestCtx) Tabs() []tui.TabInfo               { return nil }
-func (c *confirmTestCtx) ActiveTab() int                   { return 0 }
-func (c *confirmTestCtx) ActivePaneID() int                { return 0 }
+func (c *confirmTestCtx) ActiveTab() int                    { return 0 }
+func (c *confirmTestCtx) ActivePaneID() int                 { return 0 }
 func (c *confirmTestCtx) PendingEdit() *tui.PendingEdit     { return c.pe }
 func (c *confirmTestCtx) PendingDelete() *tui.PendingDelete { return c.pd }
-func (c *confirmTestCtx) Client() transport.Client        { return nil }
+func (c *confirmTestCtx) Client() transport.Client          { return nil }
 
 // confirmDrain runs a command tree, expanding tea.Batch and tea.Sequence, and
 // collects the leaf messages. Mirrors the reflective unwrap in schema_test.go.
@@ -208,14 +209,18 @@ func TestConfirmSaveViewGuardsSmallSize(t *testing.T) {
 // errConfirmBackend is a stub backend for the delete view test.
 type errConfirmBackend struct{}
 
-func (b *errConfirmBackend) Kind() string                                        { return "test" }
-func (b *errConfirmBackend) Title() string                                       { return "test" }
-func (b *errConfirmBackend) Run(string) (backend.Result, error)                       { return backend.Result{}, errors.New("nope") }
-func (b *errConfirmBackend) Namespaces() ([]string, error)                       { return nil, nil }
-func (b *errConfirmBackend) Tables(string) ([]string, error)                     { return nil, nil }
+func (b *errConfirmBackend) Kind() string  { return "test" }
+func (b *errConfirmBackend) Title() string { return "test" }
+func (b *errConfirmBackend) Run(string) (backend.Result, error) {
+	return backend.Result{}, errors.New("nope")
+}
+func (b *errConfirmBackend) Namespaces() ([]string, error)                          { return nil, nil }
+func (b *errConfirmBackend) Tables(string) ([]string, error)                        { return nil, nil }
 func (b *errConfirmBackend) FetchTable(string, string, int) (*tuidata.Frame, error) { return nil, nil }
-func (b *errConfirmBackend) PrimaryKeys(string, string) ([]string, error)        { return nil, nil }
-func (b *errConfirmBackend) ColumnsMeta(string, string) ([]backend.ColumnMeta, error) { return nil, nil }
+func (b *errConfirmBackend) PrimaryKeys(string, string) ([]string, error)           { return nil, nil }
+func (b *errConfirmBackend) ColumnsMeta(string, string) ([]backend.ColumnMeta, error) {
+	return nil, nil
+}
 func (b *errConfirmBackend) ColumnIndexTypes(string, string) (map[string]string, error) {
 	return nil, nil
 }

@@ -69,6 +69,7 @@ type schemaTestCtx struct {
 func (c schemaTestCtx) CurrentFrame() *tuidata.Frame        { return nil }
 func (c schemaTestCtx) CurrentRow() int                  { return 0 }
 func (c schemaTestCtx) SheetFieldCursor() int            { return 0 }
+func (c schemaTestCtx) SheetFilter() string            { return "" }
 func (c schemaTestCtx) CurrentTableNamespace() string    { return "" }
 func (c schemaTestCtx) BaseCrumb() string                { return "" }
 func (c schemaTestCtx) Crumbs() []string                 { return nil }

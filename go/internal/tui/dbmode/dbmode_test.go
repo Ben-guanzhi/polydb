@@ -5,11 +5,11 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/polydb/polydb/internal/theme"
+	"github.com/polydb/polydb/internal/tui"
 	"github.com/polydb/polydb/internal/tui/backend"
 	"github.com/polydb/polydb/internal/tui/backend/fake"
 	"github.com/polydb/polydb/internal/tuidata"
-	"github.com/polydb/polydb/internal/theme"
-	"github.com/polydb/polydb/internal/tui"
 	"github.com/polydb/polydb/pkg/transport"
 )
 
@@ -74,10 +74,10 @@ type fakeBackend struct {
 	fetchErr   error
 }
 
-func (f *fakeBackend) Kind() string                  { return "fake" }
-func (f *fakeBackend) Title() string                 { return "fake://test" }
+func (f *fakeBackend) Kind() string                       { return "fake" }
+func (f *fakeBackend) Title() string                      { return "fake://test" }
 func (f *fakeBackend) Run(string) (backend.Result, error) { return backend.Result{}, nil }
-func (f *fakeBackend) Namespaces() ([]string, error) { return []string{""}, nil }
+func (f *fakeBackend) Namespaces() ([]string, error)      { return []string{""}, nil }
 func (f *fakeBackend) Tables(string) ([]string, error) {
 	return []string{"users"}, nil
 }
@@ -86,7 +86,7 @@ func (f *fakeBackend) FetchTable(ns, table string, limit int) (*tuidata.Frame, e
 	return f.frame, f.fetchErr
 }
 func (f *fakeBackend) PrimaryKeys(string, string) ([]string, error)               { return nil, nil }
-func (f *fakeBackend) ColumnsMeta(string, string) ([]backend.ColumnMeta, error)        { return nil, nil }
+func (f *fakeBackend) ColumnsMeta(string, string) ([]backend.ColumnMeta, error)   { return nil, nil }
 func (f *fakeBackend) ColumnIndexTypes(string, string) (map[string]string, error) { return nil, nil }
 func (f *fakeBackend) Close() error                                               { return nil }
 
@@ -122,24 +122,25 @@ type fakeCtx struct {
 	cli *fake.Client
 }
 
-func (c *fakeCtx) CurrentFrame() *tuidata.Frame        { return nil }
-func (c *fakeCtx) CurrentRow() int                  { return 0 }
-func (c *fakeCtx) SheetFieldCursor() int            { return 0 }
-func (c *fakeCtx) CurrentTableNamespace() string    { return "" }
-func (c *fakeCtx) BaseCrumb() string                { return "" }
-func (c *fakeCtx) Crumbs() []string                 { return nil }
-func (c *fakeCtx) ColumnNames() []string            { return nil }
-func (c *fakeCtx) Client() transport.Client        { return c.cli }
-func (c *fakeCtx) TableNames() []string             { return nil }
-func (c *fakeCtx) Backend() backend.Backend              { return c.be }
-func (c *fakeCtx) KV() backend.KVBackend                 { return c.kv }
-func (c *fakeCtx) Theme() *theme.Theme              { return testTheme() }
-func (c *fakeCtx) ThemeName() string                { return "test" }
-func (c *fakeCtx) ShowBorders() bool                { return false }
-func (c *fakeCtx) ShowRowNumbers() bool             { return false }
+func (c *fakeCtx) CurrentFrame() *tuidata.Frame      { return nil }
+func (c *fakeCtx) CurrentRow() int                   { return 0 }
+func (c *fakeCtx) SheetFieldCursor() int             { return 0 }
+func (c *fakeCtx) SheetFilter() string               { return "" }
+func (c *fakeCtx) CurrentTableNamespace() string     { return "" }
+func (c *fakeCtx) BaseCrumb() string                 { return "" }
+func (c *fakeCtx) Crumbs() []string                  { return nil }
+func (c *fakeCtx) ColumnNames() []string             { return nil }
+func (c *fakeCtx) Client() transport.Client          { return c.cli }
+func (c *fakeCtx) TableNames() []string              { return nil }
+func (c *fakeCtx) Backend() backend.Backend          { return c.be }
+func (c *fakeCtx) KV() backend.KVBackend             { return c.kv }
+func (c *fakeCtx) Theme() *theme.Theme               { return testTheme() }
+func (c *fakeCtx) ThemeName() string                 { return "test" }
+func (c *fakeCtx) ShowBorders() bool                 { return false }
+func (c *fakeCtx) ShowRowNumbers() bool              { return false }
 func (c *fakeCtx) Tabs() []tui.TabInfo               { return nil }
-func (c *fakeCtx) ActiveTab() int                   { return 0 }
-func (c *fakeCtx) ActivePaneID() int                { return 0 }
+func (c *fakeCtx) ActiveTab() int                    { return 0 }
+func (c *fakeCtx) ActivePaneID() int                 { return 0 }
 func (c *fakeCtx) PendingEdit() *tui.PendingEdit     { return nil }
 func (c *fakeCtx) PendingDelete() *tui.PendingDelete { return nil }
 

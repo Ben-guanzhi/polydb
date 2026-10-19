@@ -29,6 +29,7 @@ type qxCtx struct {
 func (c *qxCtx) CurrentFrame() *tuidata.Frame        { return nil }
 func (c *qxCtx) CurrentRow() int                  { return 0 }
 func (c *qxCtx) SheetFieldCursor() int            { return 0 }
+func (c *qxCtx) SheetFilter() string            { return "" }
 func (c *qxCtx) CurrentTableNamespace() string    { return "" }
 func (c *qxCtx) BaseCrumb() string                { return c.base }
 func (c *qxCtx) Crumbs() []string                 { return nil }

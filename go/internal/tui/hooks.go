@@ -20,6 +20,9 @@ type AppContext interface {
 	CurrentFrame() *tuidata.Frame // top of current pane stack (nil if no tabs)
 	CurrentRow() int              // selected row in current table view
 	SheetFieldCursor() int        // selected field in sheet mode
+	// SheetFilter 是当前标签的字段过滤文本（"/" 后输入的内容），无过滤时为空串。
+	// 供表格取数把过滤下推到服务端，见 tablefetch.go。
+	SheetFilter() string
 	CurrentTableNamespace() string
 	BaseCrumb() string // current tab title
 	Crumbs() []string  // full breadcrumb chain

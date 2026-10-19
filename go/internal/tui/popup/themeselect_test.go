@@ -19,6 +19,7 @@ type themeTestCtx struct{ themeName string }
 func (c themeTestCtx) CurrentFrame() *tuidata.Frame        { return nil }
 func (c themeTestCtx) CurrentRow() int                  { return 0 }
 func (c themeTestCtx) SheetFieldCursor() int            { return 0 }
+func (c themeTestCtx) SheetFilter() string            { return "" }
 func (c themeTestCtx) CurrentTableNamespace() string    { return "" }
 func (c themeTestCtx) BaseCrumb() string                { return "" }
 func (c themeTestCtx) Crumbs() []string                 { return nil }
