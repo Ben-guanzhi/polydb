@@ -7,8 +7,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/polydb/polydb/internal/tuidata"
 	"github.com/polydb/polydb/internal/tui"
+	"github.com/polydb/polydb/internal/tuidata"
 )
 
 // refreshFakeBackend embeds qxFakeBackend and overrides FetchTable to record

@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/polydb/polydb/internal/tui/backend"
 	"github.com/polydb/polydb/internal/tui"
+	"github.com/polydb/polydb/internal/tui/backend"
 )
 
 func TestConfirmDeleteFactoryRegistered(t *testing.T) {

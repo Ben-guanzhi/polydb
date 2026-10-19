@@ -40,6 +40,29 @@ type PendingDelete struct {
 	Namespace string
 }
 
+// editsCommittedMsg 报告整批提交的结果（成功执行了多少条语句）。
+type editsCommittedMsg struct{ stmts int }
+
+// commitPendingEdits 把当前标签队列里的编辑整批提交：一个事务、要么全成要么
+// 全回滚。成功后由调用方刷新整表。
+func commitPendingEdits(ctx AppContext, ns, table string) tea.Cmd {
+	be := ctx.Backend()
+	if be == nil {
+		return func() tea.Msg { return ErrorMsg{Err: fmt.Errorf("no backend, cannot commit edits")} }
+	}
+	q := ctx.EditQueue()
+	if q == nil || q.Size() == 0 {
+		return func() tea.Msg { return ErrorMsg{Err: fmt.Errorf("没有待提交的编辑")} }
+	}
+	return func() tea.Msg {
+		n, err := commitQueue(be, ns, table, "", q)
+		if err != nil {
+			return ErrorMsg{Err: err}
+		}
+		return editsCommittedMsg{stmts: n}
+	}
+}
+
 // cellSavedMsg carries the outcome of an async UPDATE back to the app.
 type cellSavedMsg struct {
 	rows int64
@@ -146,6 +169,67 @@ func commitCellEdit(ctx AppContext, pe PendingEdit) tea.Cmd {
 		}
 		return cellSavedMsg{rows: n}
 	}
+}
+
+// enqueueCellEdit 把一次编辑放进当前标签的待提交队列，而不是立刻执行。
+//
+// 队列模型下本地帧不做乐观改写：待提交的编辑由 Review（队列）呈现，提交成功
+// 后整表刷新，用户看到的就是库里的真实值。这样既不用维护「本地改了但库里没改」
+// 的双重真相，也不会出现刷新把未提交编辑冲掉的问题。
+func enqueueCellEdit(ctx AppContext, pe PendingEdit) (*changes.Queue, error) {
+	be := ctx.Backend()
+	if be == nil {
+		return nil, fmt.Errorf("no backend, cannot edit")
+	}
+	q := ctx.EditQueue()
+	if q == nil {
+		return nil, fmt.Errorf("no active pane, cannot queue edit")
+	}
+	pks, err := be.PrimaryKeys(pe.Namespace, pe.Table)
+	if err != nil {
+		return nil, err
+	}
+	if len(pks) == 0 {
+		return nil, fmt.Errorf("no primary key, cannot edit")
+	}
+	rowID := pkRowID(pe.Frame, pe.Row, pks)
+	if rowID == "" {
+		return nil, fmt.Errorf("cannot identify the edited row (primary key missing/empty)")
+	}
+	q.AddCellChange(rowID, pe.ColName,
+		protocol.NewStringValue(pe.OldValue),
+		protocol.NewStringValue(pe.NewValue),
+		changesRow(pe.Frame, pe.Row))
+	return q, nil
+}
+
+// pkRowID 用主键列的值拼出行标识；复合主键用 US 分隔，避免值本身含逗号时歧义。
+func pkRowID(f *tuidata.Frame, row int, pks []string) string {
+	if f == nil {
+		return ""
+	}
+	parts := make([]string, 0, len(pks))
+	for _, pk := range pks {
+		i := f.ColumnIndex(pk)
+		if i < 0 {
+			return ""
+		}
+		parts = append(parts, f.CellString(row, i))
+	}
+	return strings.Join(parts, "\x1f")
+}
+
+// changesRow 把结果集的一行转成 changes.Row（提交时定位原始行用）。
+func changesRow(f *tuidata.Frame, row int) changes.Row {
+	if f == nil || row < 0 || row >= f.NumRows() {
+		return nil
+	}
+	cols := f.ColumnNames()
+	out := make(changes.Row, 0, len(cols))
+	for i, c := range cols {
+		out = append(out, changes.Cell{Column: c, Value: protocol.NewStringValue(f.CellString(row, i))})
+	}
+	return out
 }
 
 // commitQueue 把队列里累积的编辑整批提交：语句由 pkg/changes 生成（SQL 生成

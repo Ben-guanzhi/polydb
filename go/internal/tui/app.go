@@ -12,6 +12,7 @@ import (
 	"github.com/polydb/polydb/internal/theme"
 	"github.com/polydb/polydb/internal/tui/backend"
 	"github.com/polydb/polydb/internal/tuidata"
+	"github.com/polydb/polydb/pkg/changes"
 	"github.com/polydb/polydb/pkg/transport"
 )
 
@@ -330,6 +331,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case editsCommittedMsg:
+		// 整批提交成功：提示 + 刷新整表，让用户看到库里的真实值。
+		cmds := []tea.Cmd{a.setToast(fmt.Sprintf("已提交 %d 条语句", m.stmts))}
+		if a.backend != nil {
+			cmds = append(cmds, a.runCommand("refreshtable", ""))
+		}
+		return a, tea.Batch(cmds...)
 	case cellSavedMsg:
 		// An async UPDATE finished. On success toast and refresh the table so
 		// the edit is visible; on error surface the error overlay.
@@ -1174,7 +1182,15 @@ func (a *App) runCommand(name, arg string) tea.Cmd {
 		if p := a.pane(); p != nil {
 			p.SheetEditing = false
 		}
-		return commitCellEdit(a, pe)
+		// 编辑先入队（不再立刻执行），由 commitedits 整批在一个事务里提交。
+		q, err := enqueueCellEdit(a, pe)
+		if err != nil {
+			a.overlays = append(a.overlays, errBox{err: err})
+			return nil
+		}
+		return a.setToast(fmt.Sprintf("已加入待提交队列（%d 条）；commitedits 提交", q.Size()))
+	case "commitedits":
+		return commitPendingEdits(a, a.CurrentTableNamespace(), a.BaseCrumb())
 	case "canceledit":
 		a.pendingEdit = nil
 		if p := a.pane(); p != nil {
@@ -1397,6 +1413,15 @@ func (a *App) SheetFilter() string {
 		return strings.TrimSpace(p.SheetFilter.String())
 	}
 	return ""
+}
+
+// EditQueue 实现 AppContext：当前标签的未提交编辑队列（懒创建）。
+func (a *App) EditQueue() *changes.Queue {
+	p := a.pane()
+	if p == nil {
+		return nil
+	}
+	return p.EnsureEditQueue()
 }
 
 // CurrentTableNamespace reports the namespace the active table was loaded

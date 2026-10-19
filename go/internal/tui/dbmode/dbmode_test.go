@@ -1,6 +1,7 @@
 package dbmode
 
 import (
+	"github.com/polydb/polydb/pkg/changes"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -126,6 +127,7 @@ func (c *fakeCtx) CurrentFrame() *tuidata.Frame      { return nil }
 func (c *fakeCtx) CurrentRow() int                   { return 0 }
 func (c *fakeCtx) SheetFieldCursor() int             { return 0 }
 func (c *fakeCtx) SheetFilter() string               { return "" }
+func (c *fakeCtx) EditQueue() *changes.Queue         { return nil }
 func (c *fakeCtx) CurrentTableNamespace() string     { return "" }
 func (c *fakeCtx) BaseCrumb() string                 { return "" }
 func (c *fakeCtx) Crumbs() []string                  { return nil }

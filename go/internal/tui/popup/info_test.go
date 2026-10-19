@@ -2,15 +2,16 @@ package popup
 
 import (
 	"errors"
+	"github.com/polydb/polydb/pkg/changes"
 	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/polydb/polydb/internal/tuidata"
-	"github.com/polydb/polydb/internal/tui/backend"
 	"github.com/polydb/polydb/internal/theme"
 	"github.com/polydb/polydb/internal/tui"
+	"github.com/polydb/polydb/internal/tui/backend"
+	"github.com/polydb/polydb/internal/tuidata"
 	"github.com/polydb/polydb/pkg/transport"
 )
 
@@ -22,10 +23,11 @@ type infoTestCtx struct {
 	backend backend.Backend
 }
 
-func (c infoTestCtx) CurrentFrame() *tuidata.Frame     { return c.frame }
+func (c infoTestCtx) CurrentFrame() *tuidata.Frame  { return c.frame }
 func (c infoTestCtx) CurrentRow() int               { return 0 }
 func (c infoTestCtx) SheetFieldCursor() int         { return 0 }
-func (c infoTestCtx) SheetFilter() string         { return "" }
+func (c infoTestCtx) SheetFilter() string           { return "" }
+func (c infoTestCtx) EditQueue() *changes.Queue     { return nil }
 func (c infoTestCtx) CurrentTableNamespace() string { return c.ns }
 func (c infoTestCtx) BaseCrumb() string {
 	if len(c.crumbs) > 0 {
@@ -33,21 +35,21 @@ func (c infoTestCtx) BaseCrumb() string {
 	}
 	return ""
 }
-func (c infoTestCtx) Crumbs() []string                 { return c.crumbs }
-func (c infoTestCtx) ColumnNames() []string            { return nil }
-func (c infoTestCtx) TableNames() []string             { return nil }
-func (c infoTestCtx) Backend() backend.Backend              { return c.backend }
-func (c infoTestCtx) KV() backend.KVBackend                 { return nil }
-func (c infoTestCtx) Theme() *theme.Theme              { return nil }
-func (c infoTestCtx) ThemeName() string                { return "" }
-func (c infoTestCtx) ShowBorders() bool                { return false }
-func (c infoTestCtx) ShowRowNumbers() bool             { return false }
+func (c infoTestCtx) Crumbs() []string                  { return c.crumbs }
+func (c infoTestCtx) ColumnNames() []string             { return nil }
+func (c infoTestCtx) TableNames() []string              { return nil }
+func (c infoTestCtx) Backend() backend.Backend          { return c.backend }
+func (c infoTestCtx) KV() backend.KVBackend             { return nil }
+func (c infoTestCtx) Theme() *theme.Theme               { return nil }
+func (c infoTestCtx) ThemeName() string                 { return "" }
+func (c infoTestCtx) ShowBorders() bool                 { return false }
+func (c infoTestCtx) ShowRowNumbers() bool              { return false }
 func (c infoTestCtx) Tabs() []tui.TabInfo               { return nil }
-func (c infoTestCtx) ActiveTab() int                   { return 0 }
-func (c infoTestCtx) ActivePaneID() int                { return 0 }
+func (c infoTestCtx) ActiveTab() int                    { return 0 }
+func (c infoTestCtx) ActivePaneID() int                 { return 0 }
 func (c infoTestCtx) PendingEdit() *tui.PendingEdit     { return nil }
 func (c infoTestCtx) PendingDelete() *tui.PendingDelete { return nil }
-func (c infoTestCtx) Client() transport.Client        { return nil }
+func (c infoTestCtx) Client() transport.Client          { return nil }
 
 // infoTestBackend is a stub backend.Backend for info overlay tests; ColumnsMeta
 // returns the provided slice (or err).

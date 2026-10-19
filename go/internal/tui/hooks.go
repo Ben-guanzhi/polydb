@@ -4,6 +4,7 @@ import (
 	"github.com/polydb/polydb/internal/theme"
 	"github.com/polydb/polydb/internal/tui/backend"
 	"github.com/polydb/polydb/internal/tuidata"
+	"github.com/polydb/polydb/pkg/changes"
 	"github.com/polydb/polydb/pkg/transport"
 )
 
@@ -23,6 +24,9 @@ type AppContext interface {
 	// SheetFilter 是当前标签的字段过滤文本（"/" 后输入的内容），无过滤时为空串。
 	// 供表格取数把过滤下推到服务端，见 tablefetch.go。
 	SheetFilter() string
+	// EditQueue 是当前标签累积的未提交编辑（changes 队列）；从不编辑的标签为 nil。
+	// 编辑先入队、Review 后整批提交，见 celledit.go 的 commitQueue。
+	EditQueue() *changes.Queue
 	CurrentTableNamespace() string
 	BaseCrumb() string // current tab title
 	Crumbs() []string  // full breadcrumb chain

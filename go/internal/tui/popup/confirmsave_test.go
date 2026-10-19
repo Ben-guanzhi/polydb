@@ -2,6 +2,7 @@ package popup
 
 import (
 	"errors"
+	"github.com/polydb/polydb/pkg/changes"
 	"reflect"
 	"strings"
 	"testing"
@@ -27,6 +28,7 @@ func (c *confirmTestCtx) CurrentFrame() *tuidata.Frame      { return nil }
 func (c *confirmTestCtx) CurrentRow() int                   { return 0 }
 func (c *confirmTestCtx) SheetFieldCursor() int             { return 0 }
 func (c *confirmTestCtx) SheetFilter() string               { return "" }
+func (c *confirmTestCtx) EditQueue() *changes.Queue         { return nil }
 func (c *confirmTestCtx) CurrentTableNamespace() string     { return "" }
 func (c *confirmTestCtx) BaseCrumb() string                 { return "users" }
 func (c *confirmTestCtx) Crumbs() []string                  { return nil }

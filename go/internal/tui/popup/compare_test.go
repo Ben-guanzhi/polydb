@@ -2,6 +2,7 @@ package popup
 
 import (
 	"context"
+	"github.com/polydb/polydb/pkg/changes"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -26,7 +27,8 @@ type cmpTestCtx struct{ client transport.Client }
 func (c *cmpTestCtx) CurrentFrame() *tuidata.Frame      { return nil }
 func (c *cmpTestCtx) CurrentRow() int                   { return 0 }
 func (c *cmpTestCtx) SheetFieldCursor() int             { return 0 }
-func (c *cmpTestCtx) SheetFilter() string             { return "" }
+func (c *cmpTestCtx) SheetFilter() string               { return "" }
+func (c *cmpTestCtx) EditQueue() *changes.Queue         { return nil }
 func (c *cmpTestCtx) CurrentTableNamespace() string     { return "" }
 func (c *cmpTestCtx) BaseCrumb() string                 { return "" }
 func (c *cmpTestCtx) Crumbs() []string                  { return nil }

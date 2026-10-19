@@ -2,6 +2,7 @@ package popup
 
 import (
 	"errors"
+	"github.com/polydb/polydb/pkg/changes"
 	"reflect"
 	"strings"
 	"testing"
@@ -9,10 +10,10 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/polydb/polydb/internal/tuidata"
-	"github.com/polydb/polydb/internal/tui/backend"
 	"github.com/polydb/polydb/internal/theme"
 	"github.com/polydb/polydb/internal/tui"
+	"github.com/polydb/polydb/internal/tui/backend"
+	"github.com/polydb/polydb/internal/tuidata"
 	"github.com/polydb/polydb/pkg/transport"
 )
 
@@ -43,8 +44,10 @@ func (b *schemaTestBackend) Tables(ns string) ([]string, error) {
 func (b *schemaTestBackend) FetchTable(string, string, int) (*tuidata.Frame, error) {
 	return nil, errors.New("not implemented")
 }
-func (b *schemaTestBackend) PrimaryKeys(string, string) ([]string, error)        { return nil, nil }
-func (b *schemaTestBackend) ColumnsMeta(string, string) ([]backend.ColumnMeta, error) { return nil, nil }
+func (b *schemaTestBackend) PrimaryKeys(string, string) ([]string, error) { return nil, nil }
+func (b *schemaTestBackend) ColumnsMeta(string, string) ([]backend.ColumnMeta, error) {
+	return nil, nil
+}
 func (b *schemaTestBackend) ColumnIndexTypes(string, string) (map[string]string, error) {
 	return nil, nil
 }
@@ -66,27 +69,28 @@ type schemaTestCtx struct {
 	backend backend.Backend
 }
 
-func (c schemaTestCtx) CurrentFrame() *tuidata.Frame        { return nil }
-func (c schemaTestCtx) CurrentRow() int                  { return 0 }
-func (c schemaTestCtx) SheetFieldCursor() int            { return 0 }
-func (c schemaTestCtx) SheetFilter() string            { return "" }
-func (c schemaTestCtx) CurrentTableNamespace() string    { return "" }
-func (c schemaTestCtx) BaseCrumb() string                { return "" }
-func (c schemaTestCtx) Crumbs() []string                 { return nil }
-func (c schemaTestCtx) ColumnNames() []string            { return nil }
-func (c schemaTestCtx) TableNames() []string             { return nil }
-func (c schemaTestCtx) Backend() backend.Backend              { return c.backend }
-func (c schemaTestCtx) KV() backend.KVBackend                 { return nil }
-func (c schemaTestCtx) Theme() *theme.Theme              { return nil }
-func (c schemaTestCtx) ThemeName() string                { return "" }
-func (c schemaTestCtx) ShowBorders() bool                { return false }
-func (c schemaTestCtx) ShowRowNumbers() bool             { return false }
+func (c schemaTestCtx) CurrentFrame() *tuidata.Frame      { return nil }
+func (c schemaTestCtx) CurrentRow() int                   { return 0 }
+func (c schemaTestCtx) SheetFieldCursor() int             { return 0 }
+func (c schemaTestCtx) SheetFilter() string               { return "" }
+func (c schemaTestCtx) EditQueue() *changes.Queue         { return nil }
+func (c schemaTestCtx) CurrentTableNamespace() string     { return "" }
+func (c schemaTestCtx) BaseCrumb() string                 { return "" }
+func (c schemaTestCtx) Crumbs() []string                  { return nil }
+func (c schemaTestCtx) ColumnNames() []string             { return nil }
+func (c schemaTestCtx) TableNames() []string              { return nil }
+func (c schemaTestCtx) Backend() backend.Backend          { return c.backend }
+func (c schemaTestCtx) KV() backend.KVBackend             { return nil }
+func (c schemaTestCtx) Theme() *theme.Theme               { return nil }
+func (c schemaTestCtx) ThemeName() string                 { return "" }
+func (c schemaTestCtx) ShowBorders() bool                 { return false }
+func (c schemaTestCtx) ShowRowNumbers() bool              { return false }
 func (c schemaTestCtx) Tabs() []tui.TabInfo               { return c.tabs }
-func (c schemaTestCtx) ActiveTab() int                   { return c.active }
-func (c schemaTestCtx) ActivePaneID() int                { return 0 }
+func (c schemaTestCtx) ActiveTab() int                    { return c.active }
+func (c schemaTestCtx) ActivePaneID() int                 { return 0 }
 func (c schemaTestCtx) PendingEdit() *tui.PendingEdit     { return nil }
 func (c schemaTestCtx) PendingDelete() *tui.PendingDelete { return nil }
-func (c schemaTestCtx) Client() transport.Client        { return nil }
+func (c schemaTestCtx) Client() transport.Client          { return nil }
 
 // schemaTestMsgs runs a cmd (possibly a batch) and collects all messages.
 func schemaTestMsgs(t *testing.T, cmd tea.Cmd) []tea.Msg {

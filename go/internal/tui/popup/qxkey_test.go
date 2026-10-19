@@ -2,11 +2,10 @@ package popup
 
 import (
 	tea "charm.land/bubbletea/v2"
-
 )
 
 // qxKey builds a KeyPressMsg from a key name or a single printable string
-//（移植自 sqltui popup/queryexec_test.go）。
+// （移植自 sqltui popup/queryexec_test.go）。
 func qxKey(s string) tea.KeyPressMsg {
 	switch s {
 	case "enter":
@@ -34,5 +33,3 @@ func qxKey(s string) tea.KeyPressMsg {
 	}
 	return tea.KeyPressMsg{Code: rune(s[0]), Text: s}
 }
-
-

@@ -3,17 +3,18 @@ package popup
 import (
 	"errors"
 	"fmt"
+	"github.com/polydb/polydb/pkg/changes"
 	"reflect"
 	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/polydb/polydb/internal/tuidata"
-	"github.com/polydb/polydb/internal/tui/backend"
 	"github.com/polydb/polydb/internal/complete"
 	"github.com/polydb/polydb/internal/theme"
 	"github.com/polydb/polydb/internal/tui"
+	"github.com/polydb/polydb/internal/tui/backend"
+	"github.com/polydb/polydb/internal/tuidata"
 	"github.com/polydb/polydb/pkg/transport"
 )
 
@@ -26,25 +27,26 @@ type qxCtx struct {
 	base    string
 }
 
-func (c *qxCtx) CurrentFrame() *tuidata.Frame        { return nil }
-func (c *qxCtx) CurrentRow() int                  { return 0 }
-func (c *qxCtx) SheetFieldCursor() int            { return 0 }
-func (c *qxCtx) SheetFilter() string            { return "" }
-func (c *qxCtx) CurrentTableNamespace() string    { return "" }
-func (c *qxCtx) BaseCrumb() string                { return c.base }
-func (c *qxCtx) Crumbs() []string                 { return nil }
-func (c *qxCtx) ColumnNames() []string            { return c.cols }
-func (c *qxCtx) TableNames() []string             { return c.tables }
-func (c *qxCtx) Backend() backend.Backend              { return c.backend }
-func (c *qxCtx) KV() backend.KVBackend                 { return nil }
-func (c *qxCtx) Client() transport.Client        { return nil }
-func (c *qxCtx) Theme() *theme.Theme              { return nil }
-func (c *qxCtx) ThemeName() string                { return "" }
-func (c *qxCtx) ShowBorders() bool                { return false }
-func (c *qxCtx) ShowRowNumbers() bool             { return false }
+func (c *qxCtx) CurrentFrame() *tuidata.Frame      { return nil }
+func (c *qxCtx) CurrentRow() int                   { return 0 }
+func (c *qxCtx) SheetFieldCursor() int             { return 0 }
+func (c *qxCtx) SheetFilter() string               { return "" }
+func (c *qxCtx) EditQueue() *changes.Queue         { return nil }
+func (c *qxCtx) CurrentTableNamespace() string     { return "" }
+func (c *qxCtx) BaseCrumb() string                 { return c.base }
+func (c *qxCtx) Crumbs() []string                  { return nil }
+func (c *qxCtx) ColumnNames() []string             { return c.cols }
+func (c *qxCtx) TableNames() []string              { return c.tables }
+func (c *qxCtx) Backend() backend.Backend          { return c.backend }
+func (c *qxCtx) KV() backend.KVBackend             { return nil }
+func (c *qxCtx) Client() transport.Client          { return nil }
+func (c *qxCtx) Theme() *theme.Theme               { return nil }
+func (c *qxCtx) ThemeName() string                 { return "" }
+func (c *qxCtx) ShowBorders() bool                 { return false }
+func (c *qxCtx) ShowRowNumbers() bool              { return false }
 func (c *qxCtx) Tabs() []tui.TabInfo               { return nil }
-func (c *qxCtx) ActiveTab() int                   { return 0 }
-func (c *qxCtx) ActivePaneID() int                { return 0 }
+func (c *qxCtx) ActiveTab() int                    { return 0 }
+func (c *qxCtx) ActivePaneID() int                 { return 0 }
 func (c *qxCtx) PendingEdit() *tui.PendingEdit     { return nil }
 func (c *qxCtx) PendingDelete() *tui.PendingDelete { return nil }
 
@@ -66,7 +68,7 @@ func (b *qxFakeBackend) FetchTable(string, string, int) (*tuidata.Frame, error) 
 	return nil, nil
 }
 func (b *qxFakeBackend) PrimaryKeys(string, string) ([]string, error)               { return nil, nil }
-func (b *qxFakeBackend) ColumnsMeta(string, string) ([]backend.ColumnMeta, error)        { return nil, nil }
+func (b *qxFakeBackend) ColumnsMeta(string, string) ([]backend.ColumnMeta, error)   { return nil, nil }
 func (b *qxFakeBackend) ColumnIndexTypes(string, string) (map[string]string, error) { return nil, nil }
 func (b *qxFakeBackend) Close() error                                               { return nil }
 

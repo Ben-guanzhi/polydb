@@ -1,42 +1,44 @@
 package popup
 
 import (
+	"github.com/polydb/polydb/pkg/changes"
 	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/polydb/polydb/internal/tuidata"
-	"github.com/polydb/polydb/internal/tui/backend"
 	"github.com/polydb/polydb/internal/theme"
 	"github.com/polydb/polydb/internal/tui"
+	"github.com/polydb/polydb/internal/tui/backend"
+	"github.com/polydb/polydb/internal/tuidata"
 	"github.com/polydb/polydb/pkg/transport"
 )
 
 // themeTestCtx is a minimal AppContext for exercising the factory.
 type themeTestCtx struct{ themeName string }
 
-func (c themeTestCtx) CurrentFrame() *tuidata.Frame        { return nil }
-func (c themeTestCtx) CurrentRow() int                  { return 0 }
-func (c themeTestCtx) SheetFieldCursor() int            { return 0 }
-func (c themeTestCtx) SheetFilter() string            { return "" }
-func (c themeTestCtx) CurrentTableNamespace() string    { return "" }
-func (c themeTestCtx) BaseCrumb() string                { return "" }
-func (c themeTestCtx) Crumbs() []string                 { return nil }
-func (c themeTestCtx) ColumnNames() []string            { return nil }
-func (c themeTestCtx) TableNames() []string             { return nil }
-func (c themeTestCtx) Backend() backend.Backend              { return nil }
-func (c themeTestCtx) KV() backend.KVBackend                 { return nil }
-func (c themeTestCtx) Theme() *theme.Theme              { return theme.Default() }
-func (c themeTestCtx) ThemeName() string                { return c.themeName }
-func (c themeTestCtx) ShowBorders() bool                { return false }
-func (c themeTestCtx) ShowRowNumbers() bool             { return false }
+func (c themeTestCtx) CurrentFrame() *tuidata.Frame      { return nil }
+func (c themeTestCtx) CurrentRow() int                   { return 0 }
+func (c themeTestCtx) SheetFieldCursor() int             { return 0 }
+func (c themeTestCtx) SheetFilter() string               { return "" }
+func (c themeTestCtx) EditQueue() *changes.Queue         { return nil }
+func (c themeTestCtx) CurrentTableNamespace() string     { return "" }
+func (c themeTestCtx) BaseCrumb() string                 { return "" }
+func (c themeTestCtx) Crumbs() []string                  { return nil }
+func (c themeTestCtx) ColumnNames() []string             { return nil }
+func (c themeTestCtx) TableNames() []string              { return nil }
+func (c themeTestCtx) Backend() backend.Backend          { return nil }
+func (c themeTestCtx) KV() backend.KVBackend             { return nil }
+func (c themeTestCtx) Theme() *theme.Theme               { return theme.Default() }
+func (c themeTestCtx) ThemeName() string                 { return c.themeName }
+func (c themeTestCtx) ShowBorders() bool                 { return false }
+func (c themeTestCtx) ShowRowNumbers() bool              { return false }
 func (c themeTestCtx) Tabs() []tui.TabInfo               { return nil }
-func (c themeTestCtx) ActiveTab() int                   { return 0 }
-func (c themeTestCtx) ActivePaneID() int                { return 0 }
+func (c themeTestCtx) ActiveTab() int                    { return 0 }
+func (c themeTestCtx) ActivePaneID() int                 { return 0 }
 func (c themeTestCtx) PendingEdit() *tui.PendingEdit     { return nil }
 func (c themeTestCtx) PendingDelete() *tui.PendingDelete { return nil }
-func (c themeTestCtx) Client() transport.Client        { return nil }
+func (c themeTestCtx) Client() transport.Client          { return nil }
 
 // themeCollectMsgs runs a command (flattening batches) and returns every
 // message it produces.
