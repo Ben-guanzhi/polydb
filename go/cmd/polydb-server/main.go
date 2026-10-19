@@ -48,6 +48,7 @@ func main() {
 
 	app := appcore.New(db, kr)
 	app.SetKnownHostsPath(filepath.Join(dataDir, "known_hosts")) // SSH 主机密钥 TOFU 校验（docs/ssh-tunnel.md）
+	defer app.Close()                                            // 退出时停止事务清扫 goroutine
 	addr := envOr("POLYDB_ADDR", "127.0.0.1:8080")
 	token := os.Getenv("POLYDB_SERVER_TOKEN")
 

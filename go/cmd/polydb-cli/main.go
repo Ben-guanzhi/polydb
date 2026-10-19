@@ -66,10 +66,11 @@ func run(args []string, in io.Reader, out io.Writer) error {
 	}
 
 	ctx := context.Background()
-	conn, err := dbsqlite.Open(ctx, *dbPath)
+	raw, err := dbsqlite.Open(ctx, *dbPath)
 	if err != nil {
 		return fmt.Errorf("open %q: %w", *dbPath, err)
 	}
+	conn := dbsqlite.NewProtocolDriver(raw)
 
 	res, err := conn.Execute(ctx, sql)
 	closeErr := conn.Close()

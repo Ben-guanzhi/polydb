@@ -236,3 +236,69 @@ func TestExecuteInTxNeverConcurrentOnSameHandle(t *testing.T) {
 		t.Fatalf("提交的行数 = %d，want %d（被借出挡掉的那几条不应落库）", count, okCount.Load())
 	}
 }
+
+// TestSweepReclaimsIdleTransaction 钉住 P0-2 残留修复：begin 后未 finalize 的事务必须有
+// 主动回收，否则 a.txs 与底层 *sql.Tx（占用连接池一条连接）会随进程常驻无限增长。
+// 直接调用 sweepIdleTx（绕过 5 分钟定时），把空闲阈值调成负值以保证命中，
+// 断言条目被移出注册表、其 *sql.Tx 被回滚（连接归还池），且后续操作返回 NOT_FOUND。
+func TestSweepReclaimsIdleTransaction(t *testing.T) {
+	origTTL, origCap := txIdleTTL, txMaxEntries
+	defer func() { txIdleTTL, txMaxEntries = origTTL, origCap }()
+	txIdleTTL = -time.Second // 任何已开始的 tx 都算"空闲超时"
+	txMaxEntries = 1024
+
+	a, id := newSQLiteApp(t)
+	ctx := context.Background()
+	info, err := a.BeginTransaction(ctx, &protocol.BeginTransactionRequest{ConnectionID: id})
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	// begin 后事务应当可见
+	if _, err := a.GetTransactionInfo(info.ID); err != nil {
+		t.Fatalf("begin 后事务应当可见: %v", err)
+	}
+
+	a.sweepIdleTx()
+
+	// 1) 注册表已摘除
+	if _, err := a.GetTransactionInfo(info.ID); codeOf(err) != protocol.ErrTransactionNotFound {
+		t.Fatalf("sweep 后事务仍可见（err=%v），空闲回收未生效", err)
+	}
+	// 2) 后续操作必须拿到 NOT_FOUND（证明 entry 已不存在，*sql.Tx 已被回滚释放）
+	if _, err := a.ExecuteInTx(ctx, info.ID, "SELECT 1"); codeOf(err) != protocol.ErrTransactionNotFound {
+		t.Fatalf("sweep 后 ExecuteInTx 错误码=%q，want %s", codeOf(err), protocol.ErrTransactionNotFound)
+	}
+}
+
+// TestSweepEnforcesMaxEntries 钉住容量上限：总数超过 txMaxEntries 时，按 lastActive 升序
+// 回收最旧的若干，防止突发 begin 把 a.txs 推到无界。
+//
+// 注：不在同一 :memory: 连接上开两条真实 *sql.Tx（SQLite 单连接池会 deadlock），
+// 而是直接往注册表注入两条 active 条目（tx 为 nil，回收时跳过 Rollback），专测容量分支。
+func TestSweepEnforcesMaxEntries(t *testing.T) {
+	origTTL, origCap := txIdleTTL, txMaxEntries
+	defer func() { txIdleTTL, txMaxEntries = origTTL, origCap }()
+	txIdleTTL = 30 * time.Minute // 这一轮不让空闲命中，专测容量上限
+	txMaxEntries = 1
+
+	a, id := newSQLiteApp(t)
+	a.mu.Lock()
+	a.txs["txn-cap-a"] = &txEntry{id: "txn-cap-a", connID: id, status: protocol.TxnActive, startedAt: time.Now(), lastActive: time.Now().Add(-time.Hour)}
+	a.txs["txn-cap-b"] = &txEntry{id: "txn-cap-b", connID: id, status: protocol.TxnActive, startedAt: time.Now(), lastActive: time.Now()}
+	a.mu.Unlock()
+
+	a.sweepIdleTx()
+
+	// 总数 2 > 上限 1，按 lastActive 升序回收最旧的一条；剩一条仍存活。
+	gone, alive := 0, 0
+	for _, tid := range []string{"txn-cap-a", "txn-cap-b"} {
+		if _, err := a.GetTransactionInfo(tid); codeOf(err) == protocol.ErrTransactionNotFound {
+			gone++
+		} else {
+			alive++
+		}
+	}
+	if gone != 1 || alive != 1 {
+		t.Fatalf("容量回收后 gone=%d alive=%d，want gone=1 alive=1", gone, alive)
+	}
+}

@@ -9,7 +9,7 @@ import (
 
 func boolPtr(b bool) *bool { return &b }
 
-func fixture(t *testing.T) *Conn {
+func fixture(t *testing.T) *ProtocolDriver {
 	t.Helper()
 	ctx := context.Background()
 	c, err := Open(ctx, ":memory:")
@@ -17,18 +17,19 @@ func fixture(t *testing.T) *Conn {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { _ = c.Close() })
+	pd := NewProtocolDriver(c)
 	for _, q := range []string{
 		`CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)`,
 		`INSERT INTO t (name) VALUES ('Alice'), ('alice'), ('Bob')`,
 	} {
-		if _, err := c.Execute(ctx, q); err != nil {
+		if _, err := pd.Execute(ctx, q); err != nil {
 			t.Fatalf("exec %q: %v", q, err)
 		}
 	}
-	return c
+	return pd
 }
 
-func scalar(t *testing.T, c *Conn, sql string, args ...protocol.Value) protocol.Value {
+func scalar(t *testing.T, c *ProtocolDriver, sql string, args ...protocol.Value) protocol.Value {
 	t.Helper()
 	res, err := c.Execute(context.Background(), sql, args...)
 	if err != nil {

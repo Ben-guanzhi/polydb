@@ -27,23 +27,24 @@ var baseDDL = []string{
 	"CREATE TABLE pairs (a INTEGER NOT NULL, b INTEGER NOT NULL, PRIMARY KEY (a, b))",
 }
 
-func connWith(t *testing.T, stmts []string) *Conn {
+func connWith(t *testing.T, stmts []string) *ProtocolDriver {
 	t.Helper()
 	c, err := Open(context.Background(), ":memory:")
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
 	t.Cleanup(func() { _ = c.Close() })
+	pd := NewProtocolDriver(c)
 	for _, q := range stmts {
-		if _, err := c.Execute(context.Background(), q); err != nil {
+		if _, err := pd.Execute(context.Background(), q); err != nil {
 			t.Fatalf("exec %s: %v", q, err)
 		}
 	}
-	return c
+	return pd
 }
 
 // snapshot 用驱动的四个元数据方法组装——E2 服务端要做的正是这段编排。
-func snapshot(t *testing.T, c *Conn, schema string) *schemadiff.Snapshot {
+func snapshot(t *testing.T, c *ProtocolDriver, schema string) *schemadiff.Snapshot {
 	t.Helper()
 	ctx := context.Background()
 	tables, err := c.ListTables(ctx, schema)

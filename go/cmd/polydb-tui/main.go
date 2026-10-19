@@ -53,6 +53,7 @@ func main() {
 		}
 		app := appcore.New(db, kr)
 		app.SetKnownHostsPath(filepath.Join(dataDir, "known_hosts"))
+		defer app.Close() // 退出时停止事务清扫 goroutine
 		client = transport.NewLocal(app)
 	}
 

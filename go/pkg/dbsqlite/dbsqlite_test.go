@@ -16,6 +16,7 @@ func TestListForeignKeysAndIndexesPragmaWidth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
+	pd := NewProtocolDriver(c)
 	defer func() { _ = c.Close() }()
 	for _, q := range []string{
 		`CREATE TABLE dept(id INTEGER PRIMARY KEY, name TEXT NOT NULL)`,
@@ -23,12 +24,12 @@ func TestListForeignKeysAndIndexesPragmaWidth(t *testing.T) {
 		`CREATE INDEX idx_emp_dept ON emp(dept_id)`,
 		`CREATE UNIQUE INDEX idx_emp_name ON emp(name)`,
 	} {
-		if _, err := c.Execute(ctx, q); err != nil {
+		if _, err := pd.Execute(ctx, q); err != nil {
 			t.Fatalf("exec %q: %v", q, err)
 		}
 	}
 
-	fks, err := c.ListForeignKeys(ctx, "main", "emp")
+	fks, err := pd.ListForeignKeys(ctx, "main", "emp")
 	if err != nil {
 		t.Fatalf("list_foreign_keys: %v", err)
 	}
@@ -39,7 +40,7 @@ func TestListForeignKeysAndIndexesPragmaWidth(t *testing.T) {
 		t.Fatalf("fk mismatch: %+v", fks[0])
 	}
 
-	idx, err := c.ListIndexes(ctx, "main", "emp")
+	idx, err := pd.ListIndexes(ctx, "main", "emp")
 	if err != nil {
 		t.Fatalf("list_indexes: %v", err)
 	}
@@ -64,15 +65,16 @@ func TestExplainAndPragmaReturnRowsets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
+	pd := NewProtocolDriver(c)
 	defer func() { _ = c.Close() }()
-	if _, err := c.Execute(ctx, `CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT)`); err != nil {
+	if _, err := pd.Execute(ctx, `CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT)`); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := c.Execute(ctx, `CREATE INDEX idx_t ON t(name)`); err != nil {
+	if _, err := pd.Execute(ctx, `CREATE INDEX idx_t ON t(name)`); err != nil {
 		t.Fatalf("index: %v", err)
 	}
 
-	eq, err := c.Execute(ctx, `EXPLAIN QUERY PLAN SELECT id FROM t WHERE name='x'`)
+	eq, err := pd.Execute(ctx, `EXPLAIN QUERY PLAN SELECT id FROM t WHERE name='x'`)
 	if err != nil {
 		t.Fatalf("explain: %v", err)
 	}
@@ -80,7 +82,7 @@ func TestExplainAndPragmaReturnRowsets(t *testing.T) {
 		t.Fatalf("EXPLAIN 应带回行集: cols=%d rows=%d", len(eq.Columns), len(eq.Rows))
 	}
 
-	pg, err := c.Execute(ctx, `PRAGMA table_info(t)`)
+	pg, err := pd.Execute(ctx, `PRAGMA table_info(t)`)
 	if err != nil {
 		t.Fatalf("pragma: %v", err)
 	}
@@ -89,7 +91,7 @@ func TestExplainAndPragmaReturnRowsets(t *testing.T) {
 	}
 
 	// DDL / DML 仍走 Exec，affected_rows 语义不变。
-	if r, err := c.Execute(ctx, `INSERT INTO t(name) VALUES('a')`); err != nil || r.AffectedRows != 1 {
+	if r, err := pd.Execute(ctx, `INSERT INTO t(name) VALUES('a')`); err != nil || r.AffectedRows != 1 {
 		t.Fatalf("INSERT: err=%v affected=%d", err, r.AffectedRows)
 	}
 }

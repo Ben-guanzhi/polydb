@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	charm.land/bubbletea/v2 v2.0.8
 	charm.land/lipgloss/v2 v2.0.5
+	github.com/dbcore/dbcore v0.1.0
 	github.com/go-sql-driver/mysql v1.10.1
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
@@ -56,3 +57,10 @@ require (
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 )
+
+// Local dev wiring for the shared dbcore module (DB-CORE-CONTRACT.md consolidation).
+// dbcore is currently unpublished at its placeholder path github.com/dbcore/dbcore,
+// so a relative replace points at the workspace sibling. BEFORE any release / clone
+// from nothing, publish dbcore (real path + tag) and replace this with a versioned
+// `require github.com/dbcore/dbcore vX.Y.Z` (see fynequery's tableprosql pattern).
+replace github.com/dbcore/dbcore => ../../dbcore

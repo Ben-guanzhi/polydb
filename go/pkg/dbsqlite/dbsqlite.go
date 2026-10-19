@@ -9,7 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/polydb/polydb/pkg/dbcore"
+	dbc "github.com/dbcore/dbcore"
+	pdb "github.com/polydb/polydb/pkg/dbcore"
+	"github.com/polydb/polydb/pkg/dbcore/bridge"
 	"github.com/polydb/polydb/pkg/protocol"
 )
 
@@ -39,36 +41,196 @@ func Open(ctx context.Context, path string) (*Conn, error) {
 	return &Conn{db: db, path: path}, nil
 }
 
-func (c *Conn) Kind() protocol.DatabaseKind     { return protocol.DatabaseKindSQLite }
-func (c *Conn) AsSQL() (dbcore.SQLDriver, bool) { return c, true }
-func (c *Conn) AsKV() (dbcore.KVDriver, bool)   { return nil, false }
+// ─── dbcore-native implementation (shared github.com/dbcore/dbcore contract) ───
+// Conn implements dbc.SQLTxDriver directly; the protocol-native surface is served by
+// ProtocolDriver (see dbsqlite_protocol.go) for polydb's legacy consumers.
 
-func (c *Conn) Ping(ctx context.Context) error {
-	return c.db.PingContext(ctx)
+func (c *Conn) Kind() dbc.DatabaseKind         { return dbc.KindSQLite }
+func (c *Conn) Ping(ctx context.Context) error { return c.db.PingContext(ctx) }
+func (c *Conn) Close() error                   { return c.db.Close() }
+func (c *Conn) AsSQL() (dbc.SQLDriver, bool)   { return c, true }
+func (c *Conn) AsKV() (dbc.KVDriver, bool)     { return nil, false }
+
+func (c *Conn) Execute(ctx context.Context, sql string, args ...dbc.Value) (*dbc.QueryResult, error) {
+	in := make([]protocol.Value, len(args))
+	for i, v := range args {
+		in[i] = bridge.ValueFromDB(v)
+	}
+	res, err := c.execP(ctx, sql, in...)
+	if err != nil {
+		return nil, err
+	}
+	return bridge.QueryResultToDB(res), nil
 }
 
-func (c *Conn) Close() error {
-	return c.db.Close()
+// ExecuteIn 在给定执行器上跑一条 SQL（*sql.DB 或 *sql.Tx）。
+func (c *Conn) ExecuteIn(exec dbc.SQLTx, ctx context.Context, sql string, args ...dbc.Value) (*dbc.QueryResult, error) {
+	in := make([]protocol.Value, len(args))
+	for i, v := range args {
+		in[i] = bridge.ValueFromDB(v)
+	}
+	res, err := c.execInP(&sqlTxShim{exec}, ctx, sql, in...)
+	if err != nil {
+		return nil, err
+	}
+	return bridge.QueryResultToDB(res), nil
 }
 
-func (c *Conn) Execute(ctx context.Context, sql string, args ...protocol.Value) (*protocol.QueryResult, error) {
+func (c *Conn) Begin(ctx context.Context, mode dbc.TxMode) (*sql.Tx, error) {
+	return c.beginP(ctx, pdb.TxMode{IsolationLevel: mode.IsolationLevel})
+}
+
+func (c *Conn) ListSchemas(ctx context.Context) ([]dbc.SchemaInfo, error) {
+	infos, err := c.listSchemasP(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]dbc.SchemaInfo, len(infos))
+	for i, s := range infos {
+		out[i] = dbc.SchemaInfo{Name: s.Name}
+	}
+	return out, nil
+}
+
+func (c *Conn) ListTables(ctx context.Context, schema string) ([]dbc.TableInfo, error) {
+	infos, err := c.listTablesP(ctx, schema)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]dbc.TableInfo, len(infos))
+	for i, t := range infos {
+		typ := "table"
+		if t.Type == protocol.TableTypeView {
+			typ = "view"
+		}
+		out[i] = dbc.TableInfo{Schema: t.Schema, Name: t.Name, Type: typ}
+	}
+	return out, nil
+}
+
+func (c *Conn) ListColumns(ctx context.Context, schema, table string) ([]dbc.ColumnInfo, error) {
+	infos, err := c.listColumnsP(ctx, schema, table)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]dbc.ColumnInfo, len(infos))
+	for i, col := range infos {
+		var def *string
+		if col.DefaultValue != nil {
+			s := *col.DefaultValue
+			def = &s
+		}
+		out[i] = dbc.ColumnInfo{Name: col.Name, Type: col.DataType, Nullable: col.Nullable, Default: def}
+	}
+	return out, nil
+}
+
+func (c *Conn) ListIndexes(ctx context.Context, schema, table string) ([]dbc.IndexInfo, error) {
+	infos, err := c.listIndexesP(ctx, schema, table)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]dbc.IndexInfo, len(infos))
+	for i, idx := range infos {
+		cols := make([]string, len(idx.Columns))
+		for j, col := range idx.Columns {
+			cols[j] = col.Name
+		}
+		out[i] = dbc.IndexInfo{Name: idx.Name, Unique: idx.Unique, Columns: cols}
+	}
+	return out, nil
+}
+
+func (c *Conn) ListForeignKeys(ctx context.Context, schema, table string) ([]dbc.ForeignKeyInfo, error) {
+	infos, err := c.listForeignKeysP(ctx, schema, table)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]dbc.ForeignKeyInfo, len(infos))
+	for i, fk := range infos {
+		out[i] = dbc.ForeignKeyInfo{
+			Name:       fk.Name,
+			Columns:    fk.Columns,
+			RefSchema:  fk.ReferencedSchema,
+			RefTable:   fk.ReferencedTable,
+			RefColumns: fk.ReferencedColumns,
+		}
+	}
+	return out, nil
+}
+
+func (c *Conn) CreateTableSQL(ctx context.Context, schema, table string) (string, error) {
+	return c.createTableSQLP(ctx, schema, table)
+}
+
+// BrowseRows translates dbcore's Page/PageSize/Sort/Filter request into polydb's
+// Offset/Limit/OrderBy/Conditions form and delegates to the existing implementation.
+func (c *Conn) BrowseRows(ctx context.Context, schema, table string, req *dbc.TableRowsRequest) (*dbc.TableRowsResult, error) {
+	preq := &protocol.TableRowsRequest{
+		Offset: uint64(pageOffset(req.Page, req.PageSize)),
+		Limit:  uint32(req.PageSize),
+	}
+	for _, s := range req.Sort {
+		dir := protocol.SortAsc
+		if s.Desc {
+			dir = protocol.SortDesc
+		}
+		preq.OrderBy = append(preq.OrderBy, protocol.OrderClause{Column: s.Column, Dir: dir})
+	}
+	for _, f := range req.Filter {
+		preq.Conditions = append(preq.Conditions, protocol.FilterCondition{
+			Column: f.Column,
+			Op:     mapFilterOp(f.Op),
+			Value:  bridge.ValueFromDB(f.Value),
+		})
+	}
+	res, err := c.browseRowsP(ctx, schema, table, preq)
+	if err != nil {
+		return nil, err
+	}
+	// polydb's RowsResultToBrowsePage leaves TotalEstimate nil; backfill it via a
+	// companion COUNT(*) that respects the same filters but no pagination.
+	countReq := &protocol.TableRowsRequest{Conditions: preq.Conditions}
+	total, cerr := c.browseRowsCountP(ctx, schema, table, countReq)
+	if cerr != nil {
+		total = 0
+	}
+	return browseResultToDBCore(res, total), nil
+}
+
+func (c *Conn) BrowseRowsCount(ctx context.Context, schema, table string, req *dbc.TableRowsRequest) (uint64, error) {
+	// A count is the size of the filtered set; pagination must NOT be applied as a
+	// LIMIT, or the result under-counts. Only filters carry over.
+	preq := &protocol.TableRowsRequest{}
+	for _, f := range req.Filter {
+		preq.Conditions = append(preq.Conditions, protocol.FilterCondition{
+			Column: f.Column,
+			Op:     mapFilterOp(f.Op),
+			Value:  bridge.ValueFromDB(f.Value),
+		})
+	}
+	return c.browseRowsCountP(ctx, schema, table, preq)
+}
+
+// ─── protocol-native helpers (legacy polydb API; consumed via ProtocolDriver) ───
+
+func (c *Conn) execP(ctx context.Context, sql string, args ...protocol.Value) (*protocol.QueryResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.executeIn(ctx, c.db, sql, args)
 }
 
-// ExecuteIn 在给定执行器上跑一条 SQL（*sql.DB 或 *sql.Tx）。
-// 调用方应确保不持有 c.mu 时并发调用；本方法自行加锁。
-func (c *Conn) ExecuteIn(exec dbcore.SQLTx, ctx context.Context, sql string, args ...protocol.Value) (*protocol.QueryResult, error) {
+// execInP 在给定执行器上跑一条 SQL（*sql.DB 或 *sql.Tx）。
+func (c *Conn) execInP(exec pdb.SQLTx, ctx context.Context, sql string, args ...protocol.Value) (*protocol.QueryResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.executeIn(ctx, exec, sql, args)
 }
 
-func (c *Conn) executeIn(ctx context.Context, exec dbcore.SQLTx, sql string, args []protocol.Value) (*protocol.QueryResult, error) {
+func (c *Conn) executeIn(ctx context.Context, exec pdb.SQLTx, sql string, args []protocol.Value) (*protocol.QueryResult, error) {
 	start := timeNowMs()
-	stmtType := dbcore.DetectStatementType(sql)
-	driverArgs := dbcore.ValueArgs(args)
+	stmtType := pdb.DetectStatementType(sql)
+	driverArgs := pdb.ValueArgs(args)
 
 	// SELECT / 返回行集的语句走 Query；否则走 Exec。
 	if shouldQuery(stmtType, sql) {
@@ -85,7 +247,7 @@ func (c *Conn) executeIn(ctx context.Context, exec dbcore.SQLTx, sql string, arg
 		columns := make([]protocol.ResultColumn, len(colTypes))
 		for i, ct := range colTypes {
 			name := ct.Name()
-			columns[i] = protocol.ResultColumn{Name: name, DataType: dbcore.DeclTypeOf(ct)}
+			columns[i] = protocol.ResultColumn{Name: name, DataType: pdb.DeclTypeOf(ct)}
 		}
 
 		var resultRows [][]protocol.Value
@@ -99,7 +261,7 @@ func (c *Conn) executeIn(ctx context.Context, exec dbcore.SQLTx, sql string, arg
 			}
 			rowVals := make([]protocol.Value, len(raw))
 			for i, r := range raw {
-				rowVals[i] = dbcore.DriverToValueTyped(*(r.(*any)), columns[i].DataType)
+				rowVals[i] = pdb.DriverToValueTyped(*(r.(*any)), columns[i].DataType)
 			}
 			resultRows = append(resultRows, rowVals)
 		}
@@ -127,8 +289,8 @@ func (c *Conn) executeIn(ctx context.Context, exec dbcore.SQLTx, sql string, arg
 	}, nil
 }
 
-// Begin 开启 SQLite 事务。SQLite 不支持隔离级别选项，TxMode 被忽略。
-func (c *Conn) Begin(ctx context.Context, _ dbcore.TxMode) (*sql.Tx, error) {
+// beginP 开启 SQLite 事务。SQLite 不支持隔离级别选项，TxMode 被忽略。
+func (c *Conn) beginP(ctx context.Context, _ pdb.TxMode) (*sql.Tx, error) {
 	c.mu.Lock()
 	tx, err := c.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelDefault})
 	c.mu.Unlock()
@@ -138,11 +300,11 @@ func (c *Conn) Begin(ctx context.Context, _ dbcore.TxMode) (*sql.Tx, error) {
 	return tx, nil
 }
 
-func (c *Conn) ListSchemas(ctx context.Context) ([]protocol.SchemaInfo, error) {
+func (c *Conn) listSchemasP(ctx context.Context) ([]protocol.SchemaInfo, error) {
 	return []protocol.SchemaInfo{{Name: "main"}}, nil
 }
 
-func (c *Conn) ListTables(ctx context.Context, schema string) ([]protocol.TableInfo, error) {
+func (c *Conn) listTablesP(ctx context.Context, schema string) ([]protocol.TableInfo, error) {
 	rows, err := c.db.QueryContext(ctx,
 		"SELECT name, type FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY name")
 	if err != nil {
@@ -164,7 +326,7 @@ func (c *Conn) ListTables(ctx context.Context, schema string) ([]protocol.TableI
 	return out, rows.Err()
 }
 
-func (c *Conn) ListColumns(ctx context.Context, schema, table string) ([]protocol.ColumnInfo, error) {
+func (c *Conn) listColumnsP(ctx context.Context, schema, table string) ([]protocol.ColumnInfo, error) {
 	rows, err := c.db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%q)", table))
 	if err != nil {
 		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
@@ -196,7 +358,7 @@ func (c *Conn) ListColumns(ctx context.Context, schema, table string) ([]protoco
 	return out, rows.Err()
 }
 
-func (c *Conn) ListIndexes(ctx context.Context, schema, table string) ([]protocol.IndexInfo, error) {
+func (c *Conn) listIndexesP(ctx context.Context, schema, table string) ([]protocol.IndexInfo, error) {
 	rows, err := c.db.QueryContext(ctx, fmt.Sprintf("PRAGMA index_list(%q)", table))
 	if err != nil {
 		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
@@ -278,7 +440,7 @@ func fkAction(raw string) protocol.ForeignKeyAction {
 	return ""
 }
 
-func (c *Conn) ListForeignKeys(ctx context.Context, schema, table string) ([]protocol.ForeignKeyInfo, error) {
+func (c *Conn) listForeignKeysP(ctx context.Context, schema, table string) ([]protocol.ForeignKeyInfo, error) {
 	rows, err := c.db.QueryContext(ctx, fmt.Sprintf("PRAGMA foreign_key_list(%q)", table))
 	if err != nil {
 		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
@@ -343,7 +505,7 @@ func (c *Conn) ListForeignKeys(ctx context.Context, schema, table string) ([]pro
 	return out, nil
 }
 
-func (c *Conn) CreateTableSQL(ctx context.Context, schema, table string) (string, error) {
+func (c *Conn) createTableSQLP(ctx context.Context, schema, table string) (string, error) {
 	var ddl string
 	err := c.db.QueryRowContext(ctx,
 		"SELECT sql FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&ddl)
@@ -372,9 +534,9 @@ func timeNowMs() float64 {
 
 // ─── 表数据浏览（behavior.md §13）────────────────────────────
 
-// BrowseRows 按表浏览行：共享构造器产参数化 SQL 后走自身执行管线。
-func (c *Conn) BrowseRows(ctx context.Context, schema, table string, req *protocol.TableRowsRequest) (*protocol.TableRowsResult, error) {
-	sqlText, args, err := dbcore.BuildRowsQuery(dbcore.SQLiteSQLDialect(), schema, table, req)
+// browseRowsP 按表浏览行：共享构造器产参数化 SQL 后走自身执行管线。
+func (c *Conn) browseRowsP(ctx context.Context, schema, table string, req *protocol.TableRowsRequest) (*protocol.TableRowsResult, error) {
+	sqlText, args, err := pdb.BuildRowsQuery(pdb.SQLiteSQLDialect(), schema, table, req)
 	if err != nil {
 		return nil, err
 	}
@@ -384,12 +546,12 @@ func (c *Conn) BrowseRows(ctx context.Context, schema, table string, req *protoc
 	if err != nil {
 		return nil, err
 	}
-	return dbcore.RowsResultToBrowsePage(res, req.Offset, dbcore.BrowseRowsLimits(req.Limit)), nil
+	return pdb.RowsResultToBrowsePage(res, req.Offset, pdb.BrowseRowsLimits(req.Limit)), nil
 }
 
-// BrowseRowsCount 对同条件执行 COUNT(*)。
-func (c *Conn) BrowseRowsCount(ctx context.Context, schema, table string, req *protocol.TableRowsRequest) (uint64, error) {
-	sqlText, args, err := dbcore.BuildRowsCountQuery(dbcore.SQLiteSQLDialect(), schema, table, req)
+// browseRowsCountP 对同条件执行 COUNT(*)。
+func (c *Conn) browseRowsCountP(ctx context.Context, schema, table string, req *protocol.TableRowsRequest) (uint64, error) {
+	sqlText, args, err := pdb.BuildRowsCountQuery(pdb.SQLiteSQLDialect(), schema, table, req)
 	if err != nil {
 		return 0, err
 	}
@@ -399,5 +561,5 @@ func (c *Conn) BrowseRowsCount(ctx context.Context, schema, table string, req *p
 	if err != nil {
 		return 0, err
 	}
-	return dbcore.CountResultToUint64(res)
+	return pdb.CountResultToUint64(res)
 }

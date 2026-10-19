@@ -12,7 +12,7 @@ import (
 	"github.com/polydb/polydb/pkg/schemadiff"
 )
 
-func execReport(t *testing.T, c *Conn, q string) string {
+func execReport(t *testing.T, c *ProtocolDriver, q string) string {
 	t.Helper()
 	if _, err := c.Execute(context.Background(), q); err != nil {
 		return "ERR: " + err.Error()
@@ -20,7 +20,7 @@ func execReport(t *testing.T, c *Conn, q string) string {
 	return "OK"
 }
 
-func scalarJSON(t *testing.T, c *Conn, q string) string {
+func scalarJSON(t *testing.T, c *ProtocolDriver, q string) string {
 	t.Helper()
 	res, err := c.Execute(context.Background(), q)
 	if err != nil {

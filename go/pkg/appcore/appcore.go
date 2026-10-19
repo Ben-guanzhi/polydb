@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"net/url"
+	"sort"
 	"sync"
 	"time"
 
@@ -46,14 +47,27 @@ func driverSpecFor(kind protocol.DatabaseKind) driverSpec {
 	return driverSpecs[kind]
 }
 
+// 事务注册表主动回收的调参（P0-2 残留修复）：begin 后未 finalize 的事务必须有主动回收，
+// 否则 a.txs 与底层 *sql.Tx（占用连接池一条连接）会随进程常驻无限增长。
+// 设成包级变量便于测试临时调小；默认值面向长驻 server：30 分钟空闲阈值、
+// 5 分钟扫描间隔、1024 条上限。
+var (
+	txIdleTTL       = 30 * time.Minute
+	txSweepInterval = 5 * time.Minute
+	txMaxEntries    = 1024
+)
+
 // txEntry 保存单个进程内事务的运行时状态。同一 txEntry 内的
 // driver / tx 只在 Begin 时赋值，Commit / Rollback 之后 status 会迁移，
 // ExecuteInTx 依赖 status 判断事务是否仍可用。
 type txEntry struct {
-	id             string
-	connID         string
-	status         protocol.TransactionStatus
-	startedAt      time.Time
+	id        string
+	connID    string
+	status    protocol.TransactionStatus
+	startedAt time.Time
+	// lastActive 记录最近一次"被使用"的时间（Begin 或 ExecuteInTx），
+	// 供清扫器判定空闲超时（P0-2 残留修复）。
+	lastActive     time.Time
 	isolationLevel protocol.IsolationLevel
 	driver         dbcore.SQLTxDriver
 	tx             *sql.Tx
@@ -79,13 +93,16 @@ type AppCore struct {
 	// 只让一个跑完整 Connect（含 SSH 隧道 + 拨号 + Ping），其余共享其结果，
 	// 避免重复开隧道/连接后又被覆盖 Close（见 ensure）。
 	connectSF singleflight.Group
+	// txSweepDone 用于停止事务清扫 goroutine；Close 关闭它。
+	txSweepDone chan struct{}
+	closeOnce   sync.Once
 }
 
 func New(db *sql.DB, kr keyring.Keyring) *AppCore {
 	blobs := storage.NewBlobStore(storage.DataDir())
 	blobs.Sweep()
 	dbcore.SetBlobSink(blobs)
-	return &AppCore{
+	a := &AppCore{
 		repo:        storage.NewConnectionRepository(db),
 		kr:          kr,
 		connections: make(map[string]dbcore.Connection),
@@ -93,7 +110,11 @@ func New(db *sql.DB, kr keyring.Keyring) *AppCore {
 		txs:         make(map[string]*txEntry),
 		readOnly:    make(map[string]bool),
 		blobs:       blobs,
+		txSweepDone: make(chan struct{}),
 	}
+	// 启动事务清扫：回收 begin 后未 finalize 的孤儿事务（P0-2 残留）。
+	go a.txSweeper()
+	return a
 }
 
 // BlobStore 返回大字段旁路存储（server 的 REST+Range 取回经此读取）。
@@ -217,7 +238,12 @@ func (a *AppCore) Connect(ctx context.Context, id string) error {
 		if path == "" {
 			path = ":memory:"
 		}
-		d, err2 = dbsqlite.Open(ctx, path)
+		c, errOpen := dbsqlite.Open(ctx, path)
+		if errOpen != nil {
+			err2 = errOpen
+			break
+		}
+		d = dbsqlite.NewProtocolDriver(c)
 	case protocol.DatabaseKindPostgres:
 		d, err2 = dbpostgres.Open(ctx, postgresDSN(connInfo, password))
 	case protocol.DatabaseKindMySQL:
@@ -440,6 +466,7 @@ func (a *AppCore) BeginTransaction(ctx context.Context, req *protocol.BeginTrans
 		connID:         req.ConnectionID,
 		status:         protocol.TxnActive,
 		startedAt:      now,
+		lastActive:     now,
 		isolationLevel: req.IsolationLevel,
 		driver:         txD,
 		tx:             tx,
@@ -515,6 +542,7 @@ func (a *AppCore) ExecuteInTx(ctx context.Context, txID, sql string, args ...pro
 
 	reinsert := func() {
 		a.mu.Lock()
+		e.lastActive = time.Now()
 		a.txs[txID] = e
 		a.mu.Unlock()
 	}
@@ -528,6 +556,81 @@ func (a *AppCore) ExecuteInTx(ctx context.Context, txID, sql string, args ...pro
 	res, err := e.driver.ExecuteIn(e.tx, ctx, sql, args...)
 	reinsert()
 	return res, err
+}
+
+// Close 停止事务清扫 goroutine（幂等）。宿主（server / tui / mcp main）在进程退出时调用。
+func (a *AppCore) Close() {
+	a.closeOnce.Do(func() { close(a.txSweepDone) })
+}
+
+// txSweeper 周期扫描并回收空闲/超额的事务，防止 a.txs 与底层 *sql.Tx 无界增长（P0-2 残留）。
+func (a *AppCore) txSweeper() {
+	ticker := time.NewTicker(txSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			a.sweepIdleTx()
+		case <-a.txSweepDone:
+			return
+		}
+	}
+}
+
+// sweepIdleTx 回收两类事务：
+//  1. 超过 txIdleTTL 未活动（空闲泄漏，客户端 begin 后既不 finalize 也不断开连接）；
+//  2. 总数超过 txMaxEntries 时，按 lastActive 升序再摘最旧的若干（突发超额）。
+//
+// 回收即回滚其 *sql.Tx 并从注册表删除——先持锁把候选从 a.txs 摘除，再在锁外回滚，
+// 避免回滚的网络等待拖住整个 AppCore。
+func (a *AppCore) sweepIdleTx() {
+	a.mu.Lock()
+	type cand struct {
+		id string
+		tx *sql.Tx
+	}
+	var cands []cand
+	now := time.Now()
+
+	// 1) 空闲超时者立即摘除
+	for id, e := range a.txs {
+		if e.status != protocol.TxnActive {
+			continue
+		}
+		if now.Sub(e.lastActive) > txIdleTTL {
+			cands = append(cands, cand{id, e.tx})
+			delete(a.txs, id)
+		}
+	}
+
+	// 2) 仍超出容量上限时，按 lastActive 升序再摘最旧的若干
+	if len(a.txs) > txMaxEntries {
+		type kv struct {
+			id     string
+			tx     *sql.Tx
+			active time.Time
+		}
+		heap := make([]kv, 0, len(a.txs))
+		for id, e := range a.txs {
+			if e.status != protocol.TxnActive {
+				continue
+			}
+			heap = append(heap, kv{id, e.tx, e.lastActive})
+		}
+		sort.Slice(heap, func(i, j int) bool { return heap[i].active.Before(heap[j].active) })
+		excess := len(a.txs) - txMaxEntries
+		for i := 0; i < excess && i < len(heap); i++ {
+			cands = append(cands, cand{heap[i].id, heap[i].tx})
+			delete(a.txs, heap[i].id)
+		}
+	}
+	a.mu.Unlock()
+
+	for _, c := range cands {
+		if c.tx != nil {
+			_ = c.tx.Rollback()
+		}
+	}
 }
 
 // GetTransactionInfo 返回当前事务的快照（供前端在编辑器上显示状态徽章等）。
