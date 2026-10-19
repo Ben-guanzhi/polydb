@@ -104,12 +104,26 @@ func (a *Adapter) Tables(namespace string) ([]string, error) {
 
 // FetchTable 实现 Backend。
 func (a *Adapter) FetchTable(namespace, table string, limit int) (*tuidata.Frame, error) {
+	return a.browse(namespace, table, limit, nil)
+}
+
+// FetchTableWithFilters 实现 backend.Filtered：把过滤条件下推到服务端，而不是
+// 取回整页再在 UI 里筛。条件以 AND 相连（tui.ParseFilterConditions 的产物）。
+func (a *Adapter) FetchTableWithFilters(namespace, table string, limit int, conds []protocol.FilterCondition) (*tuidata.Frame, error) {
+	return a.browse(namespace, table, limit, conds)
+}
+
+// browse 是上面两个方法的共同实现。
+func (a *Adapter) browse(namespace, table string, limit int, conds []protocol.FilterCondition) (*tuidata.Frame, error) {
 	if limit <= 0 {
 		limit = fetchTableLimit
 	}
-	res, err := a.cli.BrowseRows(context.Background(), a.connID, namespace, table, &protocol.TableRowsRequest{
-		Limit: uint32(limit),
-	})
+	req := &protocol.TableRowsRequest{Limit: uint32(limit)}
+	if len(conds) > 0 {
+		req.Conditions = conds
+		req.Logic = protocol.FilterLogicAnd
+	}
+	res, err := a.cli.BrowseRows(context.Background(), a.connID, namespace, table, req)
 	if err != nil {
 		return nil, err
 	}

@@ -5,6 +5,7 @@ package backend
 
 import (
 	"github.com/polydb/polydb/internal/tuidata"
+	"github.com/polydb/polydb/pkg/protocol"
 )
 
 // ExecResult reports the outcome of a non-query statement.
@@ -91,6 +92,17 @@ type Blobber interface {
 	// FetchBlob returns the bytes stored under blobID, which is the full
 	// reference string ($polydb_blob:<uuid>).
 	FetchBlob(blobID string) ([]byte, error)
+}
+
+// Filtered is an optional Backend capability: fetch a table with the filter
+// pushed down to the server instead of pulling rows and filtering in the UI.
+//
+// Optional because the pushdown needs the engine to understand the conditions;
+// without it the UI keeps filtering client-side on the rows it already has.
+type Filtered interface {
+	// FetchTableWithFilters is FetchTable plus server-side conditions, joined
+	// with AND (see tui.ParseFilterConditions).
+	FetchTableWithFilters(namespace, table string, limit int, conds []protocol.FilterCondition) (*tuidata.Frame, error)
 }
 
 // KVBackend is a live key-value store connection (Redis).
