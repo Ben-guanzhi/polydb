@@ -1,6 +1,7 @@
 //! 窗口骨架视图：状态栏 + 顶栏 + 左栏 + 主区分派 + 多语句日志。
 
 use super::*;
+use polydb_core::TableInfo;
 
 impl PolyDBApp {
     pub(super) fn status_bar(&self) -> Div {
@@ -19,12 +20,22 @@ impl PolyDBApp {
 
     // ─── 主界面：顶栏 + 左栏 + 右栏 ───
 
-    pub(super) fn render_root(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_root(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let th = &self.theme;
         let root_bg = th.bg;
         let top_bar = self.render_top_bar(cx);
-        let sidebar = self.render_sidebar(cx);
-        let main = self.render_main(cx);
+        let sidebar = self.render_sidebar(window, cx);
+        let main = self.render_main(window, cx);
+        // AI 助手抽屉：懒创建，开关时挂到主列右侧。
+        let ai_panel = if self.ai_open {
+            if self.ai_panel.is_none() {
+                let app = cx.entity();
+                self.ai_panel = Some(crate::view::ai_panel::AiPanel::view(window, cx, app));
+            }
+            self.ai_panel.clone()
+        } else {
+            None
+        };
         let ctx_menu = self.render_ctx_menu(cx);
         let conn_modal = self.render_conn_form(cx);
         let quick_modal = self.render_quick_switcher(cx);
@@ -43,7 +54,8 @@ impl PolyDBApp {
                     .min_h(px(0.0))
                     .flex()
                     .child(sidebar)
-                    .child(main),
+                    .child(main)
+                    .when_some(ai_panel, |d, ap| d.child(ap.into_element())),
             )
             .children(ctx_menu)
             .children(conn_modal)
@@ -138,6 +150,11 @@ impl PolyDBApp {
             .children(cancel_btn)
             .children(explain_btn)
             .children(cmp_btn)
+            .child(btn("btn-ai", "✨ AI", th).on_click(cx.listener(
+                |this, _ev: &ClickEvent, _window, cx| {
+                    this.toggle_ai(cx);
+                },
+            )))
             .child(btn("theme-ws", "🌗", th).on_click(cx.listener(
                 |this, _ev: &ClickEvent, _window, cx| {
                     this.toggle_theme();
@@ -148,7 +165,7 @@ impl PolyDBApp {
 
     // ─── 侧栏：连接 + schema chips + 表树 ───
 
-    pub(super) fn render_sidebar(&mut self, cx: &mut Context<Self>) -> Div {
+    pub(super) fn render_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let th = &self.theme;
         let sidebar_bg = th.bg_alt;
         // 连接列表（点击=切换活动连接；展示名称 + 类型 + 目标地址）。
@@ -271,100 +288,12 @@ impl PolyDBApp {
                         }))
                 }))
         });
-        // 表树：caret 单击展开列；名称双击开 tab。
-        let tree_rows: Vec<Div> = self
-            .tables
-            .iter()
-            .enumerate()
-            .map(|(ti, t)| {
-                let th = &self.theme;
-                let expanded = self.expanded.contains(&ti);
-                let name = t.name.clone();
-                let schema = t.schema.clone();
-                let view_tag = match t.table_type {
-                    polydb_core::TableType::Table => "",
-                    polydb_core::TableType::View => " (视图)",
-                    polydb_core::TableType::MaterializedView => " (物化视图)",
-                };
-                let row = div()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.0))
-                    .px(px(8.0))
-                    .py(px(4.0))
-                    .child(
-                        div()
-                            .id(("tree-caret", ti))
-                            .w(px(16.0))
-                            .flex_none()
-                            .text_color(th.fg_dim)
-                            .text_size(px(10.0))
-                            .cursor(CursorStyle::PointingHand)
-                            .child(if expanded { "▾" } else { "▸" })
-                            .on_click(cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
-                                this.toggle_expand(ti, cx);
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id(("tree-name", ti))
-                            .flex_1()
-                            .truncate()
-                            .text_color(th.fg)
-                            .text_size(px(12.0))
-                            .cursor(CursorStyle::PointingHand)
-                            .hover(|d| d.text_color(th.accent))
-                            .child(format!("{name}{view_tag}"))
-                            .on_click(cx.listener(move |this, ev: &ClickEvent, _window, cx| {
-                                if ev.click_count() >= 2 {
-                                    this.open_table_tab(schema.clone(), name.clone(), cx);
-                                }
-                            })),
-                    );
-                let children = expanded.then(|| {
-                    let th = &self.theme;
-                    if self.cols_loading.contains(&ti) {
-                        return div()
-                            .pl(px(28.0))
-                            .py(px(2.0))
-                            .text_color(th.fg_dim)
-                            .text_size(px(11.0))
-                            .child("列加载中…");
-                    }
-                    match self.cols_cache.get(&ti) {
-                        Some(cols) => div()
-                            .pl(px(28.0))
-                            .flex()
-                            .flex_col()
-                            .py(px(2.0))
-                            .children(cols.iter().take(80).map(|c| {
-                                div()
-                                    .flex()
-                                    .gap(px(6.0))
-                                    .text_size(px(11.0))
-                                    .text_color(th.fg_muted)
-                                    .child(if c.is_primary_key { "🔑" } else { "·" }.to_string())
-                                    .child(div().truncate().child(c.name.clone()))
-                                    .child(div().text_color(th.fg_dim).child(c.data_type.clone()))
-                            }))
-                            .when(cols.len() > 80, |d| {
-                                d.child(
-                                    div()
-                                        .text_size(px(10.0))
-                                        .text_color(th.fg_dim)
-                                        .child(format!("… 共 {} 列", cols.len())),
-                                )
-                            }),
-                        None => div()
-                            .pl(px(28.0))
-                            .text_color(th.fg_dim)
-                            .text_size(px(11.0))
-                            .child("—"),
-                    }
-                });
-                div().flex().flex_col().child(row).children(children)
-            })
-            .collect();
+        // 对象树：懒创建 gpui-component Tree 组件。
+        if self.tables_tree.is_none() {
+            let app = cx.entity();
+            self.tables_tree = Some(crate::view::tables_tree::TablesTree::view(window, cx, app));
+        }
+        let tree_view = self.tables_tree.clone();
         div()
             .w(px(260.0))
             .flex_none()
@@ -402,31 +331,8 @@ impl PolyDBApp {
                     .flex_col()
                     .children(conn_rows),
             )
-            .child(
-                div()
-                    .px(px(12.0))
-                    .pt(px(10.0))
-                    .pb(px(4.0))
-                    .text_color(th.fg_muted)
-                    .text_size(px(12.0))
-                    .child(format!(
-                        "{} · Tables ({})",
-                        self.active_schema,
-                        self.tables.len()
-                    )),
-            )
-            .children(schema_chips)
-            .child(
-                div()
-                    .id("tables-scroll")
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .overflow_y_scroll()
-                    .px(px(4.0))
-                    .flex()
-                    .flex_col()
-                    .children(tree_rows),
-            )
+            .when_some(schema_chips, |d, sc| d.child(sc))
+            .when_some(tree_view, |d, tv| d.child(tv.into_element()))
             .child(
                 div()
                     .flex_none()
@@ -448,9 +354,10 @@ impl PolyDBApp {
             )
     }
 
+
     // ─── 主列：对象 tab 条 + 活动视图 ───
 
-    pub(super) fn render_main(&mut self, cx: &mut Context<Self>) -> Div {
+    pub(super) fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let th = &self.theme;
         let strip_bg = th.bg_alt;
         // tab 条：工作台常驻 + 表 tabs（× 关闭）。
@@ -535,7 +442,7 @@ impl PolyDBApp {
                 if self.is_redis() {
                     self.render_redis_panel(cx)
                 } else {
-                    self.render_workbench(cx)
+                    self.render_workbench(window, cx)
                 }
             }
             ActiveView::Table(i) if i < self.tabs.len() => self.render_table_tab(i, cx),
@@ -544,7 +451,7 @@ impl PolyDBApp {
                 if self.is_redis() {
                     self.render_redis_panel(cx)
                 } else {
-                    self.render_workbench(cx)
+                    self.render_workbench(window, cx)
                 }
             }
         };
@@ -571,27 +478,42 @@ impl PolyDBApp {
 
     // ─── 工作台视图 ───
 
-    pub(super) fn render_workbench(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let (sql_disp, sql_ranges) = self.sql_display();
+    pub(super) fn render_workbench(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let log_view = self.render_multi_log();
         let grid = self.render_grid(GridSrc::Workbench, Some(MAX_RESULT_ROWS), None, cx);
         let preview_panel = self.render_preview(GridSrc::Workbench, cx);
         let th = self.theme;
-        let hl = sql_ranges
-            .into_iter()
-            .map(|r| {
-                (
-                    r,
-                    HighlightStyle {
-                        background_color: Some(th.surface2.into()),
-                        ..Default::default()
-                    },
-                )
-            })
-            .collect::<Vec<_>>();
-        let styled = StyledText::new(sql_disp).with_highlights(hl);
-        // 存下本帧文本布局句柄，供鼠标事件把像素映射回字节下标。
-        self.sql_layout = Some(styled.layout().clone());
+
+        // 懒创建真·SQL 编辑器组件（需要 Window 才能构造 EditorState）。
+        if self.sql_editor.is_none() {
+            let editor = crate::view::sql_editor::SqlEditor::view(window, cx);
+            // 首次注入当前 schema（表名；列名后续由 TableDetail 回填）。
+            Self::feed_editor_schema(cx, &editor, &self.tables);
+            editor.update(cx, |e, _cx| e.set_has_connection(self.workspace.is_some()));
+            let sub = cx.subscribe(&editor, |this: &mut Self, _entity, event: &crate::view::sql_editor::SqlEditorEvent, cx| {
+                match event {
+                    crate::view::sql_editor::SqlEditorEvent::TextChanged(text) => {
+                        this.sql = text.clone();
+                    }
+                    crate::view::sql_editor::SqlEditorEvent::RunQuery(sql) => {
+                        this.sql = sql.clone();
+                        this.run_query(cx);
+                    }
+                }
+                cx.notify();
+            });
+            self.sql_editor = Some(editor);
+            self.sql_editor_sub = Some(sub);
+        } else {
+            // 连接状态变化时同步给工具栏按钮。
+            if let Some(ed) = self.sql_editor.as_ref() {
+                let has = self.workspace.is_some();
+                ed.update(cx, |e, _cx| e.set_has_connection(has));
+            }
+        }
+
+        let editor_view = self.sql_editor.clone();
+
         let empty = div()
             .flex_1()
             .min_h(px(0.0))
@@ -605,7 +527,7 @@ impl PolyDBApp {
             } else if self.busy {
                 "执行中…"
             } else {
-                "输入 SQL（Enter 执行，Shift+Enter 换行，Ctrl/Cmd+V 粘贴）；左键预览单元格，右键弹菜单"
+                "编辑器：Enter 执行，Shift+Enter 换行；右上角可开 Vim 模式与补全"
             });
         let has_grid = grid.is_some();
         let export_bar = has_grid.then(|| self.render_export_bar(GridSrc::Workbench, cx));
@@ -614,52 +536,36 @@ impl PolyDBApp {
             .min_h(px(0.0))
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .id("sql-input")
-                    .min_h(px(36.0))
-                    .max_h(px(180.0))
-                    .flex_none()
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_col()
-                    .px(px(12.0))
-                    .py(px(6.0))
-                    .cursor(CursorStyle::IBeam)
-                    .track_focus(&self.focus)
-                    .on_click(cx.listener(|this, _ev: &ClickEvent, window, _cx| {
-                        // 修复：聚焦回编辑器自身持有的 FocusHandle（原为游离句柄）。
-                        window.focus(&this.focus);
-                    }))
-                    .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
-                        this.on_input_key(ev, cx);
-                    }))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, ev: &MouseDownEvent, window, cx| {
-                            this.on_sql_mouse_down(ev, window, cx);
-                        }),
-                    )
-                    .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _window, cx| {
-                        this.on_sql_mouse_move(ev, cx);
-                    }))
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(|this, ev: &MouseUpEvent, _window, cx| {
-                            this.on_sql_mouse_up(ev, cx);
-                        }),
-                    )
-                    .text_size(px(13.0))
-                    .font_family("monospace")
-                    .text_color(th.fg)
-                    .child(styled),
-            )
+            .when_some(editor_view, |d, ed| {
+                d.child(ed.into_element())
+            })
             .children(log_view)
             .children(export_bar)
             .children(grid)
             .when(!has_grid, |d| d.child(empty))
             .children(preview_panel)
             .into_any_element()
+    }
+
+    /// 把当前连接的表名清单注入编辑器补全器（列名为空，待 TableDetail 回填）。
+    fn feed_editor_schema(cx: &mut Context<Self>, editor: &Entity<crate::view::sql_editor::SqlEditor>, tables: &[TableInfo]) {
+        let schema: Vec<(String, Vec<String>)> = tables
+            .iter()
+            .map(|t| (t.name.clone(), Vec::new()))
+            .collect();
+        editor.update(cx, |e, _cx| e.set_schema(schema));
+    }
+
+    /// tables 刷新后调用：若编辑器已存在，同步最新 schema 进补全器。
+    pub(crate) fn sync_editor_schema(&mut self, cx: &mut Context<Self>) {
+        if let Some(ed) = self.sql_editor.as_ref() {
+            let schema: Vec<(String, Vec<String>)> = self
+                .tables
+                .iter()
+                .map(|t| (t.name.clone(), Vec::new()))
+                .collect();
+            ed.update(cx, |e, _cx| e.set_schema(schema));
+        }
     }
 
     pub(super) fn render_multi_log(&self) -> Option<Div> {

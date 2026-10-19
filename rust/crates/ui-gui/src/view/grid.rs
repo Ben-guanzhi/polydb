@@ -65,7 +65,7 @@ impl PolyDBApp {
                 .child(body)
                 .on_click(cx.listener(move |this, _ev: &ClickEvent, window, cx| {
                     this.begin_edit(idx, fi, field);
-                    window.focus(&this.filter_focus);
+                    window.focus(&this.filter_focus, cx);
                     cx.notify();
                 }))
         };

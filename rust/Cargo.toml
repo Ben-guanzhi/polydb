@@ -16,6 +16,7 @@ members = [
     "crates/db-redis",
     "crates/ui-gui",
     "crates/server",
+    "crates/vim",
     "apps/polydb-gui",
 ]
 
@@ -34,6 +35,7 @@ polydb-schema-diff = { path = "crates/schema-diff" }
 polydb-storage = { path = "crates/storage" }
 polydb-app-core = { path = "crates/app-core" }
 polydb-transport = { path = "crates/transport" }
+polydb-vim = { path = "crates/vim" }
 polydb-ui-gui = { path = "crates/ui-gui" }
 polydb-server = { path = "crates/server" }
 
@@ -81,5 +83,10 @@ scrypt = "0.11"
 rand = "0.8"
 russh = { version = "0.55", default-features = false, features = ["ring"] }
 
-# GUI
-gpui = "0.2"
+# GUI (A1: 升级到 pre 通道以对齐 dbstudio 的 gpui-component 生态)
+gpui = { package = "gpui-pre", version = "0.3.1" }
+gpui-component = { version = "0.6.1", features = ["tree-sitter-languages"] }
+gpui-platform = { package = "gpui-pre-platform", version = "0.3.4" }
+gpui-kit-assets = "0.6.1"
+tree-sitter = "0.26"
+tree-sitter-sequel = "0.3"

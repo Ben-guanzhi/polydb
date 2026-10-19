@@ -202,8 +202,8 @@ impl PolyDBApp {
                 .text_color(th.fg)
                 .cursor(CursorStyle::IBeam)
                 .child(s)
-                .on_click(cx.listener(|this, _ev: &ClickEvent, window, _cx| {
-                    window.focus(&this.redis_focus);
+                .on_click(cx.listener(|this, _ev: &ClickEvent, window, cx| {
+                    window.focus(&this.redis_focus, cx);
                 }))
                 .into_any_element()
         } else {

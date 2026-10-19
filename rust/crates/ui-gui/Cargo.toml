@@ -8,11 +8,21 @@ description = "PolyDB GPUI components"
 polydb-core = { workspace = true }
 polydb-protocol = { workspace = true }
 polydb-transport = { workspace = true }
+polydb-vim = { workspace = true }
 gpui = { workspace = true }
+gpui-component = { workspace = true }
+gpui-platform = { workspace = true }
+gpui-kit-assets = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-sequel = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+anyhow = "1"
+lsp-types = "0.97"
+ureq = { version = "2", features = ["json"] }
+async-channel = "2"
 
 [dev-dependencies]
 # 仅测试构造 DTO 用（ConnectionInfo 的时间戳与 uuid 主键）

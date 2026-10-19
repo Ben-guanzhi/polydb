@@ -3,7 +3,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -30,8 +29,7 @@ use crate::profile::{self, ProfileColumn};
 use crate::tabs::{self, ActiveView};
 use crate::theme::Theme;
 use crate::util::{
-    blob_fetch_err_text, char_ceil, char_floor, col_to_byte, edit_line, line_bounds,
-    newline_insert, split_statements, word_at, word_ceil, word_floor,
+    blob_fetch_err_text, char_ceil, char_floor, edit_line, split_statements,
 };
 
 // ─── IO 桥 ─────────────────────────────────────────────────
@@ -523,20 +521,26 @@ pub(crate) fn conn_visible_fields(kind: DatabaseKind, ssh: bool) -> Vec<ConnFiel
     v
 }
 
-/// SQL 编辑器快照：文本 + 光标 + 选区锚点，用于撤销/重做。
-pub(crate) struct SqlSnapshot {
-    pub(crate) sql: String,
-    pub(crate) cursor: usize,
-    pub(crate) anchor: Option<usize>,
-}
-
 /// Quick Switcher 目标：工作台 / 已打开 tab（索引）/ 尚未打开的表（schema, table）。
 #[derive(Clone, PartialEq)]
 pub(crate) enum QuickTarget {
     Workbench,
     Tab(usize),
     NewTable(String, String),
+    /// 命令项：负载为命令 id（见 `QUICK_COMMANDS`）。
+    Command(String),
 }
+
+/// 命令面板条目：(id, 展示标签, 是否需要已连接)。
+const QUICK_COMMANDS: &[(&str, &str, bool)] = &[
+    ("run", "执行查询", true),
+    ("explain", "执行计划 (F9)", true),
+    ("refresh", "刷新表列表 / 数据", true),
+    ("disconnect", "断开当前连接", true),
+    ("connect", "新建 / 切换连接", false),
+    ("compare", "结构比对与同步", true),
+    ("workbench", "聚焦 SQL 工作台", false),
+];
 
 // ─── E5.5 结构比对与同步向导（浮层，四步在层内自走）───
 //
@@ -601,17 +605,16 @@ pub struct PolyDBApp {
 
     // ── 工作台（唯一常驻 tab）──
     pub(crate) sql: String,
-    pub(crate) cursor: usize,
-    /// 选区锚点（字节下标）。Some 且 != cursor 时表示存在选区。
-    pub(crate) sql_anchor: Option<usize>,
-    /// SQL 编辑器撤销/重做栈（快照含文本、光标、锚点）。
-    pub(crate) sql_undo: Vec<SqlSnapshot>,
-    pub(crate) sql_redo: Vec<SqlSnapshot>,
-    /// 编辑器当前帧的文本布局句柄，用于鼠标像素→字节下标映射（每帧 render 时刷新）。
-    pub(crate) sql_layout: Option<TextLayout>,
-    /// 鼠标左键按下拖拽中（扩展选区）。
-    pub(crate) sql_selecting: bool,
-    pub(crate) focus: FocusHandle,
+    /// 真·SQL 编辑器组件（gpui-component EditorState + Vim + 补全）。
+    pub(crate) sql_editor: Option<Entity<crate::view::sql_editor::SqlEditor>>,
+    /// 订阅 SqlEditor 事件（TextChanged / RunQuery）的句柄；必须持有以防被丢弃。
+    pub(crate) sql_editor_sub: Option<Subscription>,
+    /// 左栏对象树组件（gpui-component Tree；schema 分组 + 搜索 + 列懒加载）。
+    pub(crate) tables_tree: Option<Entity<crate::view::tables_tree::TablesTree>>,
+    /// AI 助手面板开关（右侧抽屉）。
+    pub(crate) ai_open: bool,
+    /// AI 助手面板组件（懒创建）。
+    pub(crate) ai_panel: Option<Entity<crate::view::ai_panel::AiPanel>>,
     pub(crate) result: Option<QueryResult>,
     pub(crate) multi_log: Vec<(String, StmtOutcome)>,
     pub(crate) cancel: Arc<AtomicBool>,
@@ -712,13 +715,11 @@ impl PolyDBApp {
             busy: false,
             status: "加载中…".into(),
             sql: String::new(),
-            cursor: 0,
-            sql_anchor: None,
-            sql_undo: Vec::new(),
-            sql_redo: Vec::new(),
-            sql_layout: None,
-            sql_selecting: false,
-            focus: cx.focus_handle(),
+            sql_editor: None,
+            sql_editor_sub: None,
+            tables_tree: None,
+            ai_open: false,
+            ai_panel: None,
             result: None,
             multi_log: Vec::new(),
             cancel: Arc::new(AtomicBool::new(false)),
@@ -865,6 +866,12 @@ impl PolyDBApp {
         };
     }
 
+    /// 切换 AI 助手抽屉（面板在 `render_root` 里懒创建）。
+    pub(crate) fn toggle_ai(&mut self, cx: &mut Context<Self>) {
+        self.ai_open = !self.ai_open;
+        cx.notify();
+    }
+
     // ─── 连接列表刷新（按 id 重定位活动连接；失去焦点连接时自动落到第一条）───
 
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -984,7 +991,7 @@ impl PolyDBApp {
         form.active = Some(ConnField::Name);
         form.cursor = 0;
         self.conn_form = Some(form);
-        window.focus(&self.conn_focus);
+        window.focus(&self.conn_focus, cx);
         cx.notify();
     }
 
@@ -1001,7 +1008,7 @@ impl PolyDBApp {
         form.active = Some(ConnField::Name);
         form.cursor = form.get(ConnField::Name).len();
         self.conn_form = Some(form);
-        window.focus(&self.conn_focus);
+        window.focus(&self.conn_focus, cx);
         cx.notify();
     }
 
@@ -1047,7 +1054,7 @@ impl PolyDBApp {
             form.cursor = form.get(f).len();
             form.active = Some(f);
         }
-        window.focus(&self.conn_focus);
+        window.focus(&self.conn_focus, cx);
         cx.notify();
     }
 
@@ -1075,7 +1082,7 @@ impl PolyDBApp {
             form.cursor = form.get(f).len();
             form.active = Some(f);
         }
-        window.focus(&self.conn_focus);
+        window.focus(&self.conn_focus, cx);
         cx.notify();
     }
 
@@ -1438,7 +1445,7 @@ impl PolyDBApp {
         self.redis_val_buf = raw;
         self.redis_val_cursor = self.redis_val_buf.len();
         self.redis_val_editing = true;
-        window.focus(&self.redis_focus);
+        window.focus(&self.redis_focus, cx);
         cx.notify();
     }
 
@@ -1515,7 +1522,7 @@ impl PolyDBApp {
     pub(crate) fn focus_redis_pattern(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.redis_editing = true;
         self.redis_cursor = self.redis_pattern.len();
-        window.focus(&self.redis_focus);
+        window.focus(&self.redis_focus, cx);
         cx.notify();
     }
 
@@ -1621,6 +1628,7 @@ impl PolyDBApp {
                         this.schemas = schemas;
                         this.active_schema = schema.clone();
                         this.tables = t;
+                        this.sync_editor_schema(cx);
                         this.status = format!("{schema} · {} 张表", this.tables.len());
                     }
                     Err(e) => this.status = format!("加载表失败: {e}"),
@@ -1649,6 +1657,7 @@ impl PolyDBApp {
                 match out {
                     Ok(t) => {
                         this.tables = t;
+                        this.sync_editor_schema(cx);
                         this.status = format!("{} · {} 张表", name, this.tables.len());
                     }
                     Err(e) => this.status = format!("加载表失败: {e}"),
@@ -2146,7 +2155,7 @@ impl PolyDBApp {
         self.cell_cursor = buf.len();
         self.cell_buf = buf;
         self.cell_edit = Some((idx, row, col));
-        window.focus(&self.cell_focus);
+        window.focus(&self.cell_focus, cx);
         cx.notify();
     }
 
@@ -3312,389 +3321,6 @@ impl PolyDBApp {
         self.grid_rows(src)?.get(row)?.get(col)
     }
 
-    // ─── 多行文本编辑（键盘驱动，cursor/anchor 为字节下标，缓冲允许 \n）───
-
-    /// 当前选区 `[start,end)`（字节）；无选区返回 None。
-    pub(crate) fn sel_range(&self) -> Option<(usize, usize)> {
-        let a = self.sql_anchor?;
-        if a == self.cursor {
-            return None;
-        }
-        let (s, e) = if a < self.cursor {
-            (a, self.cursor)
-        } else {
-            (self.cursor, a)
-        };
-        let s = s.min(self.sql.len());
-        let e = e.min(self.sql.len());
-        if s < e {
-            Some((s, e))
-        } else {
-            None
-        }
-    }
-
-    /// 快照入撤销栈并清空重做栈（上限 200 步）。
-    fn push_undo(&mut self) {
-        self.sql_undo.push(SqlSnapshot {
-            sql: self.sql.clone(),
-            cursor: self.cursor,
-            anchor: self.sql_anchor,
-        });
-        if self.sql_undo.len() > 200 {
-            self.sql_undo.remove(0);
-        }
-        self.sql_redo.clear();
-    }
-
-    pub(crate) fn sql_undo_step(&mut self) {
-        if let Some(s) = self.sql_undo.pop() {
-            self.sql_redo.push(SqlSnapshot {
-                sql: self.sql.clone(),
-                cursor: self.cursor,
-                anchor: self.sql_anchor,
-            });
-            self.sql = s.sql;
-            self.cursor = s.cursor.min(self.sql.len());
-            self.sql_anchor = s.anchor.map(|a| a.min(self.sql.len()));
-        }
-    }
-
-    pub(crate) fn sql_redo_step(&mut self) {
-        if let Some(s) = self.sql_redo.pop() {
-            self.sql_undo.push(SqlSnapshot {
-                sql: self.sql.clone(),
-                cursor: self.cursor,
-                anchor: self.sql_anchor,
-            });
-            self.sql = s.sql;
-            self.cursor = s.cursor.min(self.sql.len());
-            self.sql_anchor = s.anchor.map(|a| a.min(self.sql.len()));
-        }
-    }
-
-    /// 若存在选区则删除并将光标塌缩到起点，返回是否发生了删除。调用方负责 push_undo。
-    fn delete_selection(&mut self) -> bool {
-        if let Some((s, e)) = self.sel_range() {
-            self.sql.replace_range(s..e, "");
-            self.cursor = s;
-            self.sql_anchor = None;
-            return true;
-        }
-        false
-    }
-
-    fn insert_text(&mut self, text: &str) {
-        self.push_undo();
-        self.delete_selection();
-        let boundary = char_ceil(&self.sql, self.cursor);
-        self.sql.insert_str(boundary, text);
-        self.cursor = boundary + text.len();
-    }
-
-    // Shift+Enter 要插入的换行文本：光标所在行以 Smart AutoIndent 词开头就带
-    // 一级缩进；有选区时不猜缩进，只塌缩选区。
-    fn newline_text(&self) -> &'static str {
-        if self.sel_range().is_some() {
-            return "\n";
-        }
-        let (start, end) = line_bounds(&self.sql, self.cursor.min(self.sql.len()));
-        newline_insert(&self.sql[start..end])
-    }
-
-    fn backspace(&mut self) {
-        if self.sel_range().is_none() && self.cursor == 0 {
-            return;
-        }
-        self.push_undo();
-        if self.delete_selection() {
-            return;
-        }
-        // 退到**光标前那个字符**的起点：char_floor 落在边界上会原地不动（ASCII 恒如此），
-        // 所以先退一格再取边界——与 `util::edit_line` 的退格同一口径。
-        let start = char_floor(&self.sql, self.cursor - 1);
-        self.sql.replace_range(start..self.cursor, "");
-        self.cursor = start;
-    }
-
-    fn delete_forward(&mut self) {
-        if self.sel_range().is_none() && self.cursor >= self.sql.len() {
-            return;
-        }
-        self.push_undo();
-        if self.delete_selection() {
-            return;
-        }
-        let end = char_ceil(&self.sql, self.cursor);
-        self.sql.replace_range(self.cursor..end, "");
-    }
-
-    // 移动光标：shift 时以锚点扩展选区，否则塌缩选区。
-    fn apply_move(&mut self, shift: bool, new_cursor: usize) {
-        if shift {
-            if self.sql_anchor.is_none() {
-                self.sql_anchor = Some(self.cursor);
-            }
-        } else {
-            self.sql_anchor = None;
-        }
-        self.cursor = new_cursor;
-    }
-
-    fn move_left(&mut self, shift: bool) {
-        let nc = if self.cursor == 0 {
-            0
-        } else {
-            char_floor(&self.sql, self.cursor - 1)
-        };
-        self.apply_move(shift, nc);
-    }
-
-    fn move_right(&mut self, shift: bool) {
-        let nc = if self.cursor >= self.sql.len() {
-            self.sql.len()
-        } else {
-            char_ceil(&self.sql, self.cursor + 1)
-        };
-        self.apply_move(shift, nc);
-    }
-
-    // Ctrl+← / Ctrl+Shift+←：按词向左移动光标。
-    fn move_word_left(&mut self, shift: bool) {
-        let nc = word_floor(&self.sql, self.cursor);
-        self.apply_move(shift, nc);
-    }
-
-    fn move_word_right(&mut self, shift: bool) {
-        let nc = word_ceil(&self.sql, self.cursor);
-        self.apply_move(shift, nc);
-    }
-
-    fn move_home(&mut self, shift: bool) {
-        let nc = line_bounds(&self.sql, self.cursor).0;
-        self.apply_move(shift, nc);
-    }
-
-    fn move_end(&mut self, shift: bool) {
-        let nc = line_bounds(&self.sql, self.cursor).1;
-        self.apply_move(shift, nc);
-    }
-
-    // 跨行上下移动：保持字符列，越界钳到新行行尾。
-    fn move_up(&mut self, shift: bool) {
-        let (start, _) = line_bounds(&self.sql, self.cursor);
-        let nc = if start == 0 {
-            start
-        } else {
-            let col = self.sql[start..self.cursor].chars().count();
-            let (ps, pe) = line_bounds(&self.sql, start - 1);
-            ps + col_to_byte(&self.sql[ps..pe], col)
-        };
-        self.apply_move(shift, nc);
-    }
-
-    fn move_down(&mut self, shift: bool) {
-        let (start, end) = line_bounds(&self.sql, self.cursor);
-        let nc = if end >= self.sql.len() {
-            end
-        } else {
-            let col = self.sql[start..self.cursor].chars().count();
-            let (ns, ne) = line_bounds(&self.sql, end + 1);
-            ns + col_to_byte(&self.sql[ns..ne], col)
-        };
-        self.apply_move(shift, nc);
-    }
-
-    pub(crate) fn select_all(&mut self) {
-        self.sql_anchor = Some(0);
-        self.cursor = self.sql.len();
-    }
-
-    fn copy_selection(&self, cx: &mut Context<Self>) {
-        if let Some((s, e)) = self.sel_range() {
-            let text = self.sql[s..e].to_string();
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-        }
-    }
-
-    fn cut_selection(&mut self, cx: &mut Context<Self>) {
-        self.copy_selection(cx);
-        if self.sel_range().is_some() {
-            self.push_undo();
-            self.delete_selection();
-        }
-    }
-
-    pub(crate) fn on_input_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
-        let ks = &ev.keystroke;
-        if ks.modifiers.control || ks.modifiers.platform {
-            match ks.key.as_str() {
-                "v" => {
-                    if let Some(item) = cx.read_from_clipboard() {
-                        if let Some(text) = item.text() {
-                            self.insert_text(&text);
-                            cx.notify();
-                        }
-                    }
-                }
-                "c" => self.copy_selection(cx),
-                "x" => self.cut_selection(cx),
-                "a" => self.select_all(),
-                "z" => {
-                    if ks.modifiers.shift {
-                        self.sql_redo_step();
-                    } else {
-                        self.sql_undo_step();
-                    }
-                    cx.notify();
-                }
-                "y" => {
-                    self.sql_redo_step();
-                    cx.notify();
-                }
-                "left" => {
-                    self.move_word_left(ks.modifiers.shift);
-                    cx.notify();
-                }
-                "right" => {
-                    self.move_word_right(ks.modifiers.shift);
-                    cx.notify();
-                }
-                "p" => self.open_quick_switcher(cx),
-                "4" => self.open_compare(cx),
-                "e" if ks.modifiers.shift => self.run_explain(cx),
-                "enter" => self.run_query(cx),
-                _ => {}
-            }
-            return;
-        }
-        let shift = ks.modifiers.shift;
-        match ks.key.as_str() {
-            // Enter 执行、Shift+Enter 换行（与多数 SQL 客户端一致）。
-            "enter" => {
-                if shift {
-                    self.insert_text(self.newline_text());
-                    cx.notify();
-                } else {
-                    self.run_query(cx);
-                }
-                return;
-            }
-            // F9 执行计划、Esc 关闭计划浮层（与 TUI 键位对齐）。
-            "f9" => {
-                self.run_explain(cx);
-                return;
-            }
-            "escape" if self.explain.is_some() => {
-                self.explain = None;
-                cx.notify();
-                return;
-            }
-            "backspace" => self.backspace(),
-            "delete" => self.delete_forward(),
-            "left" => self.move_left(shift),
-            "right" => self.move_right(shift),
-            "up" => self.move_up(shift),
-            "down" => self.move_down(shift),
-            "home" => self.move_home(shift),
-            "end" => self.move_end(shift),
-            _ => {
-                if let Some(ch) = ks.key_char.as_deref() {
-                    if ch.chars().count() == 1 {
-                        self.insert_text(ch);
-                    }
-                }
-            }
-        }
-        cx.notify();
-    }
-
-    // 渲染 SQL：单一文本串（含 \n），在光标处插入 '▏'；返回 (显示文本, 选区显示坐标区间)。
-    pub(crate) fn sql_display(&self) -> (String, Vec<Range<usize>>) {
-        const CARET: char = '▏';
-        let clen = CARET.len_utf8();
-        let cur = char_ceil(&self.sql, self.cursor.min(self.sql.len()));
-        let mut disp = String::with_capacity(self.sql.len() + clen);
-        disp.push_str(&self.sql[..cur]);
-        disp.push(CARET);
-        disp.push_str(&self.sql[cur..]);
-        let mut ranges = Vec::new();
-        if let Some((s, e)) = self.sel_range() {
-            let sh = |x: usize| if x > cur { x + clen } else { x };
-            let (rs, re) = (sh(s), sh(e));
-            if rs < re {
-                ranges.push(rs..re);
-            }
-        }
-        (disp, ranges)
-    }
-
-    // 显示坐标下标（index_for_position 返回值）→ self.sql 字节下标（回退光标字符）。
-    fn display_to_sql(&self, d: usize) -> usize {
-        const CARET: char = '▏';
-        let clen = CARET.len_utf8();
-        let cur = char_ceil(&self.sql, self.cursor.min(self.sql.len()));
-        if d <= cur {
-            d
-        } else if d >= cur + clen {
-            d - clen
-        } else {
-            cur
-        }
-    }
-
-    // 鼠标按下：定位光标；双击选词；开始拖拽选区。
-    pub(crate) fn on_sql_mouse_down(
-        &mut self,
-        ev: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        window.focus(&self.focus);
-        let layout = self.sql_layout.clone();
-        let Some(layout) = layout else {
-            return;
-        };
-        let d = layout.index_for_position(ev.position).unwrap_or_else(|e| e);
-        let ix = self.display_to_sql(d);
-        if ev.click_count >= 2 {
-            if let Some((s, e)) = word_at(&self.sql, ix) {
-                self.cursor = e;
-                self.sql_anchor = Some(s);
-                self.sql_selecting = false;
-                cx.notify();
-                return;
-            }
-        }
-        self.cursor = ix;
-        self.sql_anchor = Some(ix);
-        self.sql_selecting = true;
-        cx.notify();
-    }
-
-    pub(crate) fn on_sql_mouse_move(&mut self, ev: &MouseMoveEvent, cx: &mut Context<Self>) {
-        if !self.sql_selecting {
-            return;
-        }
-        let layout = self.sql_layout.clone();
-        let Some(layout) = layout else {
-            return;
-        };
-        let d = layout.index_for_position(ev.position).unwrap_or_else(|e| e);
-        let ix = self.display_to_sql(d);
-        if ix != self.cursor {
-            self.cursor = ix;
-            cx.notify();
-        }
-    }
-
-    pub(crate) fn on_sql_mouse_up(&mut self, _ev: &MouseUpEvent, cx: &mut Context<Self>) {
-        if self.sql_selecting {
-            self.sql_selecting = false;
-            cx.notify();
-        }
-    }
-
     // ─── G5.3 Quick Switcher（Ctrl+P：在打开的对象标签间跳转）───
 
     pub(crate) fn open_quick_switcher(&mut self, cx: &mut Context<Self>) {
@@ -3710,34 +3336,50 @@ impl PolyDBApp {
     }
 
     /// 匹配列表：(目标, 标签文本)。含工作台 + 已打开 tab + 当前 schema 下未打开的表。
-    /// query 大小写不敏感子串过滤；空 query 列全部。
+    /// query 以 `>` 开头进入命令模式，仅列出命令；否则对象与命令合并（命令项带 `> ` 前缀）。
+    /// 大小写不敏感子串过滤；空 query 列全部。
     pub(crate) fn quick_matches(&self) -> Vec<(QuickTarget, String)> {
         let q = self.quick_query.trim().to_lowercase();
+        let command_mode = self.quick_query.starts_with('>');
         let mut all: Vec<(QuickTarget, String)> = Vec::new();
-        all.push((QuickTarget::Workbench, "SQL 工作台".to_string()));
-        for (i, t) in self.tabs.iter().enumerate() {
-            all.push((QuickTarget::Tab(i), format!("{}.{}", t.schema, t.table)));
+        if !command_mode {
+            all.push((QuickTarget::Workbench, "SQL 工作台".to_string()));
+            for (i, t) in self.tabs.iter().enumerate() {
+                all.push((QuickTarget::Tab(i), format!("{}.{}", t.schema, t.table)));
+            }
+            let open: std::collections::HashSet<String> = self
+                .tabs
+                .iter()
+                .map(|t| tabs::table_key(&t.schema, &t.table))
+                .collect();
+            for tb in &self.tables {
+                let key = tabs::table_key(&tb.schema, &tb.name);
+                if open.contains(&key) {
+                    continue;
+                }
+                all.push((
+                    QuickTarget::NewTable(tb.schema.clone(), tb.name.clone()),
+                    key,
+                ));
+            }
         }
-        let open: std::collections::HashSet<String> = self
-            .tabs
-            .iter()
-            .map(|t| tabs::table_key(&t.schema, &t.table))
-            .collect();
-        for tb in &self.tables {
-            let key = tabs::table_key(&tb.schema, &tb.name);
-            if open.contains(&key) {
+        let connected = self.workspace.is_some();
+        for (id, label, need_conn) in QUICK_COMMANDS {
+            if *need_conn && !connected {
                 continue;
             }
-            all.push((
-                QuickTarget::NewTable(tb.schema.clone(), tb.name.clone()),
-                key,
-            ));
+            all.push((QuickTarget::Command((*id).to_string()), format!("> {label}")));
         }
         if q.is_empty() {
             all
         } else {
+            let needle = if command_mode {
+                q.trim_start_matches('>').trim().to_string()
+            } else {
+                q
+            };
             all.into_iter()
-                .filter(|(_, label)| label.to_lowercase().contains(&q))
+                .filter(|(_, label)| label.to_lowercase().contains(&needle))
                 .collect()
         }
     }
@@ -3752,7 +3394,12 @@ impl PolyDBApp {
         self.quick_sel = ((cur + delta + n as isize) % n as isize) as usize;
     }
 
-    pub(crate) fn quick_activate(&mut self, target: QuickTarget, cx: &mut Context<Self>) {
+    pub(crate) fn quick_activate(
+        &mut self,
+        target: QuickTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match target {
             QuickTarget::Workbench => self.active = ActiveView::Workbench,
             QuickTarget::Tab(i) => self.active = ActiveView::Table(i),
@@ -3761,12 +3408,42 @@ impl PolyDBApp {
                 cx.notify();
                 return;
             }
+            QuickTarget::Command(id) => {
+                self.run_quick_command(&id, window, cx);
+                // run_quick_command 内已按需 cx.notify / 关闭面板。
+                return;
+            }
         }
         self.quick_open = false;
         cx.notify();
     }
 
-    pub(crate) fn on_quick_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+    /// 命令面板派发：根据命令 id 调用既有方法。
+    fn run_quick_command(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        match id {
+            "run" => self.run_query(cx),
+            "explain" => self.run_explain(cx),
+            "refresh" => self.refresh(cx),
+            "disconnect" => self.disconnect(cx),
+            "connect" => {
+                self.close_quick_switcher();
+                self.open_conn_new(window, cx);
+                return;
+            }
+            "compare" => self.open_compare(cx),
+            "workbench" => self.active = ActiveView::Workbench,
+            _ => {}
+        }
+        self.quick_open = false;
+        cx.notify();
+    }
+
+    pub(crate) fn on_quick_key(
+        &mut self,
+        ev: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let ks = &ev.keystroke;
         if ks.modifiers.control || ks.modifiers.platform {
             match ks.key.as_str() {
@@ -3788,7 +3465,7 @@ impl PolyDBApp {
                 let matches = self.quick_matches();
                 if let Some((target, _)) = matches.get(self.quick_sel) {
                     let target = target.clone();
-                    self.quick_activate(target, cx);
+                    self.quick_activate(target, window, cx);
                 }
                 return;
             }

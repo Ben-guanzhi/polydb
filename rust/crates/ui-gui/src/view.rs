@@ -24,6 +24,9 @@ mod dialogs;
 mod grid;
 mod redis;
 mod shell;
+pub(crate) mod sql_editor;
+pub(crate) mod tables_tree;
+pub(crate) mod ai_panel;
 mod table;
 
 // 网格作用域 → 稳定元素 id 基数（workbench 与每个表 tab 的 id 空间隔离）。
@@ -62,11 +65,11 @@ fn badge(label: impl Into<SharedString>, fg: gpui::Rgba, th: &Theme) -> Div {
 impl Render for PolyDBApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.quick_open {
-            window.focus(&self.quick_focus);
+            window.focus(&self.quick_focus, cx);
         }
         if self.compare.is_some() {
-            window.focus(&self.cmp_focus);
+            window.focus(&self.cmp_focus, cx);
         }
-        self.render_root(cx)
+        self.render_root(window, cx)
     }
 }

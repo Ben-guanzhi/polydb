@@ -7,6 +7,7 @@
 //! Ctrl+V 粘贴）+ 结果网格（左键预览、右键菜单、文本/JSON/HEX 面板）。
 
 mod app;
+mod ai;
 mod changes;
 mod cmpsync;
 mod explain;
@@ -22,13 +23,16 @@ mod view;
 use std::sync::Arc;
 
 use gpui::*;
+use gpui_platform::application;
 use polydb_transport::Transport;
 
 use app::PolyDBApp;
 
 pub fn run(transport: Arc<dyn Transport>) {
-    let app = Application::new();
+    let app = application();
     app.run(move |cx: &mut App| {
+        gpui_component::init(cx);
+        gpui_component::theme::init(cx);
         let bounds = Bounds::centered(
             None,
             Size {

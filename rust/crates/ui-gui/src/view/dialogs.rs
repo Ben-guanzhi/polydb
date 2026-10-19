@@ -140,8 +140,8 @@ impl PolyDBApp {
                     .text_color(th.fg)
                     .text_size(px(13.0))
                     .child(format!("{prefix}{label}"))
-                    .on_click(cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
-                        this.quick_activate(tgt.clone(), cx);
+                    .on_click(cx.listener(move |this, _ev: &ClickEvent, window, cx| {
+                        this.quick_activate(tgt.clone(), window, cx);
                     }))
                     .into_any_element()
             })
@@ -190,8 +190,8 @@ impl PolyDBApp {
                         .bg(th.bg_alt)
                         .track_focus(&self.quick_focus)
                         .key_context("QuickSwitcher")
-                        .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _window, cx| {
-                            this.on_quick_key(ev, cx);
+                        .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                            this.on_quick_key(ev, window, cx);
                         }))
                         .on_click(cx.listener(|_this, _ev: &ClickEvent, _window, cx| {
                             cx.stop_propagation();
