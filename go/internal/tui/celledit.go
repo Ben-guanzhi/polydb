@@ -148,6 +148,60 @@ func commitCellEdit(ctx AppContext, pe PendingEdit) tea.Cmd {
 	}
 }
 
+// commitQueue 把队列里累积的编辑整批提交：语句由 pkg/changes 生成（SQL 生成
+// 不散落在 UI 层，AGENTS.md §12），再在一个事务里依次跑完 —— 要么全成、
+// 要么全回滚，不会留下半数生效的编辑。
+//
+// 返回实际执行的语句数。后端不支持事务时逐条执行并沿用原来的非原子语义：
+// 不支持不是错误，绝不让提交功能挂掉（失败的那条会中断后续，队列不清空）。
+func commitQueue(be backend.Backend, ns, table, schema string, q *changes.Queue) (int, error) {
+	if q == nil || q.Size() == 0 {
+		return 0, nil
+	}
+	pks, err := be.PrimaryKeys(ns, table)
+	if err != nil {
+		return 0, err
+	}
+	if len(pks) == 0 {
+		return 0, fmt.Errorf("no primary key, cannot commit edits")
+	}
+	kind := protocol.DatabaseKind(be.Kind())
+	stmts := changes.BuildStatements(q.All(), schema, table, pks, kind)
+	if len(stmts) == 0 {
+		return 0, nil
+	}
+
+	tx, ok := be.(backend.TxRunner)
+	if !ok {
+		for _, s := range stmts {
+			// Statement.SQL 的字面量已内联（Review 预览同款）；参数化版本是
+			// ParamSQL，等 ExecuteInTx 支持参数后再切过去。
+			if _, err := be.Run(s.SQL); err != nil {
+				return 0, err
+			}
+		}
+		q.Clear()
+		return len(stmts), nil
+	}
+
+	id, err := tx.Begin()
+	if err != nil {
+		return 0, err
+	}
+	for _, s := range stmts {
+		if _, err := tx.ExecuteInTx(id, s.SQL); err != nil {
+			_ = tx.Rollback(id)
+			return 0, err
+		}
+	}
+	if err := tx.Commit(id); err != nil {
+		_ = tx.Rollback(id)
+		return 0, err
+	}
+	q.Clear()
+	return len(stmts), nil
+}
+
 // runInTx 在事务里跑一条写语句：成功才提交，任一步失败都回滚，保证编辑是
 // 原子的（要么全成、要么全不改），而不是半途生效。
 //

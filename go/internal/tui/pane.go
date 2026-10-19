@@ -4,6 +4,7 @@ import (
 	"sync/atomic"
 
 	"github.com/polydb/polydb/internal/tuidata"
+	"github.com/polydb/polydb/pkg/changes"
 )
 
 // ViewMode selects what the pane body shows.
@@ -54,8 +55,12 @@ type Pane struct {
 	SheetFiltering bool
 	// JsonViewOff is the scroll offset when viewing a row as JSON.
 	JsonViewOff int
+	// EditQueue 累积该标签尚未提交的编辑（pkg/changes 队列）。提交时由
+	// commitQueue 整批生成语句并在一个事务里跑完。nil 表示暂无待提交编辑。
+	EditQueue *changes.Queue
 
-	ColZoomed      bool  // true when user zoomed into a single column via z key
+	// ColZoomed is true when the user zoomed into a single column via z key.
+	ColZoomed      bool
 	savedTableCols []int // TableCols saved before zoom, restored on exit
 	savedColCursor int   // colCursor saved before zoom, restored on exit
 	// TableCols, when non-nil, restricts which columns the table view renders.
@@ -68,6 +73,15 @@ type Pane struct {
 
 // paneIDCounter hands out stable unique pane IDs (see Pane.ID).
 var paneIDCounter atomic.Int64
+
+// EnsureEditQueue 返回该标签的编辑队列，首次调用时创建（大多数标签从不编辑，
+// 不值得在构造时就背上这个开销）。
+func (p *Pane) EnsureEditQueue() *changes.Queue {
+	if p.EditQueue == nil {
+		p.EditQueue = changes.New()
+	}
+	return p.EditQueue
+}
 
 // NewPane creates a pane with a base frame.
 func NewPane(title string, f *tuidata.Frame) *Pane {
