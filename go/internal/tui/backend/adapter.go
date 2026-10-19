@@ -57,6 +57,22 @@ func (a *Adapter) Run(stmt string) (Result, error) {
 	return resultFromQuery(res), nil
 }
 
+// RunQuery 实现 backend.Canceller：同 Run，但带上客户端预分配的 queryID，
+// 使执行期间的 Cancel 能在服务端 in-flight registry 命中。
+func (a *Adapter) RunQuery(queryID, stmt string) (Result, error) {
+	res, err := a.cli.ExecuteQuery(context.Background(), queryID, a.connID, stmt)
+	if err != nil {
+		return Result{}, err
+	}
+	return resultFromQuery(res), nil
+}
+
+// Cancel 实现 backend.Canceller：请求取消在途查询。Local 没有服务端 registry，
+// 恒返回 (false, nil) —— 未命中不是错误，调用方据此在状态栏标注。
+func (a *Adapter) Cancel(queryID string) (bool, error) {
+	return a.cli.CancelQuery(context.Background(), queryID)
+}
+
 // Namespaces 实现 Backend。
 func (a *Adapter) Namespaces() ([]string, error) {
 	schemas, err := a.cli.ListSchemas(context.Background(), a.connID)

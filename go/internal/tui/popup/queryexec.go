@@ -14,9 +14,11 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/google/uuid"
 	"github.com/polydb/polydb/internal/complete"
 	"github.com/polydb/polydb/internal/theme"
 	"github.com/polydb/polydb/internal/tui"
+	"github.com/polydb/polydb/internal/tui/backend"
 	"github.com/polydb/polydb/internal/tuidata"
 	"github.com/polydb/polydb/pkg/changes"
 	"github.com/polydb/polydb/pkg/protocol"
@@ -31,20 +33,34 @@ type qxExecInfo struct {
 // database backend takes precedence (database mode), otherwise the embedded
 // engine (file mode). Exactly one of frame/info is non-nil on success.
 func qxRun(ctx tui.AppContext, sqlText string) (*tuidata.Frame, *qxExecInfo, error) {
-	if be := ctx.Backend(); be != nil {
-		res, err := be.Run(sqlText)
-		if err != nil {
-			return nil, nil, err
-		}
-		if res.Frame != nil {
-			return res.Frame, nil, nil
-		}
-		if res.Exec != nil {
-			return nil, &qxExecInfo{rowsAffected: res.Exec.RowsAffected}, nil
-		}
-		return nil, &qxExecInfo{}, nil
+	be := ctx.Backend()
+	if be == nil {
+		return nil, nil, fmt.Errorf("no database connection available")
 	}
-	return nil, nil, fmt.Errorf("no database connection available")
+	var (
+		res backend.Result
+		err error
+	)
+	// 可取消的后端走 ExecuteQuery（带客户端预分配的 queryID），F8 才能凭该 ID
+	// 让服务端中止它；不支持取消的后端退回原来的 Run。
+	if c, ok := be.(backend.Canceller); ok {
+		qid := uuid.NewString()
+		tui.SetInFlightQuery(qid)
+		defer tui.ClearInFlightQuery(qid)
+		res, err = c.RunQuery(qid, sqlText)
+	} else {
+		res, err = be.Run(sqlText)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if res.Frame != nil {
+		return res.Frame, nil, nil
+	}
+	if res.Exec != nil {
+		return nil, &qxExecInfo{rowsAffected: res.Exec.RowsAffected}, nil
+	}
+	return nil, &qxExecInfo{}, nil
 }
 
 // qxRunCmd wraps qxRun in a tea.Cmd, mapping the outcome to app messages:

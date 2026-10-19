@@ -803,6 +803,9 @@ func (a *App) dispatch(action, key string) tea.Cmd {
 		// Handled before the pane check: on an empty db-mode workspace esc
 		// reopens the connection form.
 		return a.escBack()
+	case ActCancelQuery:
+		// F8：取消在途查询。Local 模式没有服务端 registry，会提示未命中。
+		return CancelInFlightQuery(a)
 	}
 
 	if p == nil || f == nil {

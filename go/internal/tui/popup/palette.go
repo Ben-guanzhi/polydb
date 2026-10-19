@@ -33,10 +33,9 @@ var Commands = []Command{
 	{Name: "info", Aliases: nil, Description: "table info and column stats"},
 	{Name: "export", Aliases: nil, Description: "export current frame to a file"},
 	{Name: "import", Aliases: nil, Description: "import a data file as a new tab"},
-	{Name: "cast", Aliases: nil, Description: "cast a column to another type"},
+	// cast / histogram / scatterplot 曾属于已砍掉的文件模式（plot 图表），
+	// 没有对应的工厂，列在面板里是点开即死的孤儿命令 —— 移除。
 	{Name: "register", Aliases: nil, Description: "register current frame as a SQL table"},
-	{Name: "histogram", Aliases: nil, Description: "build a histogram of a column"},
-	{Name: "scatterplot", Aliases: nil, Description: "build a scatter plot of two columns"},
 	{Name: "edit", Aliases: nil, Description: "edit frame in $EDITOR, reimport on save"},
 	{Name: "format", Aliases: nil, Description: "beautify SQL in the editor"},
 	{Name: "theme", Aliases: []string{"themeselector"}, Description: "theme selector with live preview"},

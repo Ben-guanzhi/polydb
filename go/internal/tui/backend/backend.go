@@ -63,6 +63,24 @@ type Backend interface {
 	Close() error
 }
 
+// Canceller is an optional Backend capability: run a statement under a
+// client-assigned queryID so an in-flight query can be aborted (F8).
+//
+// It is deliberately separate from Backend because not every transport can
+// cancel: pkg/transport's Local has no server-side in-flight registry, so
+// Cancel there always reports "not hit" and cancellation is really the
+// caller cancelling its own context. The UI probes with a type assertion and
+// falls back to a plain Run when the backend does not implement it.
+type Canceller interface {
+	// RunQuery runs stmt under queryID (a UUID). The ID is what Cancel later
+	// presents to the server; see transport.Client.ExecuteQuery.
+	RunQuery(queryID, stmt string) (Result, error)
+	// Cancel asks to abort the query running under queryID. The bool reports
+	// whether the server had it in flight; a false with nil error means
+	// "nothing to cancel" (best-effort, behavior.md §2.2) — not a failure.
+	Cancel(queryID string) (bool, error)
+}
+
 // KVBackend is a live key-value store connection (Redis).
 type KVBackend interface {
 	// Title is a short human label for the connection.

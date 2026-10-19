@@ -204,7 +204,7 @@ type RenderOpts struct {
 	HighlightCols []int
 	// HScroll is the character-level horizontal scroll offset applied to the
 	// last visible column. Used when TableCols is set to let the user pan
-	// within a single wide column (e.g. OpenObserve body) with h/l keys.
+	// within a single wide column (e.g. a wide log body) with h/l keys.
 	HScroll int
 }
 
@@ -433,7 +433,7 @@ func (tv *TableView) Render(f *tuidata.Frame, o RenderOpts) string {
 		return blankLines(o.Width, o.Height, th)
 	}
 	// Find severity column in the ORIGINAL frame before sub-framing.
-	// When TableCols is set (e.g. OpenObserve summary view), severity is not in
+	// When TableCols is set (e.g. a column-subset summary view), severity is not in
 	// the sub-frame so we must look it up from the original frame.
 	severityOrigColIdx := -1
 	if o.SeverityCol != "" {
@@ -622,7 +622,7 @@ func (tv *TableView) Render(f *tuidata.Frame, o RenderOpts) string {
 
 	tv.visCount = len(cols)
 
-	// When a column subset is active (e.g. OpenObserve timestamp+body),
+	// When a column subset is active (e.g. timestamp+body),
 	// stretch the last column to fill all remaining terminal space so the
 	// content is visible. Character-level left/right scroll (HScroll) is
 	// applied per cell below, not here.
