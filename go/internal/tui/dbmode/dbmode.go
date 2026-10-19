@@ -39,6 +39,9 @@ func RegisterFactories() {
 		tui.Factories["opentable"] = openTableFactory
 	})
 
+	// "blob": 取回单元格里 $polydb_blob 引用的内容（见 blob.go）。
+	tui.Factories["blob"] = blobFactory
+
 	tui.Factories["connect"] = func(ctx tui.AppContext, arg string) (tui.Overlay, error) {
 		return newConnPicker(ctx), nil
 	}

@@ -81,6 +81,18 @@ type Canceller interface {
 	Cancel(queryID string) (bool, error)
 }
 
+// Blobber is an optional Backend capability: fetch the content behind a
+// $polydb_blob reference (spec/encoding.md §5.2 — large values are stored
+// out of band and the cell only carries the reference).
+//
+// Optional for the same reason as Canceller: it is a transport-level
+// convenience (Client.GetBlob), not something every backend can promise.
+type Blobber interface {
+	// FetchBlob returns the bytes stored under blobID, which is the full
+	// reference string ($polydb_blob:<uuid>).
+	FetchBlob(blobID string) ([]byte, error)
+}
+
 // KVBackend is a live key-value store connection (Redis).
 type KVBackend interface {
 	// Title is a short human label for the connection.
