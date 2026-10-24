@@ -24,6 +24,7 @@ mod dialogs;
 mod grid;
 mod redis;
 mod shell;
+pub(crate) mod sql_completion;
 pub(crate) mod sql_editor;
 pub(crate) mod tables_tree;
 pub(crate) mod ai_panel;

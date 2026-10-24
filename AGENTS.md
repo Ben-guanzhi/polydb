@@ -42,7 +42,7 @@ text
 5. 密码**只**经 `keyring`（OS 凭据管理器优先，加密文件 `keyring.bin` 兜底），明文密码永不下发、永不在 DTO 中往返（`password` 字段仅创建/更新时一次性接受并由服务端写入 keyring）。
 6. **契约优先**：任何接口/字段变更须先改 `spec/` 再改代码；合并前**必须**跑 `tools/genprotocol` 四门禁（`ts --check` / `check` / `ops` / `docs`），漂移即拦截。
 7. **MCP 以 Go 端 `go/pkg/mcp` + `cmd/polydb-mcp` 为唯一实现**（stdio JSON-RPC，只读工具集，符合只读安全模型）；dbstudio 的 Rust `crates/mcp` 为冗余实现，**不并入**。
-8. **dbstudio 能力并入须先扩 spec 再改代码**；Rust GUI 端回填统一走 `rust/crates/ui-gui` + `apps/polydb-gui`，密码层复用 `rust/crates/storage/src/keyring.rs`（禁止各项目自带 keyring 实现）。
+8. **dbstudio 能力并入须先扩契约再改代码**——落点按性质分：触及 wire/DTO 的进 `spec/`（走第 6 条四门禁）；纯 UI/跨端行为进 `docs/frontends.md` 的 A/D 系列节（A2 连接表单、A3 键位与 Vim、A4 结构编辑边界，2026-10-24 起生效）。Rust GUI 端回填统一走 `rust/crates/ui-gui` + `apps/polydb-gui`，密码层复用 `rust/crates/storage/src/keyring.rs`（禁止各项目自带 keyring 实现）。
 
 ---
 

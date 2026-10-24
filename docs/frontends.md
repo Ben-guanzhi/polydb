@@ -195,6 +195,61 @@ polydb 有多个前端，均遵守 AGENTS.md 铁律：**只经 `app-core`（进�
   **零前端改动**就三端同时生效——这条是"警告数组是数据、不是 UI 文案"这一设计的直接兑现。
   口径要点：警告按**被执行那一侧**的快照出，所以回滚脚本描述的是回滚真正要动的库（见 `spec/behavior.md` §15.8）。
 
+## 连接表单与凭据（A2，三端一致，dbstudio 回填契约）
+
+> A 系列 = dbstudio 能力回填的契约面（A1 = 编辑器/Vim/对象树/命令面板/AI 面板移植，已完成）。
+> 本节是"先扩契约再改代码"铁律在 UI 能力上的落点：wire 触及的仍以 `spec/schemas/connection.json`
+> 为唯一字段真相，本节只锁**表单行为**，不复制 schema。
+
+- **字段面不发明**：表单字段 ⊆ `CreateConnectionRequest`（name/kind 必填；host/port/database/
+  username；`options` 透传 sslmode/charset 等驱动参数；`ssh_tunnel` 全套；`default_schema`；
+  `read_only`；`group`/`color`）。要新字段先改 schema 过四方门禁，再动表单。
+- **密码红线（三端一致）**：编辑已有连接时明文**永不回显**——wire 上只有 `password_ref`
+  （keyring 引用）；仅当用户输入新密码，才随 update 发一次性 `password`，服务端写入 keyring
+  后不再存储也不再返回（`spec/behavior.md` §8）。表单回填时密码框留空即"不修改"。
+- **SSL 走 options**：不设独立 ssl 字段；表单按 kind 提供 sslmode 建议值下拉
+  （postgres: disable/require/verify-ca/verify-full；mysql: DISABLED/PREFERRED/REQUIRED/VERIFY_CA/VERIFY_IDENTITY），
+  实际值仍是 `options` 里的字符串。
+- **环境徽标约定（自 dbstudio 收敛）**：dev/staging/prod 分级以 `group` 承载（wire 无 env 字段，
+  不为此新增）；`color` 渲染为连接列表色点。
+- **read_only 语义**：开关只影响服务端行为（写语句与 KV 写以 `POLYDB_ERR_READ_ONLY` 拒绝，
+  behavior.md §12）；UI 不做写操作预检，以服务端裁决为准。
+- **现状矩阵**（差异不算漂移，但改矩阵必须同步本节）：
+  | 能力 | GUI（ConnForm） | Web | TUI（dbmode） |
+  |---|---|---|---|
+  | 基础字段 + group/color/read_only | ✅ | ✅ | ✅ |
+  | SSH 隧道全套 | ✅ | ✅ | ✅ |
+  | options（sslmode 等）建议值下拉 | 待补 | ✅ | 待补 |
+  | default_schema | 待补 | ✅ | 待补 |
+- **SSH 边界知识**：隧道实现/TOFU 的唯一文档是 `docs/ssh-tunnel.md`（TOFU 判定见
+  `spec/behavior.md` §9）；dbstudio 的 KeyChanged 拒绝语义与隧道生命周期已并入该文。
+
+## 键位与 Vim（A3，三端边界）
+
+- **Vim 引擎单一事实源**：Rust GUI 的 Vim = `rust/crates/vim`（自 dbstudio
+  `crates/ui/src/components/vim.rs` 1:1 移植，UI-free 纯文本层）。模式集
+  （Normal/Insert/VisualChar/VisualLine/VisualBlock）、motions、操作符与寄存器清单
+  **以该 crate 的测试为准**，本节不复抄——复抄即制造第二份会漂移的真相。
+- **GUI**：Vim 默认关，编辑器工具栏开关；开启时 `capture_key_down` 先经引擎，引擎不吃的键
+  交还原生编辑器（插入态输入等）。**补全触发语义**（自 dbstudio `sql_completion.rs` 移植锁定）：
+  仅字母/下划线字符触发；词中（前一字符是标识符字符）不触发；前缀过滤大小写不敏感；
+  单次最多 10 条；schema 表/列由宿主注入（表 = CLASS、列 = FIELD）。测试
+  `view/sql_completion.rs`。
+- **TUI**：键位权威表 = 本文件 TUI 节 + 程序内 F1；不引入 Vim。
+- **Web**：Monaco 自带键位；不引入 Vim。
+- **跨端原则**：Vim 是 GUI 编辑器专属能力，其余两端不复制引擎；任何端新增全局快捷键，
+  先落本节再写代码。
+
+## 结构编辑读写边界（A4，三端红线）
+
+- **结构 rail 只读**：GUI 的结构视图（表/列/索引/外键/DDL 展示）不提供就地编辑。
+  DDL 展示走 `get_create_table_sql`（`spec/behavior.md` §15）只读渲染。
+- **结构修改的唯一路径 = compare/sync 管线**：§14 快照比对 → 勾选条目 → §15 DDL 生成 →
+  事务执行。Web 的 `TableStructureEditor`（M16）产出的同样是 diff entries 进同一管线。
+  **任何前端不得自行拼 ALTER 绕过管线**——未经 §15.10 向量锁对账的 DDL 是双实现漂移的源头。
+- **GUI 未来结构编辑** = 复用 cmpsync 向导（E6.3 的零 gpui 纯层），不新造就地编辑路径；
+  落地时先扩本节，再动 `crates/ui-gui`。
+
 ## 已知未验证项
 
 - 阶段 A–D 收口时的契约对拍（2026-09-25）为 `51 RUN / 51 PASS / 0 SKIP / 0 FAIL`，但其中
