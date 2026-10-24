@@ -395,6 +395,12 @@ pub(crate) struct CompareState {
     pub(crate) confirming: bool,
     pub(crate) confirm_buf: String,
     pub(crate) confirm_cursor: usize,
+    /// A4 锚定表（schema, table）：Review 步只显示该表的差异条目。锚定是
+    /// **过滤与预选**，服务端不知晓；全量计划保留在 `all_entries`，解除锚定
+    /// 即恢复全量并按服务端默认重算勾选。
+    pub(crate) anchor: Option<(String, String)>,
+    /// 本次比对的全部条目（锚定过滤前的原样计划）。
+    pub(crate) all_entries: Vec<SchemaDiffEntry>,
 }
 
 /// 列表高亮移动（`delta` 为 ±1，越界回绕，与 TUI/GUI 其它列表一致）。
@@ -428,7 +434,44 @@ impl CompareState {
             confirming: false,
             confirm_buf: String::new(),
             confirm_cursor: 0,
+            anchor: None,
+            all_entries: Vec::new(),
         }
+    }
+
+    /// A4 锚定：把 Review 步定界到一张表。比对尚未发生时只记录锚，
+    /// `finish_diff` 会带锚过滤。
+    pub(crate) fn anchor_to(&mut self, schema: &str, table: &str) {
+        self.anchor = Some((schema.to_string(), table.to_string()));
+        if !self.all_entries.is_empty() {
+            self.apply_anchor();
+        }
+    }
+
+    /// 解除锚定：恢复全量条目并按服务端默认重算勾选（锚定视图里的手动
+    /// 勾选不保留——视图变了，默认重来最可预期；生成前有缺口提示兜底）。
+    pub(crate) fn clear_anchor(&mut self) {
+        self.anchor = None;
+        if !self.all_entries.is_empty() {
+            self.apply_anchor();
+        }
+    }
+
+    /// 按 anchor 把 `all_entries` 过滤进 `entries`，重算默认勾选、缺口与
+    /// 高亮。`sel` 用服务端 `e.selected` 计划（非破坏性预选），锚定与否同规。
+    fn apply_anchor(&mut self) {
+        self.entries = match &self.anchor {
+            Some((_, table)) => self
+                .all_entries
+                .iter()
+                .filter(|e| e.table == *table)
+                .cloned()
+                .collect(),
+            None => self.all_entries.clone(),
+        };
+        self.sel = default_selection(&self.entries);
+        self.entry_cur = 0;
+        self.recalc_gaps();
     }
 
     pub(crate) fn recalc_gaps(&mut self) {
@@ -471,17 +514,21 @@ impl CompareState {
     }
 
     /// 比对回来：勾选集由服务端给的计划重算（客户端不缓存），并把文案算好。
+    /// 锚定时只显示锚定表的条目（A4），全量计划留在 `all_entries`。
     pub(crate) fn finish_diff(&mut self, entries: Vec<SchemaDiffEntry>) -> String {
         self.loading = false;
-        self.entries = entries;
-        self.sel = default_selection(&self.entries);
-        self.entry_cur = 0;
+        self.all_entries = entries;
+        self.apply_anchor();
         self.script = None;
         self.applied = false;
-        self.recalc_gaps();
         self.step = CmpStep::Review;
         if self.entries.is_empty() {
-            "两侧结构一致，无需同步".into()
+            if self.anchor.is_some() && !self.all_entries.is_empty() {
+                let (_, table) = self.anchor.as_ref().unwrap();
+                format!("锚定表 {table} 无差异（按 u 解除锚定看全量）")
+            } else {
+                "两侧结构一致，无需同步".into()
+            }
         } else {
             self.review_status()
         }
@@ -504,6 +551,13 @@ impl CompareState {
             self.sel.len(),
             destruct
         );
+        if let Some((schema, table)) = &self.anchor {
+            s += &format!(
+                " · 锚定 {schema}.{table}（{}/{}，按 u 解除）",
+                self.entries.len(),
+                self.all_entries.len()
+            );
+        }
         if let Some(g) = self.gaps.first() {
             s += &format!(" · ⚠ 重建表 {} 未整组勾选（按 f 补齐）", g.table);
         }
@@ -759,6 +813,8 @@ pub(crate) enum CmpAction {
         only_safe: bool,
     },
     FillGaps,
+    /// `u`：解除锚定（Review 步，A4）
+    ClearAnchor,
     Generate,
     Apply,
     StartConfirm,
@@ -789,6 +845,7 @@ pub(crate) fn key_action(step: CmpStep, loading: bool, key: &str) -> CmpAction {
         (CmpStep::Review, "a") => CmpAction::SelectAll { only_safe: true },
         (CmpStep::Review, "A") => CmpAction::SelectAll { only_safe: false },
         (CmpStep::Review, "f") => CmpAction::FillGaps,
+        (CmpStep::Review, "u") => CmpAction::ClearAnchor,
         (CmpStep::Review, "r") => CmpAction::RunDiff,
         (CmpStep::Review, "g") => CmpAction::Generate,
         // ④ 步的执行/回滚/复查/重新生成在途时一律吞掉（其余步的同类键自己带 loading 门禁）。
@@ -1492,6 +1549,7 @@ mod tests {
             SelectAll { only_safe: false }
         );
         assert_eq!(key_action(CmpStep::Review, false, "f"), FillGaps);
+        assert_eq!(key_action(CmpStep::Review, false, "u"), ClearAnchor);
         assert_eq!(key_action(CmpStep::Review, false, "r"), RunDiff);
         assert_eq!(key_action(CmpStep::Review, false, "g"), Generate);
         assert_eq!(key_action(CmpStep::Apply, false, "x"), Apply);
@@ -1508,6 +1566,41 @@ mod tests {
         // 没定义的键不产生动作。
         assert_eq!(key_action(CmpStep::Review, false, "z"), Nothing);
         assert_eq!(key_action(CmpStep::Apply, false, "a"), Nothing);
+    }
+
+    /// A4 锚定：Review 只见锚定表、默认勾选按服务端计划重算、解除即回全量。
+    #[test]
+    fn anchor_filters_reviews_and_clear_restores_full_plan() {
+        let (src, tgt) = (ConnectionId::new_v4(), ConnectionId::new_v4());
+        let mut s = CompareState::new(src, 0);
+        s.goto_target(src, "a");
+        s.tgt = Some(tgt);
+
+        let mut t_add = entry("t/a/add_column", AddColumn, 60, "t");
+        t_add.selected = true;
+        let t_drop = entry("t/x/drop_column", DropColumn, 60, "t"); // 破坏性，默认不勾
+        let mut u_add = entry("u/b/add_column", AddColumn, 60, "u");
+        u_add.selected = true;
+
+        // 比对前锚定：finish_diff 带锚过滤。
+        s.anchor_to("main", "t");
+        let status = s.finish_diff(vec![t_add, t_drop, u_add]);
+        assert_eq!(s.entries.len(), 2, "只显示锚定表 t 的条目");
+        assert_eq!(s.all_entries.len(), 3, "全量计划保留");
+        assert_eq!(s.sel, vec!["t/a/add_column".to_string()], "服务端 selected 重放");
+        assert!(status.contains("锚定 main.t"), "状态行报锚定：{status}");
+
+        // 解除锚定：恢复全量 + 默认勾选重算。
+        s.clear_anchor();
+        assert_eq!(s.entries.len(), 3);
+        assert_eq!(s.sel.len(), 2, "t/a 与 u/b 两条 selected 默认勾上");
+
+        // 锚定但该表无差异：给"解除锚定看全量"的提示，而不是误报两侧一致。
+        s.anchor_to("main", "missing");
+        let msg = s.finish_diff(s.all_entries.clone());
+        assert_eq!(s.entries.len(), 0);
+        assert!(msg.contains("无差异") && msg.contains("u"), "锚定空表提示：{msg}");
+        assert!(!msg.contains("两侧结构一致"), "不得误报全量一致");
     }
 
     /// 整条向导用按键走一遍：状态机不吃 gpui，所以三端文案与门禁能一次验完。

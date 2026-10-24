@@ -236,6 +236,10 @@ pub(crate) enum ConnField {
     Password,
     Group,
     Color,
+    /// SSL 模式：进 `options["sslmode"]`（A2——不设独立 wire 字段）。
+    SslMode,
+    /// 默认 schema：进 `default_schema`（A2）。
+    DefaultSchema,
     SshHost,
     SshPort,
     SshUsername,
@@ -315,6 +319,14 @@ impl ConnForm {
             info.color.clone().unwrap_or_else(|| "#2d68c8".into()),
         );
         // 密码/口令从不回填（服务端只存 keyring 引用）。
+        form.set(
+            ConnField::SslMode,
+            info.options.get("sslmode").cloned().unwrap_or_default(),
+        );
+        form.set(
+            ConnField::DefaultSchema,
+            info.default_schema.clone().unwrap_or_default(),
+        );
         if let Some(ssh) = &info.ssh_tunnel {
             form.ssh = true;
             form.set(ConnField::SshHost, ssh.host.clone());
@@ -344,6 +356,15 @@ impl ConnForm {
         })
     }
 
+    /// sslmode 进 `options`；空 = 不写（A2：SSL 不设独立字段）。
+    fn options_map(&self) -> HashMap<String, String> {
+        let mut m = HashMap::new();
+        if let Some(sslmode) = self.opt(ConnField::SslMode) {
+            m.insert("sslmode".to_string(), sslmode);
+        }
+        m
+    }
+
     fn to_create(&self) -> CreateConnectionRequest {
         CreateConnectionRequest {
             name: self.get(ConnField::Name).trim().to_string(),
@@ -354,9 +375,9 @@ impl ConnForm {
             username: self.opt(ConnField::Username),
             password_ref: None,
             password: self.opt(ConnField::Password),
-            options: HashMap::new(),
+            options: self.options_map(),
             ssh_tunnel: self.ssh_tunnel(),
-            default_schema: None,
+            default_schema: self.opt(ConnField::DefaultSchema),
             read_only: Some(self.read_only),
             group: self.opt(ConnField::Group),
             color: self.opt(ConnField::Color),
@@ -364,6 +385,7 @@ impl ConnForm {
     }
 
     fn to_update(&self) -> UpdateConnectionRequest {
+        let options = self.options_map();
         UpdateConnectionRequest {
             name: Some(self.get(ConnField::Name).trim().to_string()),
             host: self.opt(ConnField::Host),
@@ -372,9 +394,11 @@ impl ConnForm {
             username: self.opt(ConnField::Username),
             password_ref: None,
             password: self.opt(ConnField::Password),
-            options: None,
+            // 只在有值时发送：None = 不修改（清空 sslmode 经 GUI 不落库，与
+            // "空 = 不修改"的表单语义一致，见 A2）。
+            options: (!options.is_empty()).then_some(options),
             ssh_tunnel: self.ssh_tunnel(),
-            default_schema: None,
+            default_schema: self.opt(ConnField::DefaultSchema),
             read_only: Some(self.read_only),
             group: self.opt(ConnField::Group),
             color: self.opt(ConnField::Color),
@@ -464,6 +488,28 @@ pub(crate) fn conn_visible_fields(kind: DatabaseKind, ssh: bool) -> Vec<ConnFiel
                 placeholder: "（可选，仅存 keyring）",
                 secret: true,
             });
+            // A2：SSL 走 options（建议值见 dialogs.rs 的点选行）；
+            // default_schema 目前只对 PG 展示（public 约定）。
+            if kind == DatabaseKind::Postgres || kind == DatabaseKind::MySql {
+                v.push(ConnFieldSpec {
+                    field: ConnField::SslMode,
+                    label: "SSL 模式",
+                    placeholder: if kind == DatabaseKind::Postgres {
+                        "disable"
+                    } else {
+                        "PREFERRED"
+                    },
+                    secret: false,
+                });
+            }
+            if kind == DatabaseKind::Postgres {
+                v.push(ConnFieldSpec {
+                    field: ConnField::DefaultSchema,
+                    label: "默认 schema",
+                    placeholder: "public",
+                    secret: false,
+                });
+            }
         }
     }
     v.push(ConnFieldSpec {
@@ -1026,6 +1072,25 @@ impl PolyDBApp {
             return;
         }
         form.kind = kind;
+        cx.notify();
+    }
+
+    /// 点选写入某个表单字段（A2 的 sslmode 建议值行用）。写入后退出该字段的
+    /// 键盘编辑态，避免后续按键以旧光标位置改写点选值。
+    pub(crate) fn set_conn_field_value(
+        &mut self,
+        field: ConnField,
+        value: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(form) = &mut self.conn_form else {
+            return;
+        };
+        form.set(field, value);
+        if form.active == Some(field) {
+            form.active = None;
+            form.cursor = 0;
+        }
         cx.notify();
     }
 
@@ -3092,6 +3157,45 @@ impl PolyDBApp {
         cx.notify();
     }
 
+    /// `u`（Review 步）：解除锚定回全量视图；未锚定时提示而非报错。
+    pub(crate) fn cmp_clear_anchor(&mut self, cx: &mut Context<Self>) {
+        let anchored = self
+            .compare
+            .as_ref()
+            .map(|c| c.anchor.is_some())
+            .unwrap_or(false);
+        let status = self.compare.as_mut().map(|c| {
+            c.clear_anchor();
+            c.review_status()
+        });
+        if let Some(status) = status {
+            self.status = if anchored {
+                status
+            } else {
+                "未锚定：当前已是全量视图".into()
+            };
+        }
+        cx.notify();
+    }
+
+    /// A4：从某张表的结构 rail 进入编辑——以锚定表打开比对向导（① 仍选
+    /// 基准侧；比对回来只显示该表条目，按 u 解除锚定）。
+    pub(crate) fn open_compare_anchored(
+        &mut self,
+        schema: String,
+        table: String,
+        cx: &mut Context<Self>,
+    ) {
+        // 若向导已开：先关再以锚定重开（open_compare 对已开状态是切换关闭）。
+        self.compare = None;
+        self.open_compare(cx);
+        if let Some(c) = self.compare.as_mut() {
+            c.anchor_to(&schema, &table);
+            self.status = format!("结构同步向导 ① 选基准侧（已锚定 {schema}.{table}）");
+        }
+        cx.notify();
+    }
+
     /// `i` 忽略默认值 / `n` 破坏性默认勾选：都是**服务端**选项，改完必须重跑比对，
     /// 否则屏幕上的计划与 id 就与服务端重算的不是同一份（§15.5）。
     pub(crate) fn cmp_toggle_option(&mut self, ignore: bool, cx: &mut Context<Self>) {
@@ -3268,6 +3372,7 @@ impl PolyDBApp {
             }
             CmpAction::SelectAll { only_safe } => self.cmp_select_all(only_safe, cx),
             CmpAction::FillGaps => self.cmp_fill_gaps(cx),
+            CmpAction::ClearAnchor => self.cmp_clear_anchor(cx),
             CmpAction::Generate => self.cmp_generate(cx),
             CmpAction::Apply => self.cmp_apply(cx, false),
             CmpAction::StartConfirm => self.cmp_start_confirm(cx),
@@ -3545,4 +3650,100 @@ pub(crate) struct CommitResult {
     pub ok: bool,
     pub applied: u64,
     pub error: Option<String>,
+}
+
+/// A2：连接表单的 options/default_schema 映射（纯层，键盘/渲染无关）。
+/// 导入一律显式列出——app.rs 顶部 glob（gpui::* 等）会让测试二进制在 rustc
+/// 的类型遍历上栈溢出（Windows GNU 工具链实测）。
+#[cfg(test)]
+mod conn_form_options_tests {
+    use super::{conn_visible_fields, ConnField, ConnForm};
+    use polydb_core::{ConnectionId, ConnectionInfo, DatabaseKind};
+    use std::collections::HashMap;
+
+    fn pg_form() -> ConnForm {
+        let mut f = ConnForm::blank();
+        f.kind = DatabaseKind::Postgres;
+        f.set(ConnField::Name, "pg1".into());
+        f.set(ConnField::Host, "127.0.0.1".into());
+        f.set(ConnField::Port, "55432".into());
+        f.set(ConnField::Database, "dbcore".into());
+        f.set(ConnField::Username, "postgres".into());
+        f
+    }
+
+    #[test]
+    fn sslmode_lands_in_options_and_default_schema_in_request() {
+        let mut f = pg_form();
+        f.set(ConnField::SslMode, "verify-full".into());
+        f.set(ConnField::DefaultSchema, "public".into());
+        let req = f.to_create();
+        assert_eq!(
+            req.options.get("sslmode").map(String::as_str),
+            Some("verify-full")
+        );
+        assert_eq!(req.default_schema.as_deref(), Some("public"));
+    }
+
+    #[test]
+    fn empty_sslmode_keeps_options_empty_and_update_sends_none() {
+        let f = pg_form();
+        assert!(f.to_create().options.is_empty());
+        assert!(f.to_update().options.is_none());
+        // 空白 default_schema 同样不进请求。
+        assert!(f.to_create().default_schema.is_none());
+    }
+
+    #[test]
+    fn sslmode_shows_for_pg_and_mysql_default_schema_only_pg() {
+        let mysql = conn_visible_fields(DatabaseKind::MySql, false);
+        assert!(mysql.iter().any(|s| s.field == ConnField::SslMode));
+        assert!(!mysql.iter().any(|s| s.field == ConnField::DefaultSchema));
+        let pg = conn_visible_fields(DatabaseKind::Postgres, false);
+        assert!(pg.iter().any(|s| s.field == ConnField::SslMode));
+        assert!(pg.iter().any(|s| s.field == ConnField::DefaultSchema));
+        let lite = conn_visible_fields(DatabaseKind::Sqlite, false);
+        assert!(!lite
+            .iter()
+            .any(|s| matches!(s.field, ConnField::SslMode | ConnField::DefaultSchema)));
+    }
+
+    #[test]
+    fn from_info_backfills_sslmode_and_schema_but_never_password() {
+        let mut options = HashMap::new();
+        options.insert("sslmode".to_string(), "require".to_string());
+        let now = chrono::Utc::now();
+        let info = ConnectionInfo {
+            id: ConnectionId::nil(),
+            name: "pg1".into(),
+            kind: DatabaseKind::Postgres,
+            host: Some("h".into()),
+            port: Some(5432),
+            database: Some("d".into()),
+            username: Some("u".into()),
+            options,
+            ssh_tunnel: None,
+            default_schema: Some("public".into()),
+            read_only: Some(false),
+            group: None,
+            color: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let form = ConnForm::from_info(&info);
+        assert_eq!(form.get(ConnField::SslMode), "require");
+        assert_eq!(form.get(ConnField::DefaultSchema), "public");
+        // 密码红线：永不回填（A2）。
+        assert_eq!(form.get(ConnField::Password), "");
+        let req = form.to_update();
+        assert_eq!(
+            req.options
+                .as_ref()
+                .and_then(|m| m.get("sslmode"))
+                .map(String::as_str),
+            Some("require")
+        );
+        assert_eq!(req.default_schema.as_deref(), Some("public"));
+        assert!(req.password.is_none());
+    }
 }

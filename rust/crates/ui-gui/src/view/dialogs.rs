@@ -373,6 +373,58 @@ impl PolyDBApp {
             })
             .collect();
 
+        // A2：sslmode 建议值点选行（PG/MySQL 才出现；输入框仍可自由键入其他
+        // 合法值，点选只是快捷方式）。
+        let sslmode_values: &[&str] = match kind {
+            DatabaseKind::Postgres => &["disable", "require", "verify-ca", "verify-full"],
+            DatabaseKind::MySql => &[
+                "DISABLED",
+                "PREFERRED",
+                "REQUIRED",
+                "VERIFY_CA",
+                "VERIFY_IDENTITY",
+            ],
+            _ => &[],
+        };
+        let ssl_suggestions: Vec<_> = sslmode_values
+            .iter()
+            .enumerate()
+            .map(|(n, val)| {
+                let v = (*val).to_string();
+                let on = form.get(ConnField::SslMode).eq_ignore_ascii_case(val);
+                div()
+                    .id(("cf-ssl-sug", n))
+                    .px(px(8.0))
+                    .py(px(2.0))
+                    .rounded(px(8.0))
+                    .text_size(px(11.0))
+                    .bg(if on { th.accent } else { th.surface })
+                    .text_color(if on { th.bg } else { th.fg_muted })
+                    .cursor(CursorStyle::PointingHand)
+                    .child(v.clone())
+                    .on_click(cx.listener(move |this, _ev: &ClickEvent, _window, cx| {
+                        this.set_conn_field_value(ConnField::SslMode, v.clone(), cx);
+                    }))
+            })
+            .collect();
+        let ssl_row = (!ssl_suggestions.is_empty()).then(|| {
+            div()
+                .id("cf-ssl-row")
+                .flex()
+                .items_center()
+                .flex_wrap()
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .w(px(80.0))
+                        .flex_none()
+                        .text_color(th.fg_muted)
+                        .text_size(px(12.0))
+                        .child("建议"),
+                )
+                .children(ssl_suggestions)
+        });
+
         let title = if editing {
             "编辑连接"
         } else {
@@ -506,7 +558,8 @@ impl PolyDBApp {
                                                 }),
                                         ),
                                 )
-                                .children(field_rows),
+                                .children(field_rows)
+                                .children(ssl_row),
                         )
                         .child(
                             div()
@@ -796,7 +849,14 @@ impl PolyDBApp {
             CmpStep::Review => {
                 body.push(
                     cmp_line(
-                        format!("③ 差异与勾选 · 基准 {src_name} → 期望 {tgt_name}"),
+                        {
+                            let mut head =
+                                format!("③ 差异与勾选 · 基准 {src_name} → 期望 {tgt_name}");
+                            if let Some((schema, table)) = &c.anchor {
+                                head += &format!(" · 锚定 {schema}.{table}（u 解除）");
+                            }
+                            head
+                        },
                         th.fg_muted,
                         12.0,
                     )

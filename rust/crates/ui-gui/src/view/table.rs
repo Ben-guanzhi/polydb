@@ -555,7 +555,7 @@ impl PolyDBApp {
     pub(super) fn render_rail_structure(
         &mut self,
         idx: usize,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
         let th = &self.theme;
         let tab = &self.tabs[idx];
@@ -681,6 +681,28 @@ impl PolyDBApp {
             })
             .collect();
         let ddl = detail.ddl.clone();
+        // A4：结构 rail 只读；编辑走比对向导（锚定到本表），不就地改列。
+        let (a_schema, a_table) = (tab.schema.clone(), tab.table.clone());
+        let edit_row = div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .px(px(12.0))
+            .pt(px(8.0))
+            .child(
+                btn(("struct-edit", idx), "✎ 编辑结构（比对向导）", th).on_click(cx.listener(
+                    move |this, _ev: &ClickEvent, _window, cx| {
+                        this.open_compare_anchored(a_schema.clone(), a_table.clone(), cx);
+                    },
+                )),
+            )
+            .child(
+                div()
+                    .pl(px(8.0))
+                    .text_size(px(11.0))
+                    .text_color(th.fg_dim)
+                    .child("经比对/DDL 管线，不就地改列"),
+            );
         div()
             .id(("struct-scroll", idx))
             .flex_1()
@@ -688,6 +710,7 @@ impl PolyDBApp {
             .overflow_y_scroll()
             .flex()
             .flex_col()
+            .child(edit_row)
             .children(ddl.is_empty().then(|| {
                 div()
                     .px(px(12.0))
