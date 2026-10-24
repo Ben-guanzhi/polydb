@@ -1,26 +1,32 @@
 // Package dboracle 实现基于 sijms/go-ora（纯 Go，免 cgo）的 SQL 驱动。
+//
+// Option B（INTEGRATION-PLAN P1-5 收口）：Conn 原生实现共享内核
+// github.com/dbcore/dbcore 的 SQLTxDriver 契约——执行/事务/目录/DDL/表浏览
+// 全部委托内核驱动，方言知识只在内核维护一份。polydb 的 protocol 类型面
+// 由同包的 ProtocolDriver（dboracle_protocol.go）适配提供，appcore 经
+// NewProtocolDriver 消费。
 package dboracle
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 	"sync"
-	"time"
 
 	dbc "github.com/dbcore/dbcore"
 	dbcoreoracle "github.com/dbcore/dbcore/oracle"
-	"github.com/polydb/polydb/pkg/dbcore"
-	"github.com/polydb/polydb/pkg/protocol"
 	_ "github.com/sijms/go-ora/v2"
 )
 
 type Conn struct {
-	db  *sql.DB
-	dsn string
-	mu  sync.Mutex
+	db   *sql.DB
+	dsn  string
+	mu   sync.Mutex // 只串行化 protocol 管线（*_P helper）；内核路径走连接池自身并发
+	kern *dbcoreoracle.OracleDriver
 }
+
+// Conn 原生满足内核的事务扩展契约（Option B 的核心断言）。
+var _ dbc.SQLTxDriver = (*Conn)(nil)
 
 // Open 通过 DSN（oracle://user:pass@host:port/service）建立连接池。
 func Open(ctx context.Context, dsn string) (*Conn, error) {
@@ -32,283 +38,57 @@ func Open(ctx context.Context, dsn string) (*Conn, error) {
 		db.Close()
 		return nil, fmt.Errorf("ping oracle: %w", err)
 	}
-	return &Conn{db: db, dsn: dsn}, nil
+	return &Conn{db: db, dsn: dsn, kern: dbcoreoracle.NewFromDB(db)}, nil
 }
 
-func (c *Conn) Kind() protocol.DatabaseKind     { return protocol.DatabaseKindOracle }
-func (c *Conn) AsSQL() (dbcore.SQLDriver, bool) { return c, true }
-func (c *Conn) AsKV() (dbcore.KVDriver, bool)   { return nil, false }
+// ─── dbcore 原生面（dbc.SQLTxDriver）─────────────────────────
 
+func (c *Conn) Kind() dbc.DatabaseKind         { return dbc.KindOracle }
 func (c *Conn) Ping(ctx context.Context) error { return c.db.PingContext(ctx) }
 func (c *Conn) Close() error                   { return c.db.Close() }
+func (c *Conn) AsSQL() (dbc.SQLDriver, bool)   { return c, true }
+func (c *Conn) AsKV() (dbc.KVDriver, bool)     { return nil, false }
 
-func (c *Conn) Execute(ctx context.Context, sql string, args ...protocol.Value) (*protocol.QueryResult, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.executeIn(ctx, c.db, sql, args)
+func (c *Conn) Execute(ctx context.Context, query string, args ...dbc.Value) (*dbc.QueryResult, error) {
+	return c.kern.Execute(ctx, query, args...)
 }
 
-func (c *Conn) ExecuteIn(exec dbcore.SQLTx, ctx context.Context, sql string, args ...protocol.Value) (*protocol.QueryResult, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.executeIn(ctx, exec, sql, args)
+func (c *Conn) ExecuteIn(exec dbc.SQLTx, ctx context.Context, query string, args ...dbc.Value) (*dbc.QueryResult, error) {
+	return c.kern.ExecuteIn(exec, ctx, query, args...)
 }
 
-func (c *Conn) executeIn(ctx context.Context, exec dbcore.SQLTx, sql string, args []protocol.Value) (*protocol.QueryResult, error) {
-	start := timeNowMs()
-	stmtType := dbcore.DetectStatementType(sql)
-	sql = positional(sql)
-
-	if stmtType == protocol.StatementTypeSelect || stmtType == protocol.StatementTypeOther {
-		rows, err := exec.QueryContext(ctx, sql, dbcore.ValueArgs(args)...)
-		if err != nil {
-			return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
-		}
-		defer rows.Close()
-		return queryResult(rows, stmtType, start)
-	}
-
-	res, err := exec.ExecContext(ctx, sql, dbcore.ValueArgs(args)...)
-	if err != nil {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
-	}
-	affected, _ := res.RowsAffected()
-	return &protocol.QueryResult{
-		AffectedRows:    affected,
-		ExecutionTimeMs: timeNowMs() - start,
-		StatementType:   stmtType,
-	}, nil
+func (c *Conn) Begin(ctx context.Context, mode dbc.TxMode) (*sql.Tx, error) {
+	return c.kern.Begin(ctx, mode)
 }
 
-// Begin 开启一个新的事务。go-ora 与 godror 都支持 BeginTxOptions；
-// TxOptionsFromMode 会把不支持的隔离级别退化为 LevelDefault。
-func (c *Conn) Begin(ctx context.Context, mode dbcore.TxMode) (*sql.Tx, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	tx, err := c.db.BeginTx(ctx, dbcore.TxOptionsFromMode(mode))
-	if err != nil {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
-	}
-	return tx, nil
+func (c *Conn) ListSchemas(ctx context.Context) ([]dbc.SchemaInfo, error) {
+	return c.kern.ListSchemas(ctx)
 }
 
-func queryResult(rows *sql.Rows, stmtType protocol.StatementType, start float64) (*protocol.QueryResult, error) {
-	colTypes, err := rows.ColumnTypes()
-	if err != nil {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: "column types: " + err.Error()}
-	}
-	columns := make([]protocol.ResultColumn, len(colTypes))
-	for i, ct := range colTypes {
-		columns[i] = protocol.ResultColumn{Name: ct.Name(), DataType: dbcore.DeclTypeOf(ct)}
-	}
-	var resultRows [][]protocol.Value
-	for rows.Next() {
-		raw := make([]any, len(colTypes))
-		for i := range raw {
-			raw[i] = new(any)
-		}
-		if err := rows.Scan(raw...); err != nil {
-			return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: "scan: " + err.Error()}
-		}
-		rowVals := make([]protocol.Value, len(raw))
-		for i, r := range raw {
-			rowVals[i] = dbcore.DriverToValueTyped(*(r.(*any)), columns[i].DataType)
-		}
-		resultRows = append(resultRows, rowVals)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
-	}
-	return &protocol.QueryResult{
-		Columns:         columns,
-		Rows:            resultRows,
-		ExecutionTimeMs: timeNowMs() - start,
-		StatementType:   stmtType,
-	}, nil
+func (c *Conn) ListTables(ctx context.Context, schema string) ([]dbc.TableInfo, error) {
+	return c.kern.ListTables(ctx, schema)
 }
 
-// ─── 目录/DDL：经共享内核 dbcore 驱动（INTEGRATION-PLAN P1-5）───────────────
-//
-// 方言知识（all_* 目录 SQL、oracle_maintained 过滤、identity 列、
-// DBMS_METADATA.GET_DDL 及其重建回退）只在内核维护一份；本包仅做 protocol
-// 类型映射与错误码包装。执行/事务/表浏览分页仍走自身管线。
-
-func (c *Conn) kernel() *dbcoreoracle.OracleDriver { return dbcoreoracle.NewFromDB(c.db) }
-
-// queryErr 把内核错误统一包成 ErrQueryFailed。
-func queryErr(err error) error {
-	return &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
+func (c *Conn) ListColumns(ctx context.Context, schema, table string) ([]dbc.ColumnInfo, error) {
+	return c.kern.ListColumns(ctx, schema, table)
 }
 
-// fkActionFromKernel 把内核的标准动作拼写（"CASCADE"/"SET NULL"/…）映射为
-// protocol 的 wire 拼写（"cascade"/"set_null"/…）；空值原样传递（= 无信息）。
-func fkActionFromKernel(s string) protocol.ForeignKeyAction {
-	switch s {
-	case dbc.FKActionCascade:
-		return protocol.FKActionCascade
-	case dbc.FKActionSetNull:
-		return protocol.FKActionSetNull
-	case dbc.FKActionSetDefault:
-		return protocol.FKActionSetDefault
-	case dbc.FKActionRestrict:
-		return protocol.FKActionRestrict
-	case dbc.FKActionNoAction:
-		return protocol.FKActionNoAction
-	}
-	return protocol.ForeignKeyAction(s)
+func (c *Conn) ListIndexes(ctx context.Context, schema, table string) ([]dbc.IndexInfo, error) {
+	return c.kern.ListIndexes(ctx, schema, table)
 }
 
-func (c *Conn) ListSchemas(ctx context.Context) ([]protocol.SchemaInfo, error) {
-	infos, err := c.kernel().ListSchemas(ctx)
-	if err != nil {
-		return nil, queryErr(err)
-	}
-	out := make([]protocol.SchemaInfo, len(infos))
-	for i, s := range infos {
-		out[i] = protocol.SchemaInfo{Name: s.Name}
-	}
-	return out, nil
-}
-
-func (c *Conn) ListTables(ctx context.Context, schema string) ([]protocol.TableInfo, error) {
-	infos, err := c.kernel().ListTables(ctx, schema)
-	if err != nil {
-		return nil, queryErr(err)
-	}
-	out := make([]protocol.TableInfo, len(infos))
-	for i, t := range infos {
-		typ := protocol.TableTypeTable
-		if t.Type == "view" {
-			typ = protocol.TableTypeView
-		}
-		ti := protocol.TableInfo{Name: t.Name, Schema: t.Schema, Type: typ, Comment: t.Comment}
-		if t.Rows >= 0 { // 内核 -1 = 未知（视图/未统计），保持 nil 而非 -1
-			rows := t.Rows
-			ti.RowCount = &rows
-		}
-		out[i] = ti
-	}
-	return out, nil
-}
-
-func (c *Conn) ListColumns(ctx context.Context, schema, table string) ([]protocol.ColumnInfo, error) {
-	infos, err := c.kernel().ListColumns(ctx, schema, table)
-	if err != nil {
-		return nil, queryErr(err)
-	}
-	out := make([]protocol.ColumnInfo, len(infos))
-	for i, col := range infos {
-		out[i] = protocol.ColumnInfo{
-			Name:            col.Name,
-			DataType:        col.Type,
-			Nullable:        col.Nullable,
-			DefaultValue:    col.Default,
-			IsPrimaryKey:    col.IsPrimaryKey,
-			IsAutoIncrement: col.IsAutoIncrement,
-			Comment:         col.Comment,
-			OrdinalPosition: col.OrdinalPosition,
-		}
-	}
-	return out, nil
-}
-
-func (c *Conn) ListIndexes(ctx context.Context, schema, table string) ([]protocol.IndexInfo, error) {
-	infos, err := c.kernel().ListIndexes(ctx, schema, table)
-	if err != nil {
-		return nil, queryErr(err)
-	}
-	out := make([]protocol.IndexInfo, len(infos))
-	for i, idx := range infos {
-		cols := make([]protocol.IndexColumn, len(idx.Columns))
-		for j, name := range idx.Columns {
-			cols[j] = protocol.IndexColumn{Name: name, Position: int32(j + 1)}
-		}
-		out[i] = protocol.IndexInfo{Name: idx.Name, Unique: idx.Unique, Primary: idx.Primary, Columns: cols}
-	}
-	return out, nil
-}
-
-func (c *Conn) ListForeignKeys(ctx context.Context, schema, table string) ([]protocol.ForeignKeyInfo, error) {
-	infos, err := c.kernel().ListForeignKeys(ctx, schema, table)
-	if err != nil {
-		return nil, queryErr(err)
-	}
-	out := make([]protocol.ForeignKeyInfo, len(infos))
-	for i, fk := range infos {
-		out[i] = protocol.ForeignKeyInfo{
-			Name:              fk.Name,
-			Columns:           fk.Columns,
-			ReferencedSchema:  fk.RefSchema,
-			ReferencedTable:   fk.RefTable,
-			ReferencedColumns: fk.RefColumns,
-			OnUpdate:          fkActionFromKernel(fk.OnUpdate),
-			OnDelete:          fkActionFromKernel(fk.OnDelete),
-		}
-	}
-	return out, nil
+func (c *Conn) ListForeignKeys(ctx context.Context, schema, table string) ([]dbc.ForeignKeyInfo, error) {
+	return c.kern.ListForeignKeys(ctx, schema, table)
 }
 
 func (c *Conn) CreateTableSQL(ctx context.Context, schema, table string) (string, error) {
-	ddl, err := c.kernel().CreateTableSQL(ctx, schema, table)
-	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			return "", &protocol.PolyDBError{Code: protocol.ErrTableNotFound, Message: "table not found: " + schema + "." + table}
-		}
-		return "", queryErr(err)
-	}
-	return ddl, nil
+	return c.kern.CreateTableSQL(ctx, schema, table)
 }
 
-func timeNowMs() float64 {
-	return float64(time.Now().UnixNano()) / 1e6
+func (c *Conn) BrowseRows(ctx context.Context, schema, table string, req *dbc.TableRowsRequest) (*dbc.TableRowsResult, error) {
+	return c.kern.BrowseRows(ctx, schema, table, req)
 }
 
-// ─── 表数据浏览（behavior.md §13）────────────────────────────
-
-// BrowseRows 按表浏览行：共享构造器产参数化 SQL 后走自身执行管线。
-func (c *Conn) BrowseRows(ctx context.Context, schema, table string, req *protocol.TableRowsRequest) (*protocol.TableRowsResult, error) {
-	sqlText, args, err := dbcore.BuildRowsQuery(dbcore.OracleSQLDialect(), schema, table, req)
-	if err != nil {
-		return nil, err
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	res, err := c.executeIn(ctx, c.db, sqlText, args)
-	if err != nil {
-		return nil, err
-	}
-	return dbcore.RowsResultToBrowsePage(res, req.Offset, dbcore.BrowseRowsLimits(req.Limit)), nil
-}
-
-// BrowseRowsCount 对同条件执行 COUNT(*)。
-func (c *Conn) BrowseRowsCount(ctx context.Context, schema, table string, req *protocol.TableRowsRequest) (uint64, error) {
-	sqlText, args, err := dbcore.BuildRowsCountQuery(dbcore.OracleSQLDialect(), schema, table, req)
-	if err != nil {
-		return 0, err
-	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	res, err := c.executeIn(ctx, c.db, sqlText, args)
-	if err != nil {
-		return 0, err
-	}
-	return dbcore.CountResultToUint64(res)
-}
-
-// positional 把 ? 占位符改写成 :1、:2 ...。go-ora v2 只认 :N 或 :Name 形式的
-// 绑定变量，不认 ?；不翻译的话每条带参数的语句都会被 Oracle 报
-// ORA-00911（= 之后出现无效字符）。本包的语句里 ? 只作占位符，不作 LIKE
-// 通配，所以按出现顺序改写是安全的。
-func positional(sql string) string {
-	var b strings.Builder
-	n := 0
-	for i := 0; i < len(sql); i++ {
-		if sql[i] == '?' {
-			n++
-			fmt.Fprintf(&b, ":%d", n)
-			continue
-		}
-		b.WriteByte(sql[i])
-	}
-	return b.String()
+func (c *Conn) BrowseRowsCount(ctx context.Context, schema, table string, req *dbc.TableRowsRequest) (uint64, error) {
+	return c.kern.BrowseRowsCount(ctx, schema, table, req)
 }

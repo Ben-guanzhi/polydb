@@ -39,7 +39,7 @@ func probeDSN() string {
 }
 
 // probeConn 取一个干净的探测现场。连不上即 connected:false 软跳过（与契约测试同一口径）。
-func probeConn(t *testing.T) *Conn {
+func probeConn(t *testing.T) *ProtocolDriver {
 	t.Helper()
 	dsn := probeDSN()
 	c, err := Open(context.Background(), dsn)
@@ -56,13 +56,14 @@ func probeConn(t *testing.T) *Conn {
 		t.Fatalf("建探测 schema 失败：%v", err)
 	}
 	t.Cleanup(func() { _, _ = c.Execute(ctx, dropProbeSchema) })
-	return c
+	pd := NewProtocolDriver(c)
+	return pd
 }
 
 const dropProbeSchema = "DROP SCHEMA IF EXISTS " + probeSchema + " CASCADE"
 
 // mustExec 只用于**前置**建表语句：前置失败说明探测现场没搭起来，直接判失败。
-func mustExec(t *testing.T, c *Conn, stmts ...string) {
+func mustExec(t *testing.T, c *ProtocolDriver, stmts ...string) {
 	t.Helper()
 	ctx := context.Background()
 	for _, q := range stmts {
@@ -73,7 +74,7 @@ func mustExec(t *testing.T, c *Conn, stmts ...string) {
 }
 
 // tryExec 用于**被测**语句：成败都是真值，记成观测串返回，绝不让引擎的脾气直接把测试弄红。
-func tryExec(t *testing.T, c *Conn, q string) string {
+func tryExec(t *testing.T, c *ProtocolDriver, q string) string {
 	t.Helper()
 	if _, err := c.Execute(context.Background(), q); err != nil {
 		return "ERR: " + err.Error()
@@ -82,7 +83,7 @@ func tryExec(t *testing.T, c *Conn, q string) string {
 }
 
 // scalar 取单值（走驱动自己的 Execute 路径，顺带钉住这条读法在 PG 上通得过）。
-func scalar(t *testing.T, c *Conn, q string) string {
+func scalar(t *testing.T, c *ProtocolDriver, q string) string {
 	t.Helper()
 	res, err := c.Execute(context.Background(), q)
 	if err != nil {
@@ -92,7 +93,7 @@ func scalar(t *testing.T, c *Conn, q string) string {
 }
 
 // scalarIn 在事务内取单值——用于证明「事务内的 DDL 对本事务可见、对连接池不可见」。
-func scalarIn(t *testing.T, c *Conn, tx dbcore.SQLTx, q string) string {
+func scalarIn(t *testing.T, c *ProtocolDriver, tx dbcore.SQLTx, q string) string {
 	t.Helper()
 	res, err := c.ExecuteIn(tx, context.Background(), q)
 	if err != nil {
@@ -113,7 +114,7 @@ func cell(res *protocol.QueryResult) string {
 }
 
 // countObjects 在探测 schema 里按名字数对象，用来把「挡住 vs 静默改掉」两条分支都判得开。
-func countObjects(t *testing.T, c *Conn, names ...string) string {
+func countObjects(t *testing.T, c *ProtocolDriver, names ...string) string {
 	t.Helper()
 	quoted := make([]string, 0, len(names))
 	for _, n := range names {

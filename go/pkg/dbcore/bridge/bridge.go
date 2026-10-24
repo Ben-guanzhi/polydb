@@ -60,10 +60,19 @@ var (
 // TxOptionsFromMode maps a TxMode to *sql.TxOptions (delegates to dbcore).
 func TxOptionsFromMode(mode TxMode) *sql.TxOptions { return dbcore.TxOptionsFromMode(mode) }
 
-// NewTxManager starts a dbcore transaction manager over a dbcore.SQLTxDriver
-// (e.g. dbcore/sqlite or dbcore/postgres). polydb's own protocol-typed drivers do
-// not yet satisfy dbcore.SQLTxDriver — bridging them is the Option B migration.
+// NewTxManager starts a dbcore transaction manager over a dbcore.SQLTxDriver.
+// polydb's SQL drivers satisfy the native contract since Option B (their *Conn
+// implements dbcore.SQLTxDriver; reach it through SQLTxProvider on the
+// ProtocolDriver).
 func NewTxManager(d dbcore.SQLTxDriver) *TxManager { return dbcore.NewTxManager(d) }
+
+// SQLTxProvider is how a protocol-typed driver exposes the dbcore-native
+// transaction driver underneath it (Option B). Every polydb SQL driver package
+// (dbsqlite / dbmysql / dbpostgres / dbmssql / dboracle) implements it on its
+// ProtocolDriver; appcore uses it to hand dbcore.TxManager the real driver.
+type SQLTxProvider interface {
+	SQLTx() dbcore.SQLTxDriver
+}
 
 // ─── Value conversion (protocol.Value ↔ dbcore.Value) ───────────────────────
 

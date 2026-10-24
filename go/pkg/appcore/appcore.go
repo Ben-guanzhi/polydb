@@ -7,12 +7,13 @@ import (
 	"errors"
 	"net"
 	"net/url"
-	"sort"
 	"sync"
 	"time"
 
+	dbc "github.com/dbcore/dbcore"
 	"github.com/google/uuid"
 	"github.com/polydb/polydb/pkg/dbcore"
+	"github.com/polydb/polydb/pkg/dbcore/bridge"
 	"github.com/polydb/polydb/pkg/dbmssql"
 	"github.com/polydb/polydb/pkg/dbmysql"
 	"github.com/polydb/polydb/pkg/dboracle"
@@ -47,30 +48,14 @@ func driverSpecFor(kind protocol.DatabaseKind) driverSpec {
 	return driverSpecs[kind]
 }
 
-// 事务注册表主动回收的调参（P0-2 残留修复）：begin 后未 finalize 的事务必须有主动回收，
-// 否则 a.txs 与底层 *sql.Tx（占用连接池一条连接）会随进程常驻无限增长。
-// 设成包级变量便于测试临时调小；默认值面向长驻 server：30 分钟空闲阈值、
-// 5 分钟扫描间隔、1024 条上限。
-var (
-	txIdleTTL       = 30 * time.Minute
-	txSweepInterval = 5 * time.Minute
-	txMaxEntries    = 1024
-)
-
-// txEntry 保存单个进程内事务的运行时状态。同一 txEntry 内的
-// driver / tx 只在 Begin 时赋值，Commit / Rollback 之后 status 会迁移，
-// ExecuteInTx 依赖 status 判断事务是否仍可用。
-type txEntry struct {
-	id        string
-	connID    string
-	status    protocol.TransactionStatus
-	startedAt time.Time
-	// lastActive 记录最近一次"被使用"的时间（Begin 或 ExecuteInTx），
-	// 供清扫器判定空闲超时（P0-2 残留修复）。
-	lastActive     time.Time
+// 事务注册表在共享内核 dbcore.TxManager（每连接一个）里：commit/rollback 即摘除、
+// 执行期摘除再插入以串行化、空闲 30 分钟清扫、容量 1024，DB 调用一律在注册表锁外。
+// 该语义曾是本包的手工实现（P0-2），Option B 后收敛回内核单一来源；
+// 这里只保留内核 TransactionInfo 不承载的线语义元数据。
+type txMeta struct {
+	connID         string
+	startedAt      time.Time
 	isolationLevel protocol.IsolationLevel
-	driver         dbcore.SQLTxDriver
-	tx             *sql.Tx
 }
 
 type AppCore struct {
@@ -79,7 +64,10 @@ type AppCore struct {
 	mu          sync.RWMutex
 	connections map[string]dbcore.Connection
 	tunnels     map[string]*sshtunnel.Tunnel
-	txs         map[string]*txEntry
+	// txManagers 每个已开连接一个事务注册表；BeginTransaction 懒建，Disconnect 关闭。
+	txManagers map[string]*bridge.TxManager
+	// txMeta 事务 ID → 线语义元数据（内核 TransactionInfo 只含 ID/Status）。
+	txMeta map[string]*txMeta
 	// readOnly 记录已打开连接的只读标志（behavior.md §12.3）。
 	// Connect 时从 ConnectionInfo.read_only 快照，Disconnect 时清除。
 	readOnly map[string]bool
@@ -93,9 +81,7 @@ type AppCore struct {
 	// 只让一个跑完整 Connect（含 SSH 隧道 + 拨号 + Ping），其余共享其结果，
 	// 避免重复开隧道/连接后又被覆盖 Close（见 ensure）。
 	connectSF singleflight.Group
-	// txSweepDone 用于停止事务清扫 goroutine；Close 关闭它。
-	txSweepDone chan struct{}
-	closeOnce   sync.Once
+	closeOnce sync.Once
 }
 
 func New(db *sql.DB, kr keyring.Keyring) *AppCore {
@@ -107,13 +93,12 @@ func New(db *sql.DB, kr keyring.Keyring) *AppCore {
 		kr:          kr,
 		connections: make(map[string]dbcore.Connection),
 		tunnels:     make(map[string]*sshtunnel.Tunnel),
-		txs:         make(map[string]*txEntry),
+		txManagers:  make(map[string]*bridge.TxManager),
+		txMeta:      make(map[string]*txMeta),
 		readOnly:    make(map[string]bool),
 		blobs:       blobs,
-		txSweepDone: make(chan struct{}),
 	}
-	// 启动事务清扫：回收 begin 后未 finalize 的孤儿事务（P0-2 残留）。
-	go a.txSweeper()
+	// 事务清扫随各连接的 TxManager 自带 sweeper 启动，AppCore 不再全局起 goroutine。
 	return a
 }
 
@@ -245,13 +230,29 @@ func (a *AppCore) Connect(ctx context.Context, id string) error {
 		}
 		d = dbsqlite.NewProtocolDriver(c)
 	case protocol.DatabaseKindPostgres:
-		d, err2 = dbpostgres.Open(ctx, postgresDSN(connInfo, password))
+		var c *dbpostgres.Conn
+		c, err2 = dbpostgres.Open(ctx, postgresDSN(connInfo, password))
+		if err2 == nil {
+			d = dbpostgres.NewProtocolDriver(c)
+		}
 	case protocol.DatabaseKindMySQL:
-		d, err2 = dbmysql.Open(ctx, mysqlDSN(connInfo, password))
+		var c *dbmysql.Conn
+		c, err2 = dbmysql.Open(ctx, mysqlDSN(connInfo, password))
+		if err2 == nil {
+			d = dbmysql.NewProtocolDriver(c)
+		}
 	case protocol.DatabaseKindMSSQL:
-		d, err2 = dbmssql.Open(ctx, mssqlDSN(connInfo, password))
+		var c *dbmssql.Conn
+		c, err2 = dbmssql.Open(ctx, mssqlDSN(connInfo, password))
+		if err2 == nil {
+			d = dbmssql.NewProtocolDriver(c)
+		}
 	case protocol.DatabaseKindOracle:
-		d, err2 = dboracle.Open(ctx, oracleDSN(connInfo, password))
+		var c *dboracle.Conn
+		c, err2 = dboracle.Open(ctx, oracleDSN(connInfo, password))
+		if err2 == nil {
+			d = dboracle.NewProtocolDriver(c)
+		}
 	case protocol.DatabaseKindRedis:
 		d, err2 = dbredis.Open(ctx, redisAddr(connInfo), redisDBIndex(info), password)
 	default:
@@ -324,7 +325,6 @@ func rejectWriteOnReadOnly(sqlText string) error {
 
 func (a *AppCore) Disconnect(id string) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if c, ok := a.connections[id]; ok {
 		_ = c.Driver().Close()
 		delete(a.connections, id)
@@ -334,15 +334,21 @@ func (a *AppCore) Disconnect(id string) {
 		_ = t.Close()
 		delete(a.tunnels, id)
 	}
-	// 断开连接时同步回滚该连接上仍活跃的事务，避免 *sql.Tx 泄漏。
-	for tid, e := range a.txs {
-		if e.connID != id {
-			continue
+	mgr := a.txManagers[id]
+	delete(a.txManagers, id)
+	for tid, m := range a.txMeta {
+		if m.connID == id {
+			delete(a.txMeta, tid)
 		}
-		if e.status == protocol.TxnActive && e.tx != nil {
-			_ = e.tx.Rollback()
-		}
-		delete(a.txs, tid)
+	}
+	a.mu.Unlock()
+
+	// 锁外收尾：回滚该连接上仍活跃的事务（避免 *sql.Tx 泄漏）并停掉其清扫
+	// goroutine。回滚是 DB I/O，不能抱着 AppCore 锁做——这也是 Disconnect
+	// 不再用 defer Unlock 的原因。
+	if mgr != nil {
+		mgr.RollbackAll()
+		mgr.Close()
 	}
 }
 
@@ -438,11 +444,47 @@ func (a *AppCore) Execute(ctx context.Context, id, sql string, args ...protocol.
 
 // ─── 事务 ──────────────────────────────────────────────────
 
-// BeginTransaction 在指定连接上开启一个新的事务。要求对应驱动实现 dbcore.SQLTxDriver。
+// sqlTxNotFound 把内核的 ErrTransactionNotFound 统一映射为 protocol 错误码
+// （spec §10 与 Rust 侧 TransactionNotFound 一致：查不到就是没有该事务，
+// 而非事务执行失败）。
+func sqlTxNotFound(txID string) error {
+	return &protocol.PolyDBError{Code: protocol.ErrTransactionNotFound, Message: "transaction not found: " + txID}
+}
+
+// txContext 取事务的线语义元数据与其所属连接的事务注册表；
+// 元数据不存在（未 begin / 已 finalize / 连接已断开）即 NotFound。
+func (a *AppCore) txContext(txID string) (*txMeta, *bridge.TxManager, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	meta, ok := a.txMeta[txID]
+	if !ok {
+		return nil, nil, sqlTxNotFound(txID)
+	}
+	mgr := a.txManagers[meta.connID]
+	if mgr == nil {
+		return nil, nil, sqlTxNotFound(txID)
+	}
+	return meta, mgr, nil
+}
+
+// txManagerFor 返回连接的事务注册表，懒建（内核 TxManager 自带清扫 goroutine，
+// Disconnect 时 Close）。持有 a.mu 写锁时调用。
+func (a *AppCore) txManagerForLocked(connID string, txD dbc.SQLTxDriver) *bridge.TxManager {
+	if m, ok := a.txManagers[connID]; ok {
+		return m
+	}
+	m := bridge.NewTxManager(txD)
+	a.txManagers[connID] = m
+	return m
+}
+
+// BeginTransaction 在指定连接上开启一个新的事务。要求对应驱动暴露内核原生
+// 事务驱动（bridge.SQLTxProvider，Option B）；注册表是 dbcore.TxManager，
+// DB 调用在其注册表锁外执行。
 // 返回的 TransactionInfo 是前端后续 ExecuteInTx / CommitTransaction / RollbackTransaction
-// 的凭据；进程内 tx 由 AppCore 持有，前端无需理解 *sql.Tx。
+// 的凭据；进程内 tx 由 TxManager 持有，前端无需理解 *sql.Tx。
 //
-// 内部 BeginTx 使用 context.Background() 而非调用方传入的 ctx：事务的生命周期跨越 HTTP
+// 内部 Begin 使用 context.Background() 而非调用方传入的 ctx：事务的生命周期跨越 HTTP
 // 请求边界（begin 之后的 execute / commit / rollback 是独立请求），若绑定到 r.Context()
 // 则请求一返回 ctx 即被取消，部分驱动（如 modernc.org/sqlite 通过 TxOptions 挂监听）
 // 会在 ctx 取消后自动回滚刚建的事务。调用方传入的 ctx 仍用于驱动查找（ensure 可能触发
@@ -452,218 +494,162 @@ func (a *AppCore) BeginTransaction(ctx context.Context, req *protocol.BeginTrans
 	if err != nil {
 		return nil, err
 	}
-	txD, ok := d.(dbcore.SQLTxDriver)
+	prov, ok := d.(bridge.SQLTxProvider)
 	if !ok {
 		return nil, &protocol.PolyDBError{Code: protocol.ErrNotSupported, Message: "driver does not support transactions for connection " + req.ConnectionID}
 	}
 	now := time.Now()
-	tx, err := txD.Begin(context.Background(), dbcore.TxMode{IsolationLevel: string(req.IsolationLevel)})
+	a.mu.Lock()
+	mgr := a.txManagerForLocked(req.ConnectionID, prov.SQLTx())
+	a.mu.Unlock()
+	info, err := mgr.Begin(context.Background(), dbc.TxMode{IsolationLevel: string(req.IsolationLevel)})
 	if err != nil {
 		return nil, err
 	}
-	entry := &txEntry{
-		id:             "txn-" + uuid.NewString(),
-		connID:         req.ConnectionID,
-		status:         protocol.TxnActive,
-		startedAt:      now,
-		lastActive:     now,
-		isolationLevel: req.IsolationLevel,
-		driver:         txD,
-		tx:             tx,
-	}
 	a.mu.Lock()
-	a.txs[entry.id] = entry
+	a.txMeta[info.ID] = &txMeta{
+		connID:         req.ConnectionID,
+		startedAt:      now,
+		isolationLevel: req.IsolationLevel,
+	}
 	a.mu.Unlock()
-	return entry.info(), nil
+	return &protocol.TransactionInfo{
+		ID:             info.ID,
+		ConnectionID:   req.ConnectionID,
+		Status:         protocol.TxnActive,
+		StartedAt:      now,
+		IsolationLevel: req.IsolationLevel,
+	}, nil
 }
 
 // CommitTransaction 提交指定事务；已 finalize 的事务返回 POLYDB_ERR_TRANSACTION_NOT_FOUND。
 // 事务对象 finalize 后即从注册表移除，语义与"事务只成功 finalize 一次"一致（见 spec §10）。
+// 提交的 DB I/O 在 TxManager 注册表锁外、也在 AppCore 锁外——慢提交不再拖住其他事务
+// （这正是把注册表收敛进内核的原因之一）。
 func (a *AppCore) CommitTransaction(txID string) (*protocol.TransactionInfo, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	e, ok := a.txs[txID]
-	if !ok {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrTransactionNotFound, Message: "transaction not found: " + txID}
+	meta, mgr, err := a.txContext(txID)
+	if err != nil {
+		return nil, err
 	}
-	if e.status != protocol.TxnActive {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrTransactionNotFound, Message: "transaction not found: " + txID}
-	}
-	if err := e.tx.Commit(); err != nil {
-		delete(a.txs, txID)
+	if err := mgr.Commit(txID); err != nil {
+		if errors.Is(err, dbc.ErrTransactionNotFound) {
+			return nil, sqlTxNotFound(txID)
+		}
+		a.mu.Lock()
+		delete(a.txMeta, txID)
+		a.mu.Unlock()
 		return nil, &protocol.PolyDBError{Code: protocol.ErrTransactionFailed, Message: "commit failed: " + err.Error()}
 	}
-	e.status = protocol.TxnCommitted
-	info := e.info()
-	// finalize 成功后移出注册表：与 Rust commit_transaction 的 remove-不回插一致，
-	// 也让上面的注释（"事务只成功 finalize 一次"）成为事实而非意图。
-	delete(a.txs, txID)
+	a.mu.Lock()
+	info := &protocol.TransactionInfo{
+		ID:             txID,
+		ConnectionID:   meta.connID,
+		Status:         protocol.TxnCommitted,
+		StartedAt:      meta.startedAt,
+		IsolationLevel: meta.isolationLevel,
+	}
+	delete(a.txMeta, txID)
+	a.mu.Unlock()
 	return info, nil
 }
 
 // RollbackTransaction 回滚指定事务；已 finalize 的事务返回 POLYDB_ERR_TRANSACTION_NOT_FOUND。
 func (a *AppCore) RollbackTransaction(txID string) (*protocol.TransactionInfo, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	e, ok := a.txs[txID]
-	if !ok {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrTransactionNotFound, Message: "transaction not found: " + txID}
+	meta, mgr, err := a.txContext(txID)
+	if err != nil {
+		return nil, err
 	}
-	if e.status != protocol.TxnActive {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrTransactionNotFound, Message: "transaction not found: " + txID}
-	}
-	if err := e.tx.Rollback(); err != nil {
-		delete(a.txs, txID)
+	if err := mgr.Rollback(txID); err != nil {
+		if errors.Is(err, dbc.ErrTransactionNotFound) {
+			return nil, sqlTxNotFound(txID)
+		}
+		a.mu.Lock()
+		delete(a.txMeta, txID)
+		a.mu.Unlock()
 		return nil, &protocol.PolyDBError{Code: protocol.ErrTransactionFailed, Message: "rollback failed: " + err.Error()}
 	}
-	e.status = protocol.TxnRolledBack
-	info := e.info()
-	delete(a.txs, txID)
+	a.mu.Lock()
+	info := &protocol.TransactionInfo{
+		ID:             txID,
+		ConnectionID:   meta.connID,
+		Status:         protocol.TxnRolledBack,
+		StartedAt:      meta.startedAt,
+		IsolationLevel: meta.isolationLevel,
+	}
+	delete(a.txMeta, txID)
+	a.mu.Unlock()
 	return info, nil
 }
 
 // ExecuteInTx 在指定事务内执行一条 SQL。事务必须处于 active 状态；
 // 否则返回 POLYDB_ERR_TRANSACTION_NOT_FOUND。
 //
-// 执行期间 entry 从注册表借出（与 Rust execute_in_transaction 的 remove/回插对齐）：
-// spec §10 要求事务内查询串行，而 *sql.Tx 底下只有一条连接，两个 goroutine 同时
-// ExecuteIn 会交错乃至互相踩坏结果。借出后并发的那一次只会拿到 NOT_FOUND，
-// 不会再并发驱动同一个句柄。SQL 失败事务保持 active，成败都放回注册表。
+// 执行期间的串行化由内核 TxManager 的 remove/reinsert 保证：spec §10 要求事务内
+// 查询串行，而 *sql.Tx 底下只有一条连接，两个 goroutine 同时 ExecuteIn 会交错乃至
+// 互相踩坏结果。借出后并发的那一次只会拿到 NOT_FOUND，不会再并发驱动同一个句柄。
+// SQL 失败事务保持 active，成败都放回注册表。
 func (a *AppCore) ExecuteInTx(ctx context.Context, txID, sql string, args ...protocol.Value) (*protocol.QueryResult, error) {
-	a.mu.Lock()
-	e, ok := a.txs[txID]
-	if !ok || e.status != protocol.TxnActive {
-		a.mu.Unlock()
-		return nil, &protocol.PolyDBError{Code: protocol.ErrTransactionNotFound, Message: "transaction not found: " + txID}
+	meta, mgr, err := a.txContext(txID)
+	if err != nil {
+		return nil, err
 	}
-	delete(a.txs, txID)
-	connID := e.connID
-	a.mu.Unlock()
-
-	reinsert := func() {
-		a.mu.Lock()
-		e.lastActive = time.Now()
-		a.txs[txID] = e
-		a.mu.Unlock()
-	}
-
-	if a.isReadOnly(connID) {
+	if a.isReadOnly(meta.connID) {
 		if err := rejectWriteOnReadOnly(sql); err != nil {
-			reinsert()
 			return nil, err
 		}
 	}
-	res, err := e.driver.ExecuteIn(e.tx, ctx, sql, args...)
-	reinsert()
-	return res, err
+	dbArgs := make([]dbc.Value, len(args))
+	for i, v := range args {
+		dbArgs[i] = bridge.ValueToDB(v)
+	}
+	start := time.Now()
+	res, err := mgr.ExecuteInTx(ctx, txID, sql, dbArgs...)
+	if err != nil {
+		if errors.Is(err, dbc.ErrTransactionNotFound) {
+			return nil, sqlTxNotFound(txID)
+		}
+		return nil, err
+	}
+	out := bridge.QueryResultFromDB(res)
+	// 内核 QueryResult 不承载线语义字段，边界补齐（与各驱动 protocol 管线一致）。
+	out.ExecutionTimeMs = float64(time.Since(start).Microseconds()) / 1000.0
+	out.StatementType = dbcore.DetectStatementType(sql)
+	return out, nil
 }
 
-// Close 停止事务清扫 goroutine（幂等）。宿主（server / tui / mcp main）在进程退出时调用。
+// Close 停掉所有连接的事务清扫 goroutine（幂等）。宿主（server / tui / mcp main）
+// 在进程退出时调用。
 func (a *AppCore) Close() {
-	a.closeOnce.Do(func() { close(a.txSweepDone) })
-}
-
-// txSweeper 周期扫描并回收空闲/超额的事务，防止 a.txs 与底层 *sql.Tx 无界增长（P0-2 残留）。
-func (a *AppCore) txSweeper() {
-	ticker := time.NewTicker(txSweepInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ticker.C:
-			a.sweepIdleTx()
-		case <-a.txSweepDone:
-			return
+	a.closeOnce.Do(func() {
+		a.mu.Lock()
+		managers := make([]*bridge.TxManager, 0, len(a.txManagers))
+		for _, m := range a.txManagers {
+			managers = append(managers, m)
 		}
-	}
-}
-
-// sweepIdleTx 回收两类事务：
-//  1. 超过 txIdleTTL 未活动（空闲泄漏，客户端 begin 后既不 finalize 也不断开连接）；
-//  2. 总数超过 txMaxEntries 时，按 lastActive 升序再摘最旧的若干（突发超额）。
-//
-// 回收即回滚其 *sql.Tx 并从注册表删除——先持锁把候选从 a.txs 摘除，再在锁外回滚，
-// 避免回滚的网络等待拖住整个 AppCore。
-func (a *AppCore) sweepIdleTx() {
-	a.mu.Lock()
-	type cand struct {
-		id string
-		tx *sql.Tx
-	}
-	var cands []cand
-	now := time.Now()
-
-	// 1) 空闲超时者立即摘除
-	for id, e := range a.txs {
-		if e.status != protocol.TxnActive {
-			continue
+		a.mu.Unlock()
+		for _, m := range managers {
+			m.Close()
 		}
-		if now.Sub(e.lastActive) > txIdleTTL {
-			cands = append(cands, cand{id, e.tx})
-			delete(a.txs, id)
-		}
-	}
-
-	// 2) 仍超出容量上限时，按 lastActive 升序再摘最旧的若干
-	if len(a.txs) > txMaxEntries {
-		type kv struct {
-			id     string
-			tx     *sql.Tx
-			active time.Time
-		}
-		heap := make([]kv, 0, len(a.txs))
-		for id, e := range a.txs {
-			if e.status != protocol.TxnActive {
-				continue
-			}
-			heap = append(heap, kv{id, e.tx, e.lastActive})
-		}
-		sort.Slice(heap, func(i, j int) bool { return heap[i].active.Before(heap[j].active) })
-		excess := len(a.txs) - txMaxEntries
-		for i := 0; i < excess && i < len(heap); i++ {
-			cands = append(cands, cand{heap[i].id, heap[i].tx})
-			delete(a.txs, heap[i].id)
-		}
-	}
-	a.mu.Unlock()
-
-	for _, c := range cands {
-		if c.tx != nil {
-			_ = c.tx.Rollback()
-		}
-	}
+	})
 }
 
 // GetTransactionInfo 返回当前事务的快照（供前端在编辑器上显示状态徽章等）。
 func (a *AppCore) GetTransactionInfo(txID string) (*protocol.TransactionInfo, error) {
-	e, err := a.lookupTx(txID)
+	meta, mgr, err := a.txContext(txID)
 	if err != nil {
 		return nil, err
 	}
-	return e.info(), nil
-}
-
-// lookupTx 拿读锁查一次；找不到返回 POLYDB_ERR_TRANSACTION_NOT_FOUND
-// （spec §10 与 Rust 侧 TransactionNotFound 一致：查不到就是没有该事务，
-// 而非事务执行失败）。
-// 调用方需要写操作（Commit/Rollback 改 status）时，再显式拿写锁。
-func (a *AppCore) lookupTx(txID string) (*txEntry, error) {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	e, ok := a.txs[txID]
-	if !ok {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrTransactionNotFound, Message: "transaction not found: " + txID}
+	info, err := mgr.Info(txID)
+	if err != nil {
+		return nil, sqlTxNotFound(txID)
 	}
-	return e, nil
-}
-
-func (e *txEntry) info() *protocol.TransactionInfo {
 	return &protocol.TransactionInfo{
-		ID:             e.id,
-		ConnectionID:   e.connID,
-		Status:         e.status,
-		StartedAt:      e.startedAt,
-		IsolationLevel: e.isolationLevel,
-	}
+		ID:             txID,
+		ConnectionID:   meta.connID,
+		Status:         protocol.TransactionStatus(info.Status),
+		StartedAt:      meta.startedAt,
+		IsolationLevel: meta.isolationLevel,
+	}, nil
 }
 
 func (a *AppCore) ListSchemas(ctx context.Context, id string) ([]protocol.SchemaInfo, error) {

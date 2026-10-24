@@ -19,6 +19,10 @@ type ProtocolDriver struct{ c *Conn }
 // NewProtocolDriver wraps a dbcore-native *Conn as polydb's protocol-typed dbcore.Driver.
 func NewProtocolDriver(c *Conn) *ProtocolDriver { return &ProtocolDriver{c: c} }
 
+// SQLTx exposes the dbcore-native transaction driver underneath (Option B):
+// appcore hands it to dbcore.TxManager via bridge.SQLTxProvider.
+func (p *ProtocolDriver) SQLTx() dbc.SQLTxDriver { return p.c }
+
 func (p *ProtocolDriver) Kind() protocol.DatabaseKind    { return protocol.DatabaseKindSQLite }
 func (p *ProtocolDriver) Ping(ctx context.Context) error { return p.c.Ping(ctx) }
 func (p *ProtocolDriver) Close() error                   { return p.c.Close() }

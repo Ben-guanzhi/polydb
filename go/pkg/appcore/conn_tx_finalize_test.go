@@ -7,16 +7,22 @@ package appcore
 //
 // 语义基线是 spec/behavior.md §10 与 Rust 侧 rust/crates/app-core/src/lib.rs
 // （commit/rollback 用 remove 且不回插；execute_in_transaction 先 remove 后回插）。
+// Option B 之后注册表本体是 dbcore.TxManager（每连接一个，见 appcore.go）；
+// 本文件钉的是 AppCore 接线层的行为，内核语义由 dbcore/drivertest 覆盖。
 
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	dbc "github.com/dbcore/dbcore"
 	"github.com/polydb/polydb/pkg/dbcore"
+	"github.com/polydb/polydb/pkg/dbcore/bridge"
+	"github.com/polydb/polydb/pkg/dbsqlite"
 	"github.com/polydb/polydb/pkg/protocol"
 )
 
@@ -57,6 +63,7 @@ func swapDriver(t *testing.T, a *AppCore, id string, wrap func(dbcore.Driver) db
 // 前一个驱动句柄必须被 Close。Go 没有 Drop，不关就是永久泄漏一个连接。
 func TestConnectClosesSupersededDriver(t *testing.T) {
 	a, id := newSQLiteApp(t)
+	t.Cleanup(a.Close)
 	ctx := context.Background()
 	if err := a.Connect(ctx, id); err != nil {
 		t.Fatalf("connect: %v", err)
@@ -91,6 +98,7 @@ func TestConnectClosesSupersededDriver(t *testing.T) {
 // POLYDB_ERR_TRANSACTION_NOT_FOUND（修复前最后一项返回的是 TRANSACTION_FAILED）。
 func TestFinalizeRemovesTransaction(t *testing.T) {
 	a, id := newSQLiteApp(t)
+	t.Cleanup(a.Close)
 	ctx := context.Background()
 	info, err := a.BeginTransaction(ctx, &protocol.BeginTransactionRequest{ConnectionID: id})
 	if err != nil {
@@ -130,16 +138,15 @@ func TestFinalizeRemovesTransaction(t *testing.T) {
 	}
 }
 
-// overlapTracker 记录 ExecuteIn 的历史最大并发数。
+// overlapTracker 记录内核 ExecuteIn 的历史最大并发数（Option B：装饰在内核
+// 原生 dbc.SQLTxDriver 上，TxManager 直接驱动它）。
 type overlapTracker struct {
-	dbcore.SQLTxDriver
+	dbc.SQLTxDriver
 	inFlight atomic.Int32
 	peak     atomic.Int32
 }
 
-func (o *overlapTracker) AsSQL() (dbcore.SQLDriver, bool) { return o, true }
-
-func (o *overlapTracker) ExecuteIn(exec dbcore.SQLTx, ctx context.Context, stmt string, args ...protocol.Value) (*protocol.QueryResult, error) {
+func (o *overlapTracker) ExecuteIn(exec dbc.SQLTx, ctx context.Context, stmt string, args ...dbc.Value) (*dbc.QueryResult, error) {
 	cur := o.inFlight.Add(1)
 	for {
 		peak := o.peak.Load()
@@ -154,12 +161,24 @@ func (o *overlapTracker) ExecuteIn(exec dbcore.SQLTx, ctx context.Context, stmt 
 	return res, err
 }
 
+// overlapConn 在 protocol 驱动之上把 SQLTx 指到装饰器。覆盖 AsSQL 让
+// Connection.AsSQL 返回 overlapConn 自身（提升方法只会返回内嵌驱动自己），
+// 这样 BeginTransaction 的 bridge.SQLTxProvider 断言拿到的是装饰器。
+type overlapConn struct {
+	*dbsqlite.ProtocolDriver
+	tx dbc.SQLTxDriver
+}
+
+func (o *overlapConn) AsSQL() (dbcore.SQLDriver, bool) { return o, true }
+func (o *overlapConn) SQLTx() dbc.SQLTxDriver          { return o.tx }
+
 // TestExecuteInTxNeverConcurrentOnSameHandle 钉住 spec §10.2「同一事务内的查询
 // 必须串行、不允许并发 execute」：同一事务上的并发 execute 不得同时驱动同一个
 // *sql.Tx；被借出期间进来的那次返回 TRANSACTION_NOT_FOUND；跑完之后事务仍在
 // 注册表里且能正常 commit（即 execute 后回插）。
 func TestExecuteInTxNeverConcurrentOnSameHandle(t *testing.T) {
 	a, id := newSQLiteApp(t)
+	t.Cleanup(a.Close)
 	ctx := context.Background()
 	if _, err := a.Execute(ctx, id, "CREATE TABLE t(v INTEGER)"); err != nil {
 		t.Fatalf("create table: %v", err)
@@ -169,17 +188,13 @@ func TestExecuteInTxNeverConcurrentOnSameHandle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
-	sqlDriver, ok := c.Driver().AsSQL()
+	pd, ok := c.Driver().(*dbsqlite.ProtocolDriver)
 	if !ok {
-		t.Fatalf("sqlite 驱动不是 SQLDriver")
+		t.Fatalf("sqlite 连接的驱动不是 dbsqlite.ProtocolDriver")
 	}
-	txDriver, ok := sqlDriver.(dbcore.SQLTxDriver)
-	if !ok {
-		t.Fatalf("sqlite 驱动不支持事务")
-	}
-	overlap := &overlapTracker{SQLTxDriver: txDriver}
+	overlap := &overlapTracker{SQLTxDriver: pd.SQLTx()}
 	a.mu.Lock()
-	a.connections[id] = dbcore.NewConnection(overlap)
+	a.connections[id] = dbcore.NewConnection(&overlapConn{ProtocolDriver: pd, tx: overlap})
 	a.mu.Unlock()
 
 	info, err := a.BeginTransaction(ctx, &protocol.BeginTransactionRequest{ConnectionID: id})
@@ -237,17 +252,25 @@ func TestExecuteInTxNeverConcurrentOnSameHandle(t *testing.T) {
 	}
 }
 
-// TestSweepReclaimsIdleTransaction 钉住 P0-2 残留修复：begin 后未 finalize 的事务必须有
-// 主动回收，否则 a.txs 与底层 *sql.Tx（占用连接池一条连接）会随进程常驻无限增长。
-// 直接调用 sweepIdleTx（绕过 5 分钟定时），把空闲阈值调成负值以保证命中，
-// 断言条目被移出注册表、其 *sql.Tx 被回滚（连接归还池），且后续操作返回 NOT_FOUND。
-func TestSweepReclaimsIdleTransaction(t *testing.T) {
-	origTTL, origCap := txIdleTTL, txMaxEntries
-	defer func() { txIdleTTL, txMaxEntries = origTTL, origCap }()
-	txIdleTTL = -time.Second // 任何已开始的 tx 都算"空闲超时"
-	txMaxEntries = 1024
+// txManagerOf 取连接的事务注册表（BeginTransaction 懒建）。
+func txManagerOf(t *testing.T, a *AppCore, id string) *bridge.TxManager {
+	t.Helper()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	mgr, ok := a.txManagers[id]
+	if !ok {
+		t.Fatalf("连接 %s 的事务注册表不存在", id)
+	}
+	return mgr
+}
 
+// TestSweepReclaimsIdleTransaction 钉住 P0-2 残留修复：begin 后未 finalize 的事务必须有
+// 主动回收，否则注册表与底层 *sql.Tx（占用连接池一条连接）会随进程常驻无限增长。
+// 把该连接 TxManager 的空闲阈值调成负值并立即清扫，断言条目被移出注册表、
+// 其 *sql.Tx 被回滚（连接归还池），且后续操作返回 NOT_FOUND。
+func TestSweepReclaimsIdleTransaction(t *testing.T) {
 	a, id := newSQLiteApp(t)
+	t.Cleanup(a.Close)
 	ctx := context.Background()
 	info, err := a.BeginTransaction(ctx, &protocol.BeginTransactionRequest{ConnectionID: id})
 	if err != nil {
@@ -258,7 +281,9 @@ func TestSweepReclaimsIdleTransaction(t *testing.T) {
 		t.Fatalf("begin 后事务应当可见: %v", err)
 	}
 
-	a.sweepIdleTx()
+	mgr := txManagerOf(t, a, id)
+	mgr.SetIdleTTL(-time.Second) // 任何已开始的 tx 都算"空闲超时"
+	mgr.SweepNow()
 
 	// 1) 注册表已摘除
 	if _, err := a.GetTransactionInfo(info.ID); codeOf(err) != protocol.ErrTransactionNotFound {
@@ -270,35 +295,50 @@ func TestSweepReclaimsIdleTransaction(t *testing.T) {
 	}
 }
 
-// TestSweepEnforcesMaxEntries 钉住容量上限：总数超过 txMaxEntries 时，按 lastActive 升序
-// 回收最旧的若干，防止突发 begin 把 a.txs 推到无界。
+// TestSweepEnforcesMaxEntries 钉住容量上限：总数超过上限时，按 lastActive 升序
+// 回收最旧的若干，防止突发 begin 把注册表推到无界。
 //
-// 注：不在同一 :memory: 连接上开两条真实 *sql.Tx（SQLite 单连接池会 deadlock），
-// 而是直接往注册表注入两条 active 条目（tx 为 nil，回收时跳过 Rollback），专测容量分支。
+// 两条真实 *sql.Tx 需要两条池连接，:memory: SQLite 被限成单连接会 deadlock，
+// 所以这条测试用文件库目标连接（dbsqlite 不对文件库限连接数）。
 func TestSweepEnforcesMaxEntries(t *testing.T) {
-	origTTL, origCap := txIdleTTL, txMaxEntries
-	defer func() { txIdleTTL, txMaxEntries = origTTL, origCap }()
-	txIdleTTL = 30 * time.Minute // 这一轮不让空闲命中，专测容量上限
-	txMaxEntries = 1
+	a, _ := newSQLiteApp(t)
+	t.Cleanup(a.Close)
+	conn, err := a.CreateConnection(&protocol.CreateConnectionRequest{
+		Name:     "cap",
+		Kind:     protocol.DatabaseKindSQLite,
+		Database: filepath.Join(t.TempDir(), "cap.db"),
+	})
+	if err != nil {
+		t.Fatalf("create connection: %v", err)
+	}
+	id := conn.ID
+	ctx := context.Background()
 
-	a, id := newSQLiteApp(t)
-	a.mu.Lock()
-	a.txs["txn-cap-a"] = &txEntry{id: "txn-cap-a", connID: id, status: protocol.TxnActive, startedAt: time.Now(), lastActive: time.Now().Add(-time.Hour)}
-	a.txs["txn-cap-b"] = &txEntry{id: "txn-cap-b", connID: id, status: protocol.TxnActive, startedAt: time.Now(), lastActive: time.Now()}
-	a.mu.Unlock()
+	first, err := a.BeginTransaction(ctx, &protocol.BeginTransactionRequest{ConnectionID: id})
+	if err != nil {
+		t.Fatalf("begin(1): %v", err)
+	}
+	second, err := a.BeginTransaction(ctx, &protocol.BeginTransactionRequest{ConnectionID: id})
+	if err != nil {
+		t.Fatalf("begin(2): %v", err)
+	}
 
-	a.sweepIdleTx()
+	mgr := txManagerOf(t, a, id)
+	mgr.SetIdleTTL(30 * time.Minute) // 这一轮不让空闲命中，专测容量分支
+	mgr.SetMaxEntries(1)
+	mgr.SweepNow()
 
 	// 总数 2 > 上限 1，按 lastActive 升序回收最旧的一条；剩一条仍存活。
-	gone, alive := 0, 0
-	for _, tid := range []string{"txn-cap-a", "txn-cap-b"} {
-		if _, err := a.GetTransactionInfo(tid); codeOf(err) == protocol.ErrTransactionNotFound {
-			gone++
-		} else {
-			alive++
-		}
+	if _, err := a.GetTransactionInfo(first.ID); codeOf(err) != protocol.ErrTransactionNotFound {
+		t.Fatalf("最旧的事务未被容量回收（err=%v）", err)
 	}
-	if gone != 1 || alive != 1 {
-		t.Fatalf("容量回收后 gone=%d alive=%d，want gone=1 alive=1", gone, alive)
+	if _, err := a.GetTransactionInfo(second.ID); err != nil {
+		t.Fatalf("较新的事务不该被回收: %v", err)
 	}
+	// 存活的事务仍可正常 finalize（回收只动超额条目）。
+	if _, err := a.CommitTransaction(second.ID); err != nil {
+		t.Fatalf("commit surviving tx: %v", err)
+	}
+	// 先断开释放文件句柄：Windows 上 TempDir 清理删不掉仍被连接池占着的 cap.db。
+	a.Disconnect(id)
 }

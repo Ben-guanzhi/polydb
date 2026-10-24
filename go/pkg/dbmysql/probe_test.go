@@ -48,7 +48,7 @@ func probeDSN() string {
 }
 
 // probeConn 取一个可用的 MySQL 连接。连不上即 connected:false 软跳过（与契约测试同一口径）。
-func probeConn(t *testing.T) *Conn {
+func probeConn(t *testing.T) *ProtocolDriver {
 	t.Helper()
 	dsn := probeDSN()
 	c, err := Open(context.Background(), dsn)
@@ -60,7 +60,7 @@ func probeConn(t *testing.T) *Conn {
 	// 前置条件不是"能不能连"，而是"两个预建探测库在不在权限范围内"——
 	// 探测账号刻意只拿到这两库、不给 CREATE DATABASE，所以缺库要现读出来。
 	// 这里必须用 Skipf 而不是 Fatalf：引擎在、只是现场没搭齐，报红会把"缺凭据"和"缺引擎"混成一类。
-	visible := scalar(t, c, fmt.Sprintf(
+	visible := scalar(t, NewProtocolDriver(c), fmt.Sprintf(
 		"SELECT COUNT(*) FROM %s.SCHEMATA WHERE schema_name IN ('%s','%s')",
 		sysSchema, probeDB, probeDBAlt))
 	if visible != "2" {
@@ -68,13 +68,13 @@ func probeConn(t *testing.T) *Conn {
 			probeDB, probeDBAlt, visible, dsn)
 	}
 	observe(t, "server", "VERSION()=%s sql_mode=%s",
-		scalar(t, c, "SELECT VERSION()"), scalar(t, c, "SELECT @@sql_mode"))
-	return c
+		scalar(t, NewProtocolDriver(c), "SELECT VERSION()"), scalar(t, NewProtocolDriver(c), "SELECT @@sql_mode"))
+	return NewProtocolDriver(c)
 }
 
 // ─── 小工具 ────────────────────────────────────────────────
 
-func mustExec(t *testing.T, c *Conn, stmts ...string) {
+func mustExec(t *testing.T, c *ProtocolDriver, stmts ...string) {
 	t.Helper()
 	for _, q := range stmts {
 		if _, err := c.Execute(context.Background(), q); err != nil {
@@ -83,7 +83,7 @@ func mustExec(t *testing.T, c *Conn, stmts ...string) {
 	}
 }
 
-func mustExecIn(t *testing.T, c *Conn, tx dbcore.SQLTx, stmts ...string) {
+func mustExecIn(t *testing.T, c *ProtocolDriver, tx dbcore.SQLTx, stmts ...string) {
 	t.Helper()
 	for _, q := range stmts {
 		if _, err := c.ExecuteIn(tx, context.Background(), q); err != nil {
@@ -93,7 +93,7 @@ func mustExecIn(t *testing.T, c *Conn, tx dbcore.SQLTx, stmts ...string) {
 }
 
 // tryExec 跑一条**被测**语句：失败不当红，把错误原文记进观测。
-func tryExec(t *testing.T, c *Conn, q string) string {
+func tryExec(t *testing.T, c *ProtocolDriver, q string) string {
 	t.Helper()
 	if _, err := c.Execute(context.Background(), q); err != nil {
 		return "ERR: " + err.Error()
@@ -101,7 +101,7 @@ func tryExec(t *testing.T, c *Conn, q string) string {
 	return "OK"
 }
 
-func scalar(t *testing.T, c *Conn, q string) string {
+func scalar(t *testing.T, c *ProtocolDriver, q string) string {
 	t.Helper()
 	res, err := c.Execute(context.Background(), q)
 	if err != nil {
@@ -110,7 +110,7 @@ func scalar(t *testing.T, c *Conn, q string) string {
 	return cell(res)
 }
 
-func scalarIn(t *testing.T, c *Conn, tx dbcore.SQLTx, q string) string {
+func scalarIn(t *testing.T, c *ProtocolDriver, tx dbcore.SQLTx, q string) string {
 	t.Helper()
 	res, err := c.ExecuteIn(tx, context.Background(), q)
 	if err != nil {
@@ -131,7 +131,7 @@ func cell(res *protocol.QueryResult) string {
 }
 
 // countTables 数某个库里叫这些名字的在册对象（information_schema 视角，不看权限也不看引擎脸色）。
-func countTables(t *testing.T, c *Conn, schema string, names ...string) string {
+func countTables(t *testing.T, c *ProtocolDriver, schema string, names ...string) string {
 	t.Helper()
 	q := fmt.Sprintf(
 		"SELECT COUNT(*) FROM %s.TABLES WHERE table_schema='%s' AND table_name IN (%s)",
@@ -140,7 +140,7 @@ func countTables(t *testing.T, c *Conn, schema string, names ...string) string {
 }
 
 // countTablesOfType 数某个库里指定 table_type 的对象数（M13 用来钉"MySQL 没有物化视图"）。
-func countTablesOfType(t *testing.T, c *Conn, schema, tableType string) string {
+func countTablesOfType(t *testing.T, c *ProtocolDriver, schema, tableType string) string {
 	t.Helper()
 	q := fmt.Sprintf(
 		"SELECT COUNT(*) FROM %s.TABLES WHERE table_schema='%s' AND table_type='%s'",
@@ -149,7 +149,7 @@ func countTablesOfType(t *testing.T, c *Conn, schema, tableType string) string {
 }
 
 // countObjectsInTx 与 countTables 同一条查询，但走事务执行器——M1 要的就是"另一个视角看不看得到"。
-func countObjectsInTx(t *testing.T, c *Conn, tx dbcore.SQLTx, names ...string) string {
+func countObjectsInTx(t *testing.T, c *ProtocolDriver, tx dbcore.SQLTx, names ...string) string {
 	t.Helper()
 	q := fmt.Sprintf(
 		"SELECT COUNT(*) FROM %s.TABLES WHERE table_schema='%s' AND table_name IN (%s)",
@@ -689,7 +689,7 @@ func TestProbeDriverReadDrifts(t *testing.T) {
 	mustExec(t, c, "DROP TABLE IF EXISTS m12_t")
 }
 
-func driftSchemas(t *testing.T, c *Conn) {
+func driftSchemas(t *testing.T, c *ProtocolDriver) {
 	t.Helper()
 	raw := scalar(t, c, fmt.Sprintf("SELECT COUNT(*) FROM %s.SCHEMATA", sysSchema))
 	schemas, err := c.ListSchemas(context.Background())
@@ -723,7 +723,7 @@ func subtractNumbers(t *testing.T, a, b string) string {
 	return fmt.Sprintf("%d", ai-bi)
 }
 
-func driftIndexType(t *testing.T, c *Conn) {
+func driftIndexType(t *testing.T, c *ProtocolDriver) {
 	t.Helper()
 	idx, err := c.ListIndexes(context.Background(), probeDB, "m12_t")
 	if err != nil {
@@ -743,7 +743,7 @@ func driftIndexType(t *testing.T, c *Conn) {
 		"（Rust 侧同一张表会填成 btree ⇒ 契约对拍一旦真跑必差）", raw, empty, len(idx))
 }
 
-func driftCreateTableSQL(t *testing.T, c *Conn) {
+func driftCreateTableSQL(t *testing.T, c *ProtocolDriver) {
 	t.Helper()
 	ddl, err := c.CreateTableSQL(context.Background(), probeDB, "m12_t")
 	if err != nil {
