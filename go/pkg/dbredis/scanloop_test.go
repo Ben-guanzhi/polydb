@@ -10,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	dbcoreredis "github.com/dbcore/dbcore/redis"
 )
 
 // D5（spec/behavior.md §1.3）验证：用最小 RESP 假服务器模拟真实 Redis 的分批 SCAN
@@ -309,11 +311,11 @@ func TestScanKeysStopsAtRoundCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	if got := f.scans.Load(); got != scanMaxRounds {
-		t.Errorf("rounds = %d, want %d（轮次上限）", got, scanMaxRounds)
+	if got := f.scans.Load(); got != int64(dbcoreredis.ScanMaxRounds) {
+		t.Errorf("rounds = %d, want %d（轮次上限）", got, dbcoreredis.ScanMaxRounds)
 	}
-	if page.Cursor != uint64(scanMaxRounds*2) {
-		t.Errorf("cursor = %d, want %d（续点，调用方可继续）", page.Cursor, scanMaxRounds*2)
+	if page.Cursor != uint64(dbcoreredis.ScanMaxRounds*2) {
+		t.Errorf("cursor = %d, want %d（续点，调用方可继续）", page.Cursor, dbcoreredis.ScanMaxRounds*2)
 	}
 	if len(page.Keys) != 0 {
 		t.Errorf("keys = %d, want 0", len(page.Keys))

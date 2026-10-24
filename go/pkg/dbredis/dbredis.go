@@ -1,18 +1,21 @@
-// Package dbredis 实现基于 go-redis/v9 的 KV 驱动（Redis）。
-// 用 client.Conn() 取一条专用连接：SELECT 的 db 状态在该连接上持久，
-// 保证 SelectDB 语义与 Rust 侧单连接实现一致。
+// Package dbredis 把 polydb 的 KV 协议面接到共享内核 dbcore/redis 上
+// （INTEGRATION-PLAN P1-5 收尾）：连接/SELECT、D5 续扫（每键 Type/TTL 富化）、
+// 六类值读取、覆盖式写入、原始命令都在内核维护一份；本包只做 protocol 类型
+// 映射与错误码包装。
 package dbredis
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/redis/go-redis/v9"
+	goredis "github.com/redis/go-redis/v9"
+
+	dbc "github.com/dbcore/dbcore"
+	dbcoreredis "github.com/dbcore/dbcore/redis"
 
 	"github.com/polydb/polydb/pkg/dbcore"
 	"github.com/polydb/polydb/pkg/protocol"
@@ -21,21 +24,17 @@ import (
 // timeout 覆盖拨号/读写：不可达主机（防火墙丢包）时快速失败而非长挂。
 const timeout = 5 * time.Second
 
-// scanMaxRounds 是单次 ScanKeys 内部续扫的轮次上限（D5，spec/behavior.md §1.3），Rust 侧同名同值。
-const scanMaxRounds = 100
-
 type Conn struct {
-	mu     sync.Mutex
-	client *redis.Client
-	conn   *redis.Conn
-	addr   string
-	// db 是该专用连接当前所在 db：SELECT 为连接级状态且本驱动独占此连接，故即服务端真值。
+	mu  sync.Mutex
+	drv *dbcoreredis.RedisDriver
+	// db 记录当前逻辑库编号，只为填协议 RedisScanPage.DB；真值由内核
+	// SelectDB 的换端语义保证（SELECT 是连接级状态，内核按库重拨）。
 	db int
 }
 
 // Open 连接 addr（host:port），初始 dbIndex 为 Redis db 编号；password 来自 keyring（可为空）。
 func Open(ctx context.Context, addr string, dbIndex int, password string) (*Conn, error) {
-	client := redis.NewClient(&redis.Options{
+	drv, err := dbcoreredis.OpenOptions(&goredis.Options{
 		Addr:         addr,
 		DB:           dbIndex,
 		Password:     password,
@@ -43,164 +42,102 @@ func Open(ctx context.Context, addr string, dbIndex int, password string) (*Conn
 		ReadTimeout:  timeout,
 		WriteTimeout: timeout,
 	})
-	if err := client.Ping(ctx).Err(); err != nil {
-		client.Close()
+	if err != nil {
 		return nil, fmt.Errorf("ping redis %s: %w", addr, err)
 	}
-	conn := client.Conn()
-	return &Conn{client: client, conn: conn, addr: addr, db: dbIndex}, nil
+	_ = ctx // 拨号超时由 Options 承担；内核 Ping 用后台 ctx 即可
+	return &Conn{drv: drv, db: dbIndex}, nil
 }
 
 func (c *Conn) Kind() protocol.DatabaseKind     { return protocol.DatabaseKindRedis }
 func (c *Conn) AsSQL() (dbcore.SQLDriver, bool) { return nil, false }
 func (c *Conn) AsKV() (dbcore.KVDriver, bool)   { return c, true }
 
-func (c *Conn) Ping(ctx context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.conn.Ping(ctx).Err()
-}
+func (c *Conn) Ping(ctx context.Context) error { return c.drv.Ping(ctx) }
 
-func (c *Conn) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.conn != nil {
-		_ = c.conn.Close()
-		c.conn = nil
-	}
-	if c.client != nil {
-		err := c.client.Close()
-		c.client = nil
-		return err
-	}
-	return nil
-}
+func (c *Conn) Close() error { return c.drv.Close() }
 
-// ─── KVDriver ────────────────────────────────────────────────
+// ─── KVDriver（委托内核，协议形状适配）──────────────────────
 
 func (c *Conn) SelectDB(ctx context.Context, index int) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if err := c.conn.Do(ctx, "SELECT", index).Err(); err != nil {
+	if err := c.drv.SelectDB(ctx, index); err != nil {
 		return kvErr(err)
 	}
-	// 只在服务端确认后更新：失败时连接的 db 未变。
+	// 只在内核确认后更新：失败时逻辑库未变。
 	c.db = index
 	return nil
 }
 
 func (c *Conn) ScanKeys(ctx context.Context, cursor uint64, pattern string, count int) (*protocol.RedisScanPage, error) {
-	if pattern == "" {
-		pattern = "*"
-	}
-	if count <= 0 {
-		count = 100
-	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	cur := uint32(c.db)
-	page := &protocol.RedisScanPage{DB: &cur, Keys: []protocol.RedisKeyInfo{}}
-	// D5 服务端游标循环（spec/behavior.md §1.3）：单轮 SCAN 只给建议批次，
-	// 这里续扫到凑满 count、游标回 0，或触及轮次上限（与 Rust 侧严格一致）。
-	for round := 0; round < scanMaxRounds; round++ {
-		keys, next, err := c.conn.Scan(ctx, cursor, pattern, int64(count)).Result()
-		if err != nil {
-			return nil, kvErr(err)
-		}
-		for _, k := range keys {
-			typ, err := c.conn.Type(ctx, k).Result()
-			if err != nil {
-				return nil, kvErr(err)
-			}
-			ttl := c.conn.TTL(ctx, k).Val()
-			// go-redis 的 DurationCmd 对负值（-1 无过期 / -2 不存在）以纳秒原样返回，
-			// 正值是整秒；直接 /time.Second 会把 -1ns 截断成 0（与 Rust 原始 TTL 对齐）。
-			ttlSec := int64(ttl / time.Second)
-			if ttl < 0 {
-				ttlSec = int64(ttl)
-			}
-			page.Keys = append(page.Keys, protocol.RedisKeyInfo{
-				Key:  k,
-				Type: redisKeyType(typ),
-				TTL:  &ttlSec,
-			})
-		}
-		cursor = next
-		if cursor == 0 || len(page.Keys) >= count {
-			break
-		}
+	// D5 服务端游标循环（spec/behavior.md §1.3）在内核 ScanKeysEnriched 里：
+	// 续扫到凑满 count、游标回 0，或触及轮次上限（与 Rust 侧严格一致）。
+	page, err := c.drv.ScanKeysEnriched(ctx, cursor, pattern, count)
+	if err != nil {
+		return nil, kvErr(err)
 	}
-	page.Cursor = cursor
-	return page, nil
+	cur := uint32(c.db)
+	out := &protocol.RedisScanPage{DB: &cur, Cursor: page.Cursor, Keys: make([]protocol.RedisKeyInfo, 0, len(page.Keys))}
+	for _, e := range page.Keys {
+		ttl := e.TTL
+		out.Keys = append(out.Keys, protocol.RedisKeyInfo{
+			Key:  e.Key,
+			Type: redisKeyType(e.Kind),
+			TTL:  ttl,
+		})
+	}
+	return out, nil
 }
 
 func (c *Conn) KeyType(ctx context.Context, key string) (protocol.RedisKeyType, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	typ, err := c.conn.Type(ctx, key).Result()
+	kind, err := c.drv.KeyType(ctx, key)
 	if err != nil {
 		return protocol.RedisKeyTypeNone, kvErr(err)
 	}
-	return redisKeyType(typ), nil
+	return redisKeyType(kind), nil
 }
 
 func (c *Conn) GetValue(ctx context.Context, key string) (protocol.RedisValue, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	typ, err := c.conn.Type(ctx, key).Result()
+	v, err := c.drv.GetValue(ctx, key)
 	if err != nil {
-		return protocol.RedisValue{}, kvErr(err)
-	}
-	switch redisKeyType(typ) {
-	case protocol.RedisKeyTypeNone:
-		// spec 的 RedisValue 无 none 变体：缺失键以错误返回（与 Rust 侧一致）。
-		return protocol.RedisValue{}, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: "key not found: " + key}
-	case protocol.RedisKeyTypeString:
-		s, err := c.conn.Get(ctx, key).Result()
-		if err == redis.Nil {
+		// 内核对缺失键报 "redis: key %q not found"；协议的 RedisValue 无 none
+		// 变体，缺失以错误返回（与 Rust 侧一致）。
+		if strings.Contains(err.Error(), "not found") {
 			return protocol.RedisValue{}, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: "key not found: " + key}
 		}
-		if err != nil {
-			return protocol.RedisValue{}, kvErr(err)
-		}
-		return protocol.RedisValue{Type: protocol.RedisKeyTypeString, Value: s}, nil
-	case protocol.RedisKeyTypeList:
-		v, err := c.conn.LRange(ctx, key, 0, -1).Result()
-		if err != nil {
-			return protocol.RedisValue{}, kvErr(err)
-		}
-		return protocol.RedisValue{Type: protocol.RedisKeyTypeList, Value: v}, nil
-	case protocol.RedisKeyTypeSet:
-		v, err := c.conn.SMembers(ctx, key).Result()
-		if err != nil {
-			return protocol.RedisValue{}, kvErr(err)
-		}
-		return protocol.RedisValue{Type: protocol.RedisKeyTypeSet, Value: v}, nil
-	case protocol.RedisKeyTypeZSet:
-		zs, err := c.conn.ZRangeWithScores(ctx, key, 0, -1).Result()
-		if err != nil {
-			return protocol.RedisValue{}, kvErr(err)
-		}
-		members := make([]protocol.RedisZSetMember, len(zs))
-		for i, z := range zs {
-			members[i] = protocol.RedisZSetMember{Member: fmt.Sprint(z.Member), Score: z.Score}
+		return protocol.RedisValue{}, kvErr(err)
+	}
+	switch v.Type {
+	case dbc.RedisStr:
+		return protocol.RedisValue{Type: protocol.RedisKeyTypeString, Value: v.Str}, nil
+	case dbc.RedisList:
+		return protocol.RedisValue{Type: protocol.RedisKeyTypeList, Value: v.Items}, nil
+	case dbc.RedisSet:
+		// 内核读回 set 时排序（确定性展示）；协议侧原样接收。
+		return protocol.RedisValue{Type: protocol.RedisKeyTypeSet, Value: v.Items}, nil
+	case dbc.RedisZSet:
+		members := make([]protocol.RedisZSetMember, len(v.Items))
+		for i, m := range v.Items {
+			var score float64
+			if i < len(v.Scores) {
+				score = v.Scores[i]
+			}
+			members[i] = protocol.RedisZSetMember{Member: m, Score: score}
 		}
 		return protocol.RedisValue{Type: protocol.RedisKeyTypeZSet, Value: members}, nil
-	case protocol.RedisKeyTypeHash:
-		v, err := c.conn.HGetAll(ctx, key).Result()
-		if err != nil {
-			return protocol.RedisValue{}, kvErr(err)
-		}
-		return protocol.RedisValue{Type: protocol.RedisKeyTypeHash, Value: v}, nil
-	case protocol.RedisKeyTypeStream:
-		msgs, err := c.conn.XRangeN(ctx, key, "-", "+", 100).Result()
-		if err != nil {
-			return protocol.RedisValue{}, kvErr(err)
-		}
-		return protocol.RedisValue{Type: protocol.RedisKeyTypeStream, Value: serializeStream(msgs)}, nil
-	default:
-		return protocol.RedisValue{}, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: "key not found: " + key}
+	case dbc.RedisHash:
+		return protocol.RedisValue{Type: protocol.RedisKeyTypeHash, Value: v.Hash}, nil
+	case dbc.RedisStream:
+		return protocol.RedisValue{Type: protocol.RedisKeyTypeStream, Value: serializeStream(v.Stream)}, nil
 	}
+	return protocol.RedisValue{}, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: "key not found: " + key}
 }
 
 func (c *Conn) SetValue(ctx context.Context, key string, value protocol.RedisValue) error {
@@ -209,38 +146,32 @@ func (c *Conn) SetValue(ctx context.Context, key string, value protocol.RedisVal
 	switch value.Type {
 	case protocol.RedisKeyTypeString:
 		s, _ := value.Value.(string)
-		return c.conn.Set(ctx, key, s, 0).Err()
+		return kvErr0(c.drv.SetValue(ctx, key, dbc.RedisValue{Type: dbc.RedisStr, Str: s}))
 	case protocol.RedisKeyTypeList:
-		elems := strSlice(value.Value)
-		return c.setAndExpire(ctx, key, func() error {
-			return c.conn.RPush(ctx, key, elems).Err()
-		})
+		return kvErr0(c.drv.SetValue(ctx, key, dbc.RedisValue{Type: dbc.RedisList, Items: strSlice(value.Value)}))
 	case protocol.RedisKeyTypeSet:
-		elems := strSlice(value.Value)
-		return c.setAndExpire(ctx, key, func() error {
-			return c.conn.SAdd(ctx, key, elems).Err()
-		})
+		return kvErr0(c.drv.SetValue(ctx, key, dbc.RedisValue{Type: dbc.RedisSet, Items: strSlice(value.Value)}))
 	case protocol.RedisKeyTypeZSet:
 		members := zsetMembers(value.Value)
-		zs := make([]redis.Z, len(members))
+		v := dbc.RedisValue{Type: dbc.RedisZSet, Items: make([]string, len(members)), Scores: make([]float64, len(members))}
 		for i, m := range members {
-			zs[i] = redis.Z{Member: m.Member, Score: m.Score}
+			v.Items[i] = m.Member
+			v.Scores[i] = m.Score
 		}
-		return c.setAndExpire(ctx, key, func() error {
-			return c.conn.ZAdd(ctx, key, zs...).Err()
-		})
+		return kvErr0(c.drv.SetValue(ctx, key, v))
 	case protocol.RedisKeyTypeHash:
-		fields := make(map[string]interface{}, 8)
-		for k, v := range strMap(value.Value) {
-			fields[k] = v
-		}
-		return c.setAndExpire(ctx, key, func() error {
-			return c.conn.HSet(ctx, key, fields).Err()
-		})
+		fields := strMap(value.Value)
+		return kvErr0(c.drv.SetValue(ctx, key, dbc.RedisValue{Type: dbc.RedisHash, Hash: fields}))
 	case protocol.RedisKeyTypeStream:
 		s, _ := value.Value.(string)
-		// 单字段约定：XADD key * data <string>（与 Rust 侧一致）
-		return c.conn.XAdd(ctx, &redis.XAddArgs{Stream: key, Values: map[string]interface{}{"data": s}}).Err()
+		// 单字段约定：XADD key * data <string>（与 Rust 侧一致），经内核
+		// RowAppender 表达（流的 SetValue 是追加条目而非覆盖键）。
+		_, err := c.drv.AppendRow(ctx, dbc.RedisRow{
+			Key:    key,
+			Kind:   dbc.RedisStream,
+			Fields: []dbc.RedisField{{Name: "data", Value: s}},
+		})
+		return kvErr0(err)
 	}
 	return nil
 }
@@ -309,101 +240,73 @@ func zsetMembers(v any) []protocol.RedisZSetMember {
 	return nil
 }
 
-// setAndExpire 先删后建（覆盖语义）。TTL 不在 driver API（AGENTS.md 定义的
-// set_value 只有 key+value），由 exec_command EXPIRE 等命令显式设置。
-func (c *Conn) setAndExpire(ctx context.Context, key string, build func() error) error {
-	if err := c.conn.Del(ctx, key).Err(); err != nil {
-		return kvErr(err)
-	}
-	if err := build(); err != nil {
-		return kvErr(err)
-	}
-	return nil
-}
-
 func (c *Conn) ExecCommand(ctx context.Context, args []string) (protocol.RedisReply, error) {
-	if len(args) == 0 {
-		return protocol.RedisReply{Type: protocol.RedisReplyError, Value: "empty command"}, nil
-	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	argv := make([]interface{}, len(args))
-	for i, a := range args {
-		argv[i] = a
-	}
-	cmd := redis.NewCmd(ctx, argv...)
-	if err := c.conn.Process(ctx, cmd); err != nil {
-		if errors.Is(err, redis.Nil) {
-			// GET 等缺失 key 返回 null 而非 error（与 Rust 侧 Value::Nil 一致）
-			return protocol.RedisReply{Type: protocol.RedisReplyNull}, nil
-		}
+	// 结构化 RESP（simple/bulk 统一为 bulk_string、nil→null、嵌套错误保持
+	// error 类型）在内核 ExecCommandTyped 维护一份约定。
+	reply, err := c.drv.ExecCommandTyped(ctx, args)
+	if err != nil {
 		return protocol.RedisReply{Type: protocol.RedisReplyError, Value: err.Error()}, nil
 	}
-	return goReply(cmd.Val()), nil
+	return typedToProtocol(reply), nil
+}
+
+// typedToProtocol 把内核结构化回复映射为协议 RedisReply。
+func typedToProtocol(r dbc.RedisTypedReply) protocol.RedisReply {
+	switch r.Kind {
+	case dbc.RedisReplyKindNull:
+		return protocol.RedisReply{Type: protocol.RedisReplyNull}
+	case dbc.RedisReplyKindInteger:
+		n, _ := r.Value.(int64)
+		return protocol.RedisReply{Type: protocol.RedisReplyInteger, Value: n}
+	case dbc.RedisReplyKindError:
+		return protocol.RedisReply{Type: protocol.RedisReplyError, Value: fmt.Sprint(r.Value)}
+	case dbc.RedisReplyKindArray:
+		arr, _ := r.Value.([]dbc.RedisTypedReply)
+		out := make([]protocol.RedisReply, len(arr))
+		for i, e := range arr {
+			out[i] = typedToProtocol(e)
+		}
+		return protocol.RedisReply{Type: protocol.RedisReplyArray, Value: out}
+	default: // bulk_string 及其他一律按 bulk_string
+		return protocol.RedisReply{Type: protocol.RedisReplyBulkString, Value: fmt.Sprint(r.Value)}
+	}
 }
 
 // ─── 转换辅助 ────────────────────────────────────────────────
 
-func redisKeyType(typ string) protocol.RedisKeyType {
-	switch typ {
-	case "string":
+func redisKeyType(kind dbc.RedisKeyType) protocol.RedisKeyType {
+	switch kind {
+	case dbc.RedisStr:
 		return protocol.RedisKeyTypeString
-	case "list":
+	case dbc.RedisList:
 		return protocol.RedisKeyTypeList
-	case "set":
+	case dbc.RedisSet:
 		return protocol.RedisKeyTypeSet
-	case "zset":
+	case dbc.RedisZSet:
 		return protocol.RedisKeyTypeZSet
-	case "hash":
+	case dbc.RedisHash:
 		return protocol.RedisKeyTypeHash
-	case "stream":
+	case dbc.RedisStream:
 		return protocol.RedisKeyTypeStream
-	default:
-		return protocol.RedisKeyTypeNone
 	}
+	return protocol.RedisKeyTypeNone
 }
 
-// goReply 将 go-redis 的原始 RESP 值转换为协议 RedisReply。
-//
-// 约定（双实现统一）：RESP 的 simple string 与 bulk string 一律映射为
-// bulk_string。go-redis 的 proto.Reader 对两者都返回 Go string，
-// Cmd.Val() 无法区分；为与 Rust 侧 redis crate 保持一致，两端统一按
-// bulk_string 处理。数组内嵌套的 RESP error 以 proto.RedisError（error
-// 接口）形式存储，映射为 error 类型。
-func goReply(v interface{}) protocol.RedisReply {
-	switch r := v.(type) {
-	case nil:
-		return protocol.RedisReply{Type: protocol.RedisReplyNull}
-	case string:
-		return protocol.RedisReply{Type: protocol.RedisReplyBulkString, Value: r}
-	case []byte:
-		return protocol.RedisReply{Type: protocol.RedisReplyBulkString, Value: string(r)}
-	case int64:
-		return protocol.RedisReply{Type: protocol.RedisReplyInteger, Value: r}
-	case error:
-		return protocol.RedisReply{Type: protocol.RedisReplyError, Value: r.Error()}
-	case []interface{}:
-		arr := make([]protocol.RedisReply, len(r))
-		for i, e := range r {
-			arr[i] = goReply(e)
-		}
-		return protocol.RedisReply{Type: protocol.RedisReplyArray, Value: arr}
-	default:
-		return protocol.RedisReply{Type: protocol.RedisReplyBulkString, Value: fmt.Sprint(r)}
-	}
-}
-
-func serializeStream(msgs []redis.XMessage) string {
+// serializeStream 渲染协议约定的流形状："id {k=v, k2=v2}; id2 {...}"。
+// 条目与字段结构由内核给出，这里只做展示格式。
+func serializeStream(entries []dbc.RedisStreamEntry) string {
 	var b strings.Builder
-	for i, m := range msgs {
+	for i, m := range entries {
 		if i > 0 {
 			b.WriteString("; ")
 		}
 		b.WriteString(m.ID)
 		b.WriteString(" {")
-		fields := make([]string, 0, len(m.Values))
-		for k, v := range m.Values {
-			fields = append(fields, k+"="+fmt.Sprint(v))
+		fields := make([]string, 0, len(m.Fields))
+		for _, f := range m.Fields {
+			fields = append(fields, f.Name+"="+f.Value)
 		}
 		sort.Strings(fields)
 		b.WriteString(strings.Join(fields, ", "))
@@ -414,4 +317,11 @@ func serializeStream(msgs []redis.XMessage) string {
 
 func kvErr(err error) *protocol.PolyDBError {
 	return &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: "redis: " + err.Error()}
+}
+
+func kvErr0(err error) error {
+	if err == nil {
+		return nil
+	}
+	return kvErr(err)
 }
