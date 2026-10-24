@@ -1,6 +1,7 @@
 # ─── Build artifacts ───────────────────────────────────────
 # Rust
 /rust/target/
+/rust/target-gnu/
 # root target/ 是历史日志残留（target/logs），全部排除
 /target/
 # Web

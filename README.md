@@ -144,3 +144,11 @@ CI 定义在 `.github/workflows/ci.yml`（Rust / Go / Web / contract 四 job，P
 ## License
 
 [MIT](./LICENSE) — Copyright (c) 2026 polydb contributors.
+
+## 整合状态（2026-10-23）
+
+按 [../WORKSPACE.md](../WORKSPACE.md) 的「共享内核 + 多前端」方案，polydb 已是 `dbcore`
+的正式消费者（`go/pkg/dbcore/bridge` 再导出 + 契约测试 7/7），在本轮中作为**契约基线**保留。
+后续动作：Go 侧逐步去掉 `protocol.*` 依赖，并让 `pkg/dbcore` 的方言文本改由
+`dbcore/sqltext` 提供；Rust 侧不在本轮范围。
+
