@@ -1,6 +1,7 @@
 //! polydb-db-mssql：基于 tiberius 的 SQL Server 驱动实现（对应 Go 侧 dbmssql）。
 //! tiberius Client 内部含非 Send 句柄，且 close 消费自身：所有交互经
-//! smol::block_on 同步执行，外层 async 方法不跨 await 持有 guard，满足 Send。
+//! polydb_rt::block_on（共享 tokio 运行时，DECISION §5.5）同步执行，外层
+//! async 方法不跨 await 持有 guard，满足 Send。
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -11,9 +12,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use parking_lot::Mutex;
-use smol::block_on;
-use smol::future::or as race;
-use smol::Timer;
 use tiberius::numeric::Decimal;
 use tiberius::{AuthMethod, Client, Config, Row, ToSql};
 use tokio::net::TcpStream;
@@ -37,7 +35,7 @@ pub struct MssqlConn {
 }
 
 /// 以 IO_TIMEOUT 上限同步执行一个异步操作（tiberius 无内置超时）。
-/// 用 Timer 与操作竞速：超时分支获胜时，操作 future 被直接丢弃（对
+/// 用 tokio::select! 与操作竞速：超时分支获胜时，操作 future 被直接丢弃（对
 /// 连接/查询来说是安全的取消，底层 socket 一并关闭）。
 fn timed<T, E>(what: &str, fut: impl Future<Output = Result<T, E>>) -> CoreResult<T>
 where
@@ -47,10 +45,12 @@ where
         Done(Result<T, E>),
         TimedOut,
     }
-    let out = block_on(race(async { Out::Done(fut.await) }, async {
-        let _ = Timer::after(IO_TIMEOUT).await;
-        Out::TimedOut
-    }));
+    let out = polydb_rt::block_on(async {
+        tokio::select! {
+            out = fut => Out::Done(out),
+            _ = tokio::time::sleep(IO_TIMEOUT) => Out::TimedOut,
+        }
+    });
     match out {
         Out::Done(Ok(v)) => Ok(v),
         Out::Done(Err(e)) => Err(CoreError::Driver(format!("{what}: {e}"))),

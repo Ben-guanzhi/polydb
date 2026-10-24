@@ -15,4 +15,4 @@ tokio = { workspace = true }
 tokio-util = "0.7"
 chrono = { workspace = true }
 parking_lot = { workspace = true }
-smol = { workspace = true }
+polydb-rt = { workspace = true }

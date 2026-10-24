@@ -27,14 +27,14 @@ fn sql(conn: &SqliteConn) -> &dyn polydb_db_core::SqlDriver {
 }
 
 fn exec_report(conn: &SqliteConn, q: &str) -> String {
-    match smol::block_on(sql(conn).execute(q, &[])) {
+    match polydb_rt::block_on(sql(conn).execute(q, &[])) {
         Ok(_) => "OK".to_string(),
         Err(e) => format!("ERR: {e}"),
     }
 }
 
 fn scalar(conn: &SqliteConn, q: &str) -> String {
-    match smol::block_on(sql(conn).execute(q, &[])) {
+    match polydb_rt::block_on(sql(conn).execute(q, &[])) {
         Err(e) => format!("ERR: {e}"),
         Ok(r) => match r.rows.first().and_then(|row| row.first()) {
             Some(Value::Integer(i)) => i.to_string(),
@@ -56,7 +56,7 @@ fn conn_with(stmts: &[&str]) -> SqliteConn {
 fn snapshot(conn: &SqliteConn, schema: &str) -> Snapshot {
     let d = sql(conn);
     let mut snaps = Vec::new();
-    for t in smol::block_on(d.list_tables(schema)).unwrap() {
+    for t in polydb_rt::block_on(d.list_tables(schema)).unwrap() {
         // 与 app-core 的 collect_snapshot 同口径（E6.5）：视图只带名字与类型，零元数据查询。
         if t.table_type != polydb_core::TableType::Table {
             snaps.push(TableSnapshot {
@@ -71,9 +71,9 @@ fn snapshot(conn: &SqliteConn, schema: &str) -> Snapshot {
         snaps.push(TableSnapshot {
             name: t.name.clone(),
             table_type: Some(t.table_type),
-            columns: smol::block_on(d.list_columns(schema, &t.name)).unwrap(),
-            indexes: smol::block_on(d.list_indexes(schema, &t.name)).unwrap(),
-            foreign_keys: smol::block_on(d.list_foreign_keys(schema, &t.name)).unwrap(),
+            columns: polydb_rt::block_on(d.list_columns(schema, &t.name)).unwrap(),
+            indexes: polydb_rt::block_on(d.list_indexes(schema, &t.name)).unwrap(),
+            foreign_keys: polydb_rt::block_on(d.list_foreign_keys(schema, &t.name)).unwrap(),
         });
     }
     Snapshot::new(DatabaseKind::Sqlite, schema, snaps)

@@ -592,7 +592,7 @@ mod tests {
     fn fixture_conn() -> SqliteConn {
         let conn = SqliteConn::open(":memory:").unwrap();
         let sql_driver: &dyn SqlDriver = conn.as_sql().unwrap();
-        smol::block_on(
+        polydb_rt::block_on(
             sql_driver.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)", &[]),
         )
         .unwrap();
@@ -601,14 +601,14 @@ mod tests {
             "INSERT INTO t (name) VALUES ('alice')",
             "INSERT INTO t (name) VALUES ('Bob')",
         ] {
-            smol::block_on(sql_driver.execute(sql, &[])).unwrap();
+            polydb_rt::block_on(sql_driver.execute(sql, &[])).unwrap();
         }
         conn
     }
 
     fn browse_names(conn: &SqliteConn, conditions: Vec<FilterCondition>) -> Vec<String> {
         let sql_driver: &dyn SqlDriver = conn.as_sql().unwrap();
-        let page = smol::block_on(sql_driver.browse_rows(
+        let page = polydb_rt::block_on(sql_driver.browse_rows(
             "",
             "t",
             &TableRowsRequest {
@@ -635,7 +635,7 @@ mod tests {
         let conn = SqliteConn::open(":memory:").unwrap();
         let sql_driver: &dyn SqlDriver = conn.as_sql().unwrap();
         let one = |pattern: Value| {
-            smol::block_on(sql_driver.execute(
+            polydb_rt::block_on(sql_driver.execute(
                 "SELECT CASE WHEN 'hello' REGEXP ?1 THEN 1 ELSE 0 END",
                 &[pattern],
             ))
@@ -648,7 +648,7 @@ mod tests {
         // (?i) 内联标志是两端 UDF 的统一不区分大小写写法
         assert_eq!(one(Value::String("(?i)^H".into())), Value::Integer(1));
         // RE2 家族：后向引用不受支持，必须报错而不是静默通过
-        assert!(smol::block_on(
+        assert!(polydb_rt::block_on(
             sql_driver.execute("SELECT 'a' REGEXP ?1", &[Value::String("(a)\\1".into())])
         )
         .is_err());
@@ -662,7 +662,7 @@ mod tests {
             "SELECT (NULL REGEXP '^h') IS NULL",
             "SELECT ('hello' REGEXP NULL) IS NULL",
         ] {
-            let res = smol::block_on(sql_driver.execute(sql, &[])).unwrap();
+            let res = polydb_rt::block_on(sql_driver.execute(sql, &[])).unwrap();
             assert_eq!(res.rows[0][0], Value::Integer(1), "sql: {sql}");
         }
     }
@@ -712,7 +712,7 @@ mod tests {
             ),
             vec!["Alice", "alice"]
         );
-        smol::block_on(
+        polydb_rt::block_on(
             conn.as_sql()
                 .unwrap()
                 .execute("INSERT INTO t (name) VALUES ('')", &[]),
@@ -737,7 +737,7 @@ mod tests {
             limit: 0,
         };
         assert_eq!(
-            smol::block_on(sql_driver.browse_rows_count("", "t", &req)).unwrap(),
+            polydb_rt::block_on(sql_driver.browse_rows_count("", "t", &req)).unwrap(),
             2
         );
     }
@@ -746,7 +746,7 @@ mod tests {
     fn open_and_ping() {
         let conn = SqliteConn::open(":memory:").unwrap();
         assert_eq!(conn.kind(), DatabaseKind::Sqlite);
-        smol::block_on(conn.ping()).unwrap();
+        polydb_rt::block_on(conn.ping()).unwrap();
     }
 
     #[test]
@@ -754,7 +754,7 @@ mod tests {
         let conn = SqliteConn::open(":memory:").unwrap();
         let sql_driver: &dyn SqlDriver = conn.as_sql().unwrap();
 
-        let result = smol::block_on(sql_driver.execute(
+        let result = polydb_rt::block_on(sql_driver.execute(
             "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, age INTEGER)",
             &[],
         ))
@@ -765,12 +765,12 @@ mod tests {
             "INSERT INTO users (name, age) VALUES ('alice', 30)",
             "INSERT INTO users (name, age) VALUES ('bob', 25)",
         ] {
-            let result = smol::block_on(sql_driver.execute(sql, &[])).unwrap();
+            let result = polydb_rt::block_on(sql_driver.execute(sql, &[])).unwrap();
             assert_eq!(result.affected_rows, 1, "executing {sql}");
         }
 
         let result =
-            smol::block_on(sql_driver.execute("SELECT * FROM users ORDER BY id", &[])).unwrap();
+            polydb_rt::block_on(sql_driver.execute("SELECT * FROM users ORDER BY id", &[])).unwrap();
         assert_eq!(result.columns.len(), 3);
         assert_eq!(result.rows.len(), 2);
         assert_eq!(result.rows[0][0], Value::Integer(1));
@@ -778,10 +778,10 @@ mod tests {
         assert_eq!(result.rows[0][2], Value::Integer(30));
 
         let result =
-            smol::block_on(sql_driver.execute("SELECT COUNT(*) AS c FROM users", &[])).unwrap();
+            polydb_rt::block_on(sql_driver.execute("SELECT COUNT(*) AS c FROM users", &[])).unwrap();
         assert_eq!(result.rows[0][0], Value::Integer(2));
 
-        let result = smol::block_on(sql_driver.execute(
+        let result = polydb_rt::block_on(sql_driver.execute(
             "SELECT * FROM users WHERE name = ?1",
             &[Value::String("bob".into())],
         ))
@@ -789,7 +789,7 @@ mod tests {
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0][0], Value::Integer(2));
 
-        let result = smol::block_on(sql_driver.execute("DELETE FROM users", &[])).unwrap();
+        let result = polydb_rt::block_on(sql_driver.execute("DELETE FROM users", &[])).unwrap();
         assert_eq!(result.affected_rows, 2);
     }
 
@@ -798,33 +798,33 @@ mod tests {
         let conn = SqliteConn::open(":memory:").unwrap();
         let sql_driver: &dyn SqlDriver = conn.as_sql().unwrap();
 
-        smol::block_on(sql_driver.execute(
+        polydb_rt::block_on(sql_driver.execute(
             "CREATE TABLE t1 (a INTEGER PRIMARY KEY, b TEXT NOT NULL)",
             &[],
         ))
         .unwrap();
-        smol::block_on(sql_driver.execute("CREATE INDEX idx_t1_b ON t1(b)", &[])).unwrap();
+        polydb_rt::block_on(sql_driver.execute("CREATE INDEX idx_t1_b ON t1(b)", &[])).unwrap();
 
-        let schemas = smol::block_on(sql_driver.list_schemas()).unwrap();
+        let schemas = polydb_rt::block_on(sql_driver.list_schemas()).unwrap();
         assert_eq!(schemas.len(), 1);
         assert_eq!(schemas[0].name, "main");
 
-        let tables = smol::block_on(sql_driver.list_tables("main")).unwrap();
+        let tables = polydb_rt::block_on(sql_driver.list_tables("main")).unwrap();
         assert!(tables.iter().any(|t| t.name == "t1"));
 
-        let columns = smol::block_on(sql_driver.list_columns("main", "t1")).unwrap();
+        let columns = polydb_rt::block_on(sql_driver.list_columns("main", "t1")).unwrap();
         assert_eq!(columns.len(), 2);
         assert_eq!(columns[0].name, "a");
         assert!(columns[0].is_primary_key);
         assert_eq!(columns[1].name, "b");
         assert!(!columns[1].nullable);
 
-        let indexes = smol::block_on(sql_driver.list_indexes("main", "t1")).unwrap();
+        let indexes = polydb_rt::block_on(sql_driver.list_indexes("main", "t1")).unwrap();
         let idx = indexes.iter().find(|i| i.name == "idx_t1_b").unwrap();
         assert_eq!(idx.columns.len(), 1);
         assert_eq!(idx.columns[0].name, "b");
 
-        let ddl = smol::block_on(sql_driver.create_table_sql("main", "t1")).unwrap();
+        let ddl = polydb_rt::block_on(sql_driver.create_table_sql("main", "t1")).unwrap();
         assert!(ddl.contains("CREATE TABLE"));
     }
 }

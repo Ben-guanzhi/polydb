@@ -44,7 +44,7 @@ fn sqlite_req(name: &str) -> CreateConnectionRequest {
 fn create_tables(app: &AppCore, id: polydb_core::ConnectionId, from: usize, to: usize) {
     for i in from..to {
         let name = format!("t{i}");
-        smol::block_on(async {
+        polydb_rt::block_on(async {
             app.execute(
                 id,
                 &format!("CREATE TABLE {name}(id INTEGER PRIMARY KEY, a TEXT, b REAL);"),
@@ -87,7 +87,7 @@ fn snapshot_sees_the_last_table_no_cap() {
 
     // 期望侧**缺少**第 1000 张表（t999）：若快照被任何上限截断在 200，
     // 这条差异根本不会出现（要么两边都看不见 t999 ⇒ 无差异，要么截断点之前就没它）。
-    smol::block_on(async {
+    polydb_rt::block_on(async {
         app.execute(tgt, "DROP TABLE t999", &[]).await.unwrap();
         let start = Instant::now();
         let plan = app.schema_diff(&diff_req(src, tgt)).await.unwrap();
@@ -127,7 +127,7 @@ fn snapshot_cost_is_linear() {
         create_tables(&app, src, built, n);
         create_tables(&app, tgt, built, n);
         built = n;
-        let cost = smol::block_on(async {
+        let cost = polydb_rt::block_on(async {
             let start = Instant::now();
             app.schema_diff(&diff_req(src, tgt)).await.unwrap();
             start.elapsed()

@@ -76,7 +76,7 @@ fn connect_and_execute_flow() {
     let status = app.connection_status(id).unwrap();
     assert!(status.connected);
 
-    smol::block_on(async {
+    polydb_rt::block_on(async {
         app.execute(
             id,
             "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)",
@@ -118,7 +118,7 @@ fn execute_lazily_connects() {
 
     // 未显式 connect 时，查询/元数据调用应自动连接（与 Go 侧 ensure 一致）。
     let result: CoreResult<_> =
-        smol::block_on(async { app.execute(info.id, "SELECT 42", &[]).await });
+        polydb_rt::block_on(async { app.execute(info.id, "SELECT 42", &[]).await });
     let result = result.expect("execute should auto-connect");
     assert_eq!(result.rows[0][0], Value::Integer(42));
 
@@ -132,7 +132,7 @@ fn execute_on_missing_connection_errors() {
     let missing = uuid::Uuid::new_v4();
 
     let result: CoreResult<_> =
-        smol::block_on(async { app.execute(missing, "SELECT 1", &[]).await });
+        polydb_rt::block_on(async { app.execute(missing, "SELECT 1", &[]).await });
     assert!(result.is_err());
 }
 
@@ -146,7 +146,7 @@ fn failed_in_tx_execute_keeps_the_transaction_rollbackable() {
     let id = info.id;
     app.connect(id).unwrap();
 
-    smol::block_on(async {
+    polydb_rt::block_on(async {
         app.execute(
             id,
             "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)",
@@ -250,7 +250,7 @@ fn concurrent_lazy_connect_via_execute() {
     for _ in 0..N {
         let app = std::sync::Arc::clone(&app);
         handles.push(std::thread::spawn(move || {
-            smol::block_on(async { app.execute(id, "SELECT 42", &[]).await })
+            polydb_rt::block_on(async { app.execute(id, "SELECT 42", &[]).await })
         }));
     }
 

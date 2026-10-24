@@ -1,0 +1,9 @@
+[package]
+name = "polydb-rt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PolyDB 单一 tokio 运行时 home：同步桥与测试统一在此 block_on（DECISION §5.5）"
+
+[dependencies]
+tokio = { workspace = true }

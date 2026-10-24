@@ -5880,10 +5880,10 @@ dependencies = [
  "polydb-db-redis",
  "polydb-db-sqlite",
  "polydb-protocol",
+ "polydb-rt",
  "polydb-schema-diff",
  "polydb-storage",
  "russh",
- "smol",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -5921,7 +5921,7 @@ dependencies = [
  "polydb-core",
  "polydb-db-core",
  "polydb-protocol",
- "smol",
+ "polydb-rt",
  "thiserror 2.0.20",
  "tiberius",
  "tokio",
@@ -5995,11 +5995,11 @@ dependencies = [
  "polydb-core",
  "polydb-db-core",
  "polydb-protocol",
+ "polydb-rt",
  "polydb-schema-diff",
  "regex",
  "rusqlite",
  "serde_json",
- "smol",
  "thiserror 2.0.20",
 ]
 
@@ -6026,6 +6026,13 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
+]
+
+[[package]]
+name = "polydb-rt"
+version = "0.1.0"
+dependencies = [
+ "tokio",
 ]
 
 [[package]]
@@ -6083,8 +6090,8 @@ dependencies = [
  "polydb-app-core",
  "polydb-core",
  "polydb-protocol",
+ "polydb-rt",
  "polydb-storage",
- "smol",
  "thiserror 2.0.20",
  "uuid",
 ]
@@ -6105,12 +6112,12 @@ dependencies = [
  "polydb-app-core",
  "polydb-core",
  "polydb-protocol",
+ "polydb-rt",
  "polydb-storage",
  "polydb-transport",
  "polydb-vim",
  "serde",
  "serde_json",
- "smol",
  "tokio",
  "tree-sitter",
  "tree-sitter-sequel",

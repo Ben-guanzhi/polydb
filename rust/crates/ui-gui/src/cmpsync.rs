@@ -1332,14 +1332,14 @@ mod tests {
     }
 
     fn run(ex: &Recorder, script: &DdlScript, rollback: bool) -> SyncOutcome {
-        smol::block_on(run_script(script, rollback, ex))
+        polydb_rt::block_on(run_script(script, rollback, ex))
     }
 
     /// 用真引擎回读：某张表在不在。走未包装的客户端，不污染录音序列。
     fn table_count(t: &LocalTransport, id: ConnectionId, name: &str) -> i64 {
         let sql =
             format!("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='{name}'");
-        let res = smol::block_on(t.execute(id, &sql, &[])).unwrap();
+        let res = polydb_rt::block_on(t.execute(id, &sql, &[])).unwrap();
         match &res.rows[0][0] {
             Value::Integer(n) => *n,
             v => panic!("回读 {name} 不是整数：{v:?}"),
@@ -1479,7 +1479,7 @@ mod tests {
     #[test]
     fn rollback_direction_reuses_the_same_dispatch() {
         let (t, id) = engine("e63-rb");
-        smol::block_on(t.execute(id, "CREATE TABLE e6_rb(a INTEGER)", &[])).unwrap();
+        polydb_rt::block_on(t.execute(id, "CREATE TABLE e6_rb(a INTEGER)", &[])).unwrap();
         let ex = Recorder::new(t, id);
         let mut script = script_of(
             vec![

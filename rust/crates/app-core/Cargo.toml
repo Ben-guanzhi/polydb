@@ -26,5 +26,5 @@ chrono = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
-smol = { workspace = true }
+polydb-rt = { workspace = true }
 uuid = { workspace = true }

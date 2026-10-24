@@ -280,7 +280,7 @@ Rust
 
 错误用 thiserror（库）/ anyhow（应用）。
 
-异步统一 smol + async-lock（沿用现有项目），或 tokio（若迁移，需全局一致）。
+异步统一 **tokio**（DECISION §5.5，2026-10-24 起 smol 已退出工作区）；同步桥与测试的 `block_on` 一律经 `polydb-rt`（进程级共享单运行时），不要自带执行器、不要再引入 smol。
 
 公共 API 必须有文档注释。
 
@@ -432,7 +432,7 @@ logger 名	polydb
 | # | AGENTS.md 声称 | 实际实现 | 状态 | 修复方向 |
 |---|---|---|---|---|
 | 1 | `SqlConnection` / `KvConnection` 类型存在 | 不存在，只有 `Connection` + `as_sql()`/`as_kv()` 能力降级 | 已确认 | 若需要强类型连接，在 spec 中补 DTO 并重新生成 |
-| 4 | 异步统一单运行时 | Rust 混用 tokio（server/SSH/tiberius/oracle）+ smol（block_on 站点）+ `async-trait` 装箱 | 已知债 | 全局迁移到 smol 或 tokio，二选一 |
+| 4 | 异步统一单运行时 | ~~Rust 混用 tokio（server/SSH/tiberius/oracle）+ smol（block_on 站点）~~ | **已解决（2026-10-24，DECISION §5.5）**：tokio 胜出，smol 移出工作区；生产桥接点只剩 db-mssql 的 `timed()`（经 `polydb-rt`），测试 block_on 同源 | 维持单运行时：新代码的 block_on 走 `polydb-rt` |
 | 6 | `SqlDriver::begin() -> Transaction` | 实为 `begin_tx(TxMode) -> Box<dyn Any+Send>` | 已确认 | 迁移到 trait-object transaction |
 | 7 | 契约测试用 JSON fixture | 实为 Go 测试（`test/contract/`） | 已确认 | 统一为 JSON fixture 或更新本节 |
 | 9 | `.qoder/skills/polydb/SKILL.md` 记录实现事实 | 被 `.gitignore` 排除（不入库、不随 tag 发布、无法被 CI 校验），且自身已漂移：称 `ImportModalParts.tsx` ~11k 行，实际 17 行 barrel re-export | 未修复 | 入库，或在文首标注「非权威，以代码为准」 |

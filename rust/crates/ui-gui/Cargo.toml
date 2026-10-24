@@ -33,4 +33,4 @@ uuid = { workspace = true }
 polydb-app-core = { workspace = true }
 polydb-storage = { workspace = true }
 # 测试里驱动真引擎的 block_on（产品路径的异步在 IoBridge/transport 里）
-smol = { workspace = true }
+polydb-rt = { workspace = true }

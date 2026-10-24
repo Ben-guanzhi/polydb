@@ -44,7 +44,7 @@ fn browse_and_transaction_delegate() {
     let info = t.create_connection(&sqlite_req("local")).unwrap();
     let id: ConnectionId = info.id;
 
-    smol::block_on(async {
+    polydb_rt::block_on(async {
         t.execute(id, "CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT)", &[])
             .await
             .unwrap();
@@ -108,7 +108,7 @@ fn get_blob_roundtrip_and_404() {
     let t = LocalTransport::new(Arc::clone(&app));
     let id: ConnectionId = t.create_connection(&sqlite_req("local")).unwrap().id;
 
-    smol::block_on(async {
+    polydb_rt::block_on(async {
         t.execute(id, "CREATE TABLE blobref(b BLOB)", &[])
             .await
             .unwrap();
@@ -160,7 +160,7 @@ fn rollback_discards_write() {
     let info = t.create_connection(&sqlite_req("local")).unwrap();
     let id: ConnectionId = info.id;
 
-    smol::block_on(async {
+    polydb_rt::block_on(async {
         t.execute(id, "CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT)", &[])
             .await
             .unwrap();
@@ -202,7 +202,7 @@ fn schema_diff_and_ddl_delegate() {
     let base: ConnectionId = t.create_connection(&sqlite_req("base")).unwrap().id;
     let want: ConnectionId = t.create_connection(&sqlite_req("want")).unwrap().id;
 
-    smol::block_on(async {
+    polydb_rt::block_on(async {
         t.execute(
             base,
             "CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT)",

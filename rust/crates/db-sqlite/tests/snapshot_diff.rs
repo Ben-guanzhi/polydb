@@ -28,7 +28,7 @@ fn conn_with(stmts: &[&str]) -> SqliteConn {
     let conn = SqliteConn::open(":memory:").unwrap();
     let d = conn.as_sql().unwrap();
     for stmt in stmts {
-        smol::block_on(d.execute(stmt, &[])).expect(stmt);
+        polydb_rt::block_on(d.execute(stmt, &[])).expect(stmt);
     }
     conn
 }
@@ -36,7 +36,7 @@ fn conn_with(stmts: &[&str]) -> SqliteConn {
 /// 用驱动的四个元数据方法组装快照——E2 服务端要做的正是这段编排。
 fn snapshot(conn: &SqliteConn, schema: &str) -> Snapshot {
     let d = conn.as_sql().unwrap();
-    let tables = smol::block_on(d.list_tables(schema)).unwrap();
+    let tables = polydb_rt::block_on(d.list_tables(schema)).unwrap();
     let mut snaps = Vec::new();
     for t in tables {
         // 与 app-core 的 collect_snapshot 同口径（E6.5）：视图只带名字与类型，零元数据查询。
@@ -53,9 +53,9 @@ fn snapshot(conn: &SqliteConn, schema: &str) -> Snapshot {
         snaps.push(TableSnapshot {
             name: t.name.clone(),
             table_type: Some(t.table_type),
-            columns: smol::block_on(d.list_columns(schema, &t.name)).unwrap(),
-            indexes: smol::block_on(d.list_indexes(schema, &t.name)).unwrap(),
-            foreign_keys: smol::block_on(d.list_foreign_keys(schema, &t.name)).unwrap(),
+            columns: polydb_rt::block_on(d.list_columns(schema, &t.name)).unwrap(),
+            indexes: polydb_rt::block_on(d.list_indexes(schema, &t.name)).unwrap(),
+            foreign_keys: polydb_rt::block_on(d.list_foreign_keys(schema, &t.name)).unwrap(),
         });
     }
     Snapshot::new(DatabaseKind::Sqlite, schema, snaps)
@@ -159,7 +159,7 @@ fn adding_one_real_foreign_key_does_not_disturb_the_others() {
     let mut stmts = BASE.to_vec();
     stmts.push("CREATE TABLE warehouses (id INTEGER PRIMARY KEY)");
     let conn = conn_with(&stmts);
-    smol::block_on(conn.as_sql().unwrap().execute(
+    polydb_rt::block_on(conn.as_sql().unwrap().execute(
         "ALTER TABLE orders ADD COLUMN warehouse_id INTEGER REFERENCES warehouses(id)",
         &[],
     ))

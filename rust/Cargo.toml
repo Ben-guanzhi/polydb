@@ -6,6 +6,7 @@ members = [
     "crates/db-core",
     "crates/schema-diff",
     "crates/storage",
+    "crates/rt",
     "crates/app-core",
     "crates/transport",
     "crates/db-sqlite",
@@ -33,6 +34,8 @@ polydb-core = { path = "crates/core" }
 polydb-db-core = { path = "crates/db-core" }
 polydb-schema-diff = { path = "crates/schema-diff" }
 polydb-storage = { path = "crates/storage" }
+# 单运行时 home（DECISION §5.5：tokio 胜出，smol 退出）——同步桥与测试统一在此 block_on
+polydb-rt = { path = "crates/rt" }
 polydb-app-core = { path = "crates/app-core" }
 polydb-transport = { path = "crates/transport" }
 polydb-vim = { path = "crates/vim" }
@@ -47,8 +50,7 @@ bytes = "1"
 
 # Async
 async-trait = "0.1"
-smol = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
 axum = "0.8"
 
 # Error handling
