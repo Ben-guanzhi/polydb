@@ -1,4 +1,4 @@
-.PHONY: all gen-protocol check-protocol check-rust check-go check-web test-web lint-web contract-test clean docker-build docker-build-rust docker-run compose-up compose-up-rust compose-down
+.PHONY: all gen-protocol check-protocol check-docs check-rust check-go check-web test-web lint-web contract-test clean docker-build docker-build-rust docker-run compose-up compose-up-rust compose-down
 
 all: check-protocol check-rust check-go
 
@@ -16,6 +16,12 @@ check-protocol:
 	cd tools/genprotocol && go run . ts --check
 	cd tools/genprotocol && go run . check
 	cd tools/genprotocol && go run . ops --check
+	cd tools/genprotocol && go run . docs
+
+# docs gate：文档反引号里写出的 POLYDB_* 标识符（错误码、环境变量）必须能在
+# 源码里找到定义。CI 的 drift check 已含此步，本地补上以堵住"本地绿 CI 红"。
+check-docs:
+	cd tools/genprotocol && go run . docs
 
 # ─── Rust ─────────────────────────────────────────────────
 check-rust:
