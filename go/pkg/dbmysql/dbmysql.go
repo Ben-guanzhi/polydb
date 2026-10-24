@@ -10,6 +10,8 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
+	dbc "github.com/dbcore/dbcore"
+	dbcoremysql "github.com/dbcore/dbcore/mysql"
 	"github.com/polydb/polydb/pkg/dbcore"
 	"github.com/polydb/polydb/pkg/protocol"
 )
@@ -122,211 +124,136 @@ func queryResult(rows *sql.Rows, stmtType protocol.StatementType, start float64)
 	}, nil
 }
 
+// ─── 目录/DDL：经共享内核 dbcore 驱动（INTEGRATION-PLAN P1-5）───────────────
+//
+// 方言知识（目录 SQL、类型折叠、SHOW CREATE TABLE、schema 过滤清单）只在内核
+// 维护一份；本包仅做 protocol 类型映射与错误码包装。执行/事务/表浏览分页仍走
+// 自身管线（不含方言知识，保留 execution_time_ms 等协议语义）。
+
+func (c *Conn) kernel() *dbcoremysql.MySQLDriver { return dbcoremysql.NewFromDB(c.db) }
+
+// queryErr 把内核错误统一包成 ErrQueryFailed。
+func queryErr(err error) error {
+	return &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
+}
+
+// fkActionFromKernel 把内核的标准动作拼写（"CASCADE"/"SET NULL"/…）映射为
+// protocol 的 wire 拼写（"cascade"/"set_null"/…）；空值原样传递（= 无信息）。
+func fkActionFromKernel(s string) protocol.ForeignKeyAction {
+	switch s {
+	case dbc.FKActionCascade:
+		return protocol.FKActionCascade
+	case dbc.FKActionSetNull:
+		return protocol.FKActionSetNull
+	case dbc.FKActionSetDefault:
+		return protocol.FKActionSetDefault
+	case dbc.FKActionRestrict:
+		return protocol.FKActionRestrict
+	case dbc.FKActionNoAction:
+		return protocol.FKActionNoAction
+	}
+	return protocol.ForeignKeyAction(s)
+}
+
 func (c *Conn) ListSchemas(ctx context.Context) ([]protocol.SchemaInfo, error) {
-	rows, err := c.db.QueryContext(ctx,
-		`SELECT schema_name FROM information_schema.schemata
-		  WHERE schema_name NOT IN ('mysql','information_schema','performance_schema','sys')
-		  ORDER BY schema_name`)
+	infos, err := c.kernel().ListSchemas(ctx)
 	if err != nil {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
+		return nil, queryErr(err)
 	}
-	defer rows.Close()
-	out := make([]protocol.SchemaInfo, 0)
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, err
-		}
-		out = append(out, protocol.SchemaInfo{Name: name})
+	out := make([]protocol.SchemaInfo, len(infos))
+	for i, s := range infos {
+		out[i] = protocol.SchemaInfo{Name: s.Name}
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (c *Conn) ListTables(ctx context.Context, schema string) ([]protocol.TableInfo, error) {
-	rows, err := c.db.QueryContext(ctx,
-		`SELECT table_name, CASE table_type WHEN 'VIEW' THEN 'view' ELSE 'table' END
-		   FROM information_schema.tables
-		  WHERE table_schema = ? AND table_type IN ('BASE TABLE','VIEW')
-		  ORDER BY table_name`, schema)
+	infos, err := c.kernel().ListTables(ctx, schema)
 	if err != nil {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
+		return nil, queryErr(err)
 	}
-	defer rows.Close()
-	out := make([]protocol.TableInfo, 0)
-	for rows.Next() {
-		var name, typ string
-		if err := rows.Scan(&name, &typ); err != nil {
-			return nil, err
+	out := make([]protocol.TableInfo, len(infos))
+	for i, t := range infos {
+		typ := protocol.TableTypeTable
+		if t.Type == "view" {
+			typ = protocol.TableTypeView
 		}
-		out = append(out, protocol.TableInfo{Name: name, Schema: schema, Type: protocol.TableType(typ)})
+		ti := protocol.TableInfo{Name: t.Name, Schema: t.Schema, Type: typ, Comment: t.Comment}
+		if t.Rows >= 0 { // 内核 -1 = 未知（视图/未统计），保持 nil 而非 -1
+			rows := t.Rows
+			ti.RowCount = &rows
+		}
+		out[i] = ti
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (c *Conn) ListColumns(ctx context.Context, schema, table string) ([]protocol.ColumnInfo, error) {
-	rows, err := c.db.QueryContext(ctx,
-		`SELECT column_name, column_type, is_nullable = 'YES', column_default,
-		        extra LIKE '%auto_increment%', ordinal_position
-		   FROM information_schema.columns
-		  WHERE table_schema = ? AND table_name = ?
-		  ORDER BY ordinal_position`, schema, table)
+	infos, err := c.kernel().ListColumns(ctx, schema, table)
 	if err != nil {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
+		return nil, queryErr(err)
 	}
-	defer rows.Close()
-	var cols []protocol.ColumnInfo
-	for rows.Next() {
-		var name, dataType string
-		var nullable, auto bool
-		var def sql.NullString
-		var pos int
-		if err := rows.Scan(&name, &dataType, &nullable, &def, &auto, &pos); err != nil {
-			return nil, err
-		}
-		var defPtr *string
-		if def.Valid {
-			defPtr = &def.String
-		}
-		cols = append(cols, protocol.ColumnInfo{
-			Name:            name,
-			DataType:        dataType,
-			Nullable:        nullable,
-			DefaultValue:    defPtr,
-			IsAutoIncrement: auto,
-			OrdinalPosition: int32(pos),
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	pkRows, err := c.db.QueryContext(ctx,
-		`SELECT column_name FROM information_schema.key_column_usage
-		  WHERE table_schema = ? AND table_name = ? AND constraint_name = 'PRIMARY'
-		  ORDER BY ordinal_position`, schema, table)
-	if err != nil {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
-	}
-	defer pkRows.Close()
-	pkSet := map[string]bool{}
-	for pkRows.Next() {
-		var name string
-		if err := pkRows.Scan(&name); err != nil {
-			return nil, err
-		}
-		pkSet[name] = true
-	}
-	for i := range cols {
-		if pkSet[cols[i].Name] {
-			cols[i].IsPrimaryKey = true
+	out := make([]protocol.ColumnInfo, len(infos))
+	for i, col := range infos {
+		out[i] = protocol.ColumnInfo{
+			Name:            col.Name,
+			DataType:        col.Type,
+			Nullable:        col.Nullable,
+			DefaultValue:    col.Default,
+			IsPrimaryKey:    col.IsPrimaryKey,
+			IsAutoIncrement: col.IsAutoIncrement,
+			Comment:         col.Comment,
+			OrdinalPosition: col.OrdinalPosition,
 		}
 	}
-	return cols, nil
+	return out, nil
 }
 
 func (c *Conn) ListIndexes(ctx context.Context, schema, table string) ([]protocol.IndexInfo, error) {
-	rows, err := c.db.QueryContext(ctx,
-		`SELECT index_name, non_unique = 0, column_name, seq_in_index
-		   FROM information_schema.statistics
-		  WHERE table_schema = ? AND table_name = ?
-		  ORDER BY index_name, seq_in_index`, schema, table)
+	infos, err := c.kernel().ListIndexes(ctx, schema, table)
 	if err != nil {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
+		return nil, queryErr(err)
 	}
-	defer rows.Close()
-	type idx struct {
-		unique, primary bool
-		cols            []protocol.IndexColumn
-	}
-	order := []string{}
-	groups := map[string]*idx{}
-	for rows.Next() {
-		var name string
-		var unique bool
-		var col string
-		var seq int
-		if err := rows.Scan(&name, &unique, &col, &seq); err != nil {
-			return nil, err
+	out := make([]protocol.IndexInfo, len(infos))
+	for i, idx := range infos {
+		cols := make([]protocol.IndexColumn, len(idx.Columns))
+		for j, name := range idx.Columns {
+			cols[j] = protocol.IndexColumn{Name: name, Position: int32(j + 1)}
 		}
-		if _, ok := groups[name]; !ok {
-			order = append(order, name)
-			groups[name] = &idx{unique: unique, primary: name == "PRIMARY"}
-		}
-		groups[name].cols = append(groups[name].cols, protocol.IndexColumn{Name: col, Position: int32(seq)})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	out := make([]protocol.IndexInfo, 0)
-	for _, name := range order {
-		g := groups[name]
-		out = append(out, protocol.IndexInfo{Name: name, Unique: g.unique, Primary: g.primary, Columns: g.cols})
+		out[i] = protocol.IndexInfo{Name: idx.Name, Unique: idx.Unique, Primary: idx.Primary, Columns: cols}
 	}
 	return out, nil
 }
 
 func (c *Conn) ListForeignKeys(ctx context.Context, schema, table string) ([]protocol.ForeignKeyInfo, error) {
-	rows, err := c.db.QueryContext(ctx,
-		`SELECT constraint_name, column_name, referenced_table_schema, referenced_table_name, referenced_column_name
-		   FROM information_schema.key_column_usage
-		  WHERE table_schema = ? AND table_name = ? AND referenced_table_name IS NOT NULL
-		  ORDER BY constraint_name, ordinal_position`, schema, table)
+	infos, err := c.kernel().ListForeignKeys(ctx, schema, table)
 	if err != nil {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
+		return nil, queryErr(err)
 	}
-	defer rows.Close()
-	type agg struct {
-		refSchema, refTable string
-		from, to            []string
-	}
-	order := []string{}
-	seen := map[string]bool{}
-	groups := map[string]*agg{}
-	for rows.Next() {
-		var name, from, refSchema, refTable, to string
-		if err := rows.Scan(&name, &from, &refSchema, &refTable, &to); err != nil {
-			return nil, err
+	out := make([]protocol.ForeignKeyInfo, len(infos))
+	for i, fk := range infos {
+		out[i] = protocol.ForeignKeyInfo{
+			Name:              fk.Name,
+			Columns:           fk.Columns,
+			ReferencedSchema:  fk.RefSchema,
+			ReferencedTable:   fk.RefTable,
+			ReferencedColumns: fk.RefColumns,
+			OnUpdate:          fkActionFromKernel(fk.OnUpdate),
+			OnDelete:          fkActionFromKernel(fk.OnDelete),
 		}
-		if !seen[name] {
-			seen[name] = true
-			order = append(order, name)
-			groups[name] = &agg{refSchema: refSchema, refTable: refTable}
-		}
-		groups[name].from = append(groups[name].from, from)
-		groups[name].to = append(groups[name].to, to)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	out := make([]protocol.ForeignKeyInfo, 0)
-	for _, name := range order {
-		a := groups[name]
-		out = append(out, protocol.ForeignKeyInfo{
-			Name:              name,
-			Columns:           a.from,
-			ReferencedSchema:  a.refSchema,
-			ReferencedTable:   a.refTable,
-			ReferencedColumns: a.to,
-		})
 	}
 	return out, nil
 }
 
 func (c *Conn) CreateTableSQL(ctx context.Context, schema, table string) (string, error) {
-	var ddl string
-	// SHOW CREATE TABLE 返回两列：表名、DDL。
-	err := c.db.QueryRowContext(ctx, "SHOW CREATE TABLE "+quoteIdent(schema)+"."+quoteIdent(table)).
-		Scan(new(string), &ddl)
-	if err == sql.ErrNoRows {
-		return "", &protocol.PolyDBError{Code: protocol.ErrTableNotFound, Message: "table not found: " + schema + "." + table}
-	}
+	ddl, err := c.kernel().CreateTableSQL(ctx, schema, table)
 	if err != nil {
-		return "", &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
+		if strings.Contains(err.Error(), "not found") {
+			return "", &protocol.PolyDBError{Code: protocol.ErrTableNotFound, Message: "table not found: " + schema + "." + table}
+		}
+		return "", queryErr(err)
 	}
 	return ddl, nil
-}
-
-func quoteIdent(s string) string {
-	return "`" + strings.ReplaceAll(s, "`", "``") + "`"
 }
 
 func timeNowMs() float64 {

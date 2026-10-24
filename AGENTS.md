@@ -340,7 +340,7 @@ M8	SSH 隧道、keyring、Pub/Sub、Cluster（可选）
 
 Rust：crates/db-<name>/ + db-core 加 enum variant + Connection 分派
 
-Go：pkg/db<name>/ + dbcore 实现接口
+Go：pkg/db<name>/ + dbcore 实现接口；**目录/DDL 一律经共享内核 `github.com/dbcore/dbcore/<engine>` 的 `NewFromDB` 委托实现（P1-5，2026-10-24 起）——不要在 pkg/db<name>/ 里新写 information_schema / pg_catalog / sys.* / all_* 目录 SQL，方言知识只此一份。边界：执行、事务、表浏览分页（`BuildRowsQuery`）与 Redis KV 仍是 polydb 自有实现；接入深度由 `dbcore/consumer_claims_test.go` 的 dbcoreImportDirs 断言（六个目录：bridge、dbsqlite、dbmysql、dbpostgres、dbmssql、dboracle）**
 
 补契约测试用例
 

@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	dbc "github.com/dbcore/dbcore"
+	dbcoreoracle "github.com/dbcore/dbcore/oracle"
 	"github.com/polydb/polydb/pkg/dbcore"
 	"github.com/polydb/polydb/pkg/protocol"
 	_ "github.com/sijms/go-ora/v2"
@@ -125,277 +127,136 @@ func queryResult(rows *sql.Rows, stmtType protocol.StatementType, start float64)
 	}, nil
 }
 
-// maintainedSchemas 是 Oracle 自带维护 schema，默认不展示。
-var maintainedSchemas = map[string]bool{
-	"SYS": true, "SYSTEM": true, "OUTLN": true, "DBSNMP": true, "APPQOSSYS": true,
-	"CTXSYS": true, "MDSYS": true, "ORDSYS": true, "ORDDATA": true, "ORDPLUGINS": true,
-	"SI_INFORMTN_SCHEMA": true, "WMSYS": true, "XDB": true, "XS$NULL": true, "DVSYS": true,
-	"AUDSYS": true, "GSMADMIN_INTERNAL": true, "OJVMSYS": true, "LBACSYS": true,
+// ─── 目录/DDL：经共享内核 dbcore 驱动（INTEGRATION-PLAN P1-5）───────────────
+//
+// 方言知识（all_* 目录 SQL、oracle_maintained 过滤、identity 列、
+// DBMS_METADATA.GET_DDL 及其重建回退）只在内核维护一份；本包仅做 protocol
+// 类型映射与错误码包装。执行/事务/表浏览分页仍走自身管线。
+
+func (c *Conn) kernel() *dbcoreoracle.OracleDriver { return dbcoreoracle.NewFromDB(c.db) }
+
+// queryErr 把内核错误统一包成 ErrQueryFailed。
+func queryErr(err error) error {
+	return &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
+}
+
+// fkActionFromKernel 把内核的标准动作拼写（"CASCADE"/"SET NULL"/…）映射为
+// protocol 的 wire 拼写（"cascade"/"set_null"/…）；空值原样传递（= 无信息）。
+func fkActionFromKernel(s string) protocol.ForeignKeyAction {
+	switch s {
+	case dbc.FKActionCascade:
+		return protocol.FKActionCascade
+	case dbc.FKActionSetNull:
+		return protocol.FKActionSetNull
+	case dbc.FKActionSetDefault:
+		return protocol.FKActionSetDefault
+	case dbc.FKActionRestrict:
+		return protocol.FKActionRestrict
+	case dbc.FKActionNoAction:
+		return protocol.FKActionNoAction
+	}
+	return protocol.ForeignKeyAction(s)
 }
 
 func (c *Conn) ListSchemas(ctx context.Context) ([]protocol.SchemaInfo, error) {
-	rows, err := c.queryCtx(ctx,
-		`SELECT username FROM all_users WHERE oracle_maintained = 'N' ORDER BY username`)
+	infos, err := c.kernel().ListSchemas(ctx)
 	if err != nil {
-		// 低版本 Oracle 无 oracle_maintained 列，退化为排除清单。
-		var where []string
-		for s := range maintainedSchemas {
-			where = append(where, fmt.Sprintf("'%s'", s))
-		}
-		rows, err = c.queryCtx(ctx,
-			"SELECT username FROM all_users WHERE username NOT IN ("+strings.Join(where, ",")+") ORDER BY username")
-		if err != nil {
-			return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
-		}
+		return nil, queryErr(err)
 	}
-	defer rows.Close()
-	out := make([]protocol.SchemaInfo, 0)
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, err
-		}
-		out = append(out, protocol.SchemaInfo{Name: name})
-	}
-	return out, rows.Err()
-}
-
-func (c *Conn) ListTables(ctx context.Context, schema string) ([]protocol.TableInfo, error) {
-	rows, err := c.queryCtx(ctx,
-		`SELECT table_name, 'table' FROM all_tables WHERE owner = ?
-		  UNION ALL
-		  SELECT view_name, 'view' FROM all_views WHERE owner = ?
-		  ORDER BY 1`, schema, schema)
-	if err != nil {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
-	}
-	defer rows.Close()
-	out := make([]protocol.TableInfo, 0)
-	for rows.Next() {
-		var name, typ string
-		if err := rows.Scan(&name, &typ); err != nil {
-			return nil, err
-		}
-		out = append(out, protocol.TableInfo{Name: name, Schema: schema, Type: protocol.TableType(typ)})
-	}
-	return out, rows.Err()
-}
-
-func (c *Conn) ListColumns(ctx context.Context, schema, table string) ([]protocol.ColumnInfo, error) {
-	rows, err := c.queryCtx(ctx,
-		`SELECT c.column_name,
-		        c.data_type || CASE
-		          WHEN c.data_type IN ('VARCHAR2','VARCHAR','CHAR','NVARCHAR2','NCHAR')
-		            THEN '(' || c.char_length || ')'
-		          WHEN c.data_type = 'NUMBER' AND c.data_precision IS NOT NULL
-		            THEN '(' || c.data_precision || ',' || NVL(c.data_scale, 0) || ')'
-		          ELSE '' END,
-		        c.nullable = 'Y', c.column_id,
-		        CASE WHEN ic.column_name IS NOT NULL THEN 1 ELSE 0 END
-		   FROM all_tab_columns c
-		   LEFT JOIN all_tab_identity_cols ic
-		          ON ic.owner = c.owner AND ic.table_name = c.table_name AND ic.column_name = c.column_name
-		  WHERE c.owner = ? AND c.table_name = ?
-		  ORDER BY c.column_id`, schema, table)
-	if err != nil {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
-	}
-	defer rows.Close()
-	var cols []protocol.ColumnInfo
-	for rows.Next() {
-		var name, dataType string
-		var nullable bool
-		var pos int
-		var auto int
-		if err := rows.Scan(&name, &dataType, &nullable, &pos, &auto); err != nil {
-			return nil, err
-		}
-		cols = append(cols, protocol.ColumnInfo{
-			Name:            name,
-			DataType:        dataType,
-			Nullable:        nullable,
-			IsAutoIncrement: auto == 1,
-			OrdinalPosition: int32(pos),
-		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	pkRows, err := c.queryCtx(ctx,
-		`SELECT cc.column_name
-		   FROM all_constraints c
-		   JOIN all_cons_columns cc ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name
-		  WHERE c.owner = ? AND c.table_name = ? AND c.constraint_type = 'P'
-		  ORDER BY cc.position`, schema, table)
-	if err != nil {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
-	}
-	defer pkRows.Close()
-	pkSet := map[string]bool{}
-	for pkRows.Next() {
-		var name string
-		if err := pkRows.Scan(&name); err != nil {
-			return nil, err
-		}
-		pkSet[name] = true
-	}
-	for i := range cols {
-		if pkSet[cols[i].Name] {
-			cols[i].IsPrimaryKey = true
-		}
-	}
-	return cols, nil
-}
-
-func (c *Conn) ListIndexes(ctx context.Context, schema, table string) ([]protocol.IndexInfo, error) {
-	rows, err := c.queryCtx(ctx,
-		`SELECT i.index_name, i.uniqueness, i.index_type, ic.column_name, ic.column_position
-		   FROM all_indexes i
-		   JOIN all_ind_columns ic ON ic.index_owner = i.owner AND ic.index_name = i.index_name
-		  WHERE i.table_owner = ? AND i.table_name = ?
-		  ORDER BY i.index_name, ic.column_position`, schema, table)
-	if err != nil {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
-	}
-	defer rows.Close()
-	type idx struct {
-		unique, primary bool
-		typ             protocol.IndexType
-		cols            []protocol.IndexColumn
-	}
-	order := []string{}
-	groups := map[string]*idx{}
-	primary := map[string]bool{}
-	pc, err := c.queryCtx(ctx,
-		`SELECT constraint_name FROM all_constraints WHERE owner = ? AND table_name = ? AND constraint_type = 'P'`,
-		schema, table)
-	if err == nil {
-		defer pc.Close()
-		for pc.Next() {
-			var name string
-			if err := pc.Scan(&name); err == nil {
-				primary[name] = true
-			}
-		}
-	}
-	for rows.Next() {
-		var name, uniqueness, typeDesc, col string
-		var pos int
-		if err := rows.Scan(&name, &uniqueness, &typeDesc, &col, &pos); err != nil {
-			return nil, err
-		}
-		if _, ok := groups[name]; !ok {
-			order = append(order, name)
-			groups[name] = &idx{
-				unique:  strings.EqualFold(uniqueness, "UNIQUE"),
-				primary: primary[name],
-				typ:     oracleIndexType(typeDesc),
-			}
-		}
-		groups[name].cols = append(groups[name].cols, protocol.IndexColumn{Name: col, Position: int32(pos)})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	out := make([]protocol.IndexInfo, 0)
-	for _, name := range order {
-		g := groups[name]
-		out = append(out, protocol.IndexInfo{Name: name, Unique: g.unique, Primary: g.primary, Type: g.typ, Columns: g.cols})
+	out := make([]protocol.SchemaInfo, len(infos))
+	for i, s := range infos {
+		out[i] = protocol.SchemaInfo{Name: s.Name}
 	}
 	return out, nil
 }
 
-func oracleIndexType(desc string) protocol.IndexType {
-	switch {
-	case strings.Contains(strings.ToUpper(desc), "BITMAP"):
-		return protocol.IndexTypeHash
-	case strings.Contains(strings.ToUpper(desc), "FUNCTION"):
-		return protocol.IndexTypeOther
-	default:
-		return protocol.IndexTypeBTree
+func (c *Conn) ListTables(ctx context.Context, schema string) ([]protocol.TableInfo, error) {
+	infos, err := c.kernel().ListTables(ctx, schema)
+	if err != nil {
+		return nil, queryErr(err)
 	}
+	out := make([]protocol.TableInfo, len(infos))
+	for i, t := range infos {
+		typ := protocol.TableTypeTable
+		if t.Type == "view" {
+			typ = protocol.TableTypeView
+		}
+		ti := protocol.TableInfo{Name: t.Name, Schema: t.Schema, Type: typ, Comment: t.Comment}
+		if t.Rows >= 0 { // 内核 -1 = 未知（视图/未统计），保持 nil 而非 -1
+			rows := t.Rows
+			ti.RowCount = &rows
+		}
+		out[i] = ti
+	}
+	return out, nil
+}
+
+func (c *Conn) ListColumns(ctx context.Context, schema, table string) ([]protocol.ColumnInfo, error) {
+	infos, err := c.kernel().ListColumns(ctx, schema, table)
+	if err != nil {
+		return nil, queryErr(err)
+	}
+	out := make([]protocol.ColumnInfo, len(infos))
+	for i, col := range infos {
+		out[i] = protocol.ColumnInfo{
+			Name:            col.Name,
+			DataType:        col.Type,
+			Nullable:        col.Nullable,
+			DefaultValue:    col.Default,
+			IsPrimaryKey:    col.IsPrimaryKey,
+			IsAutoIncrement: col.IsAutoIncrement,
+			Comment:         col.Comment,
+			OrdinalPosition: col.OrdinalPosition,
+		}
+	}
+	return out, nil
+}
+
+func (c *Conn) ListIndexes(ctx context.Context, schema, table string) ([]protocol.IndexInfo, error) {
+	infos, err := c.kernel().ListIndexes(ctx, schema, table)
+	if err != nil {
+		return nil, queryErr(err)
+	}
+	out := make([]protocol.IndexInfo, len(infos))
+	for i, idx := range infos {
+		cols := make([]protocol.IndexColumn, len(idx.Columns))
+		for j, name := range idx.Columns {
+			cols[j] = protocol.IndexColumn{Name: name, Position: int32(j + 1)}
+		}
+		out[i] = protocol.IndexInfo{Name: idx.Name, Unique: idx.Unique, Primary: idx.Primary, Columns: cols}
+	}
+	return out, nil
 }
 
 func (c *Conn) ListForeignKeys(ctx context.Context, schema, table string) ([]protocol.ForeignKeyInfo, error) {
-	rows, err := c.queryCtx(ctx,
-		`SELECT c.constraint_name, c1.column_name, rc.owner, rc.table_name, c2.column_name
-		   FROM all_constraints c
-		   JOIN all_cons_columns c1 ON c1.owner = c.owner AND c1.constraint_name = c.constraint_name
-		   JOIN all_constraints rc ON rc.owner = c.r_owner AND rc.constraint_name = c.r_constraint_name
-		   JOIN all_cons_columns c2 ON c2.owner = rc.owner AND c2.constraint_name = rc.constraint_name AND c2.position = c1.position
-		  WHERE c.owner = ? AND c.table_name = ? AND c.constraint_type = 'R'
-		  ORDER BY c.constraint_name, c1.position`, schema, table)
+	infos, err := c.kernel().ListForeignKeys(ctx, schema, table)
 	if err != nil {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
+		return nil, queryErr(err)
 	}
-	defer rows.Close()
-	type agg struct {
-		refSchema, refTable string
-		from, to            []string
-	}
-	order := []string{}
-	seen := map[string]bool{}
-	groups := map[string]*agg{}
-	for rows.Next() {
-		var name, from, refSchema, refTable, to string
-		if err := rows.Scan(&name, &from, &refSchema, &refTable, &to); err != nil {
-			return nil, err
+	out := make([]protocol.ForeignKeyInfo, len(infos))
+	for i, fk := range infos {
+		out[i] = protocol.ForeignKeyInfo{
+			Name:              fk.Name,
+			Columns:           fk.Columns,
+			ReferencedSchema:  fk.RefSchema,
+			ReferencedTable:   fk.RefTable,
+			ReferencedColumns: fk.RefColumns,
+			OnUpdate:          fkActionFromKernel(fk.OnUpdate),
+			OnDelete:          fkActionFromKernel(fk.OnDelete),
 		}
-		if !seen[name] {
-			seen[name] = true
-			order = append(order, name)
-			groups[name] = &agg{refSchema: refSchema, refTable: refTable}
-		}
-		groups[name].from = append(groups[name].from, from)
-		groups[name].to = append(groups[name].to, to)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	out := make([]protocol.ForeignKeyInfo, 0)
-	for _, name := range order {
-		a := groups[name]
-		out = append(out, protocol.ForeignKeyInfo{
-			Name:              name,
-			Columns:           a.from,
-			ReferencedSchema:  a.refSchema,
-			ReferencedTable:   a.refTable,
-			ReferencedColumns: a.to,
-		})
 	}
 	return out, nil
 }
 
 func (c *Conn) CreateTableSQL(ctx context.Context, schema, table string) (string, error) {
-	cols, err := c.ListColumns(ctx, schema, table)
+	ddl, err := c.kernel().CreateTableSQL(ctx, schema, table)
 	if err != nil {
-		return "", err
-	}
-	if len(cols) == 0 {
-		return "", &protocol.PolyDBError{Code: protocol.ErrTableNotFound, Message: "table not found: " + schema + "." + table}
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "CREATE TABLE %s.%s (\n", quoteIdent(schema), quoteIdent(table))
-	for i, col := range cols {
-		suffix := ""
-		switch {
-		case col.IsPrimaryKey:
-			suffix = " PRIMARY KEY"
-		case !col.Nullable:
-			suffix = " NOT NULL"
+		if strings.Contains(err.Error(), "not found") {
+			return "", &protocol.PolyDBError{Code: protocol.ErrTableNotFound, Message: "table not found: " + schema + "." + table}
 		}
-		if i < len(cols)-1 {
-			fmt.Fprintf(&b, "  %s %s%s,\n", quoteIdent(col.Name), col.DataType, suffix)
-		} else {
-			fmt.Fprintf(&b, "  %s %s%s\n", quoteIdent(col.Name), col.DataType, suffix)
-		}
+		return "", queryErr(err)
 	}
-	b.WriteString(");")
-	return b.String(), nil
-}
-
-func quoteIdent(s string) string {
-	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+	return ddl, nil
 }
 
 func timeNowMs() float64 {
@@ -450,9 +311,4 @@ func positional(sql string) string {
 		b.WriteByte(sql[i])
 	}
 	return b.String()
-}
-
-// queryCtx 在出包前统一翻译占位符，避免每个查询各写一遍。
-func (c *Conn) queryCtx(ctx context.Context, sql string, args ...any) (*sql.Rows, error) {
-	return c.db.QueryContext(ctx, positional(sql), args...)
 }
