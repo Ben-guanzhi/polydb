@@ -235,8 +235,19 @@ fn move_right_n(text: &str, caret: usize, n: usize) -> usize {
 /// PL/SQL Developer 的 Smart AutoIndent 词表（Tools > Preferences > Editor，
 /// 随工具发行 SmartIndent.txt）：光标所在行以这些词开头时，换行给下一行缩进一级。
 const SMART_INDENT_WORDS: [&str; 13] = [
-    "BEGIN", "IF", "THEN", "ELSE", "ELSIF", "PROCEDURE", "FUNCTION", "CASE", "WHEN", "LOOP",
-    "WHILE", "FOR", "EXCEPTION",
+    "BEGIN",
+    "IF",
+    "THEN",
+    "ELSE",
+    "ELSIF",
+    "PROCEDURE",
+    "FUNCTION",
+    "CASE",
+    "WHEN",
+    "LOOP",
+    "WHILE",
+    "FOR",
+    "EXCEPTION",
 ];
 
 /// 一级缩进 = 两个空格。
@@ -263,7 +274,8 @@ fn first_code_word(line: &str) -> Option<&str> {
 
 /// 行首词是否命中词表（大小写不敏感、整词匹配：`FORM` 不算 `FOR`）。
 fn smart_indent_line(line: &str) -> bool {
-    first_code_word(line).is_some_and(|w| SMART_INDENT_WORDS.iter().any(|k| k.eq_ignore_ascii_case(w)))
+    first_code_word(line)
+        .is_some_and(|w| SMART_INDENT_WORDS.iter().any(|k| k.eq_ignore_ascii_case(w)))
 }
 
 fn is_word(c: char) -> bool {
@@ -914,8 +926,7 @@ impl VimBuf {
             "V" => {
                 self.count = 0;
                 self.mode = VimMode::VisualLine;
-                self.visual_anchor =
-                    Some(line_starts(&self.text)[line_of(&self.text, self.caret)]);
+                self.visual_anchor = Some(line_starts(&self.text)[line_of(&self.text, self.caret)]);
                 let (lo, hi) = self
                     .selection_range()
                     .expect("visual_anchor just set, selection must exist");

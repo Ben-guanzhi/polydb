@@ -58,9 +58,12 @@ async fn conn_and_table(suffix: &str) -> OracleConn {
     c.execute(&format!("INSERT INTO {table} VALUES (1, 'alpha', 10)"), &[])
         .await
         .expect("insert 1");
-    c.execute(&format!("INSERT INTO {table} VALUES (2, 'beta', NULL)"), &[])
-        .await
-        .expect("insert 2");
+    c.execute(
+        &format!("INSERT INTO {table} VALUES (2, 'beta', NULL)"),
+        &[],
+    )
+    .await
+    .expect("insert 2");
     c.execute(&format!("INSERT INTO {table} VALUES (3, 'gamma', 30)"), &[])
         .await
         .expect("insert 3");

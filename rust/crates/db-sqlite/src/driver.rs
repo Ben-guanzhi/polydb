@@ -770,7 +770,8 @@ mod tests {
         }
 
         let result =
-            polydb_rt::block_on(sql_driver.execute("SELECT * FROM users ORDER BY id", &[])).unwrap();
+            polydb_rt::block_on(sql_driver.execute("SELECT * FROM users ORDER BY id", &[]))
+                .unwrap();
         assert_eq!(result.columns.len(), 3);
         assert_eq!(result.rows.len(), 2);
         assert_eq!(result.rows[0][0], Value::Integer(1));
@@ -778,7 +779,8 @@ mod tests {
         assert_eq!(result.rows[0][2], Value::Integer(30));
 
         let result =
-            polydb_rt::block_on(sql_driver.execute("SELECT COUNT(*) AS c FROM users", &[])).unwrap();
+            polydb_rt::block_on(sql_driver.execute("SELECT COUNT(*) AS c FROM users", &[]))
+                .unwrap();
         assert_eq!(result.rows[0][0], Value::Integer(2));
 
         let result = polydb_rt::block_on(sql_driver.execute(

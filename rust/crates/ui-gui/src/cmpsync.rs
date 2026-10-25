@@ -1587,7 +1587,11 @@ mod tests {
         let status = s.finish_diff(vec![t_add, t_drop, u_add]);
         assert_eq!(s.entries.len(), 2, "只显示锚定表 t 的条目");
         assert_eq!(s.all_entries.len(), 3, "全量计划保留");
-        assert_eq!(s.sel, vec!["t/a/add_column".to_string()], "服务端 selected 重放");
+        assert_eq!(
+            s.sel,
+            vec!["t/a/add_column".to_string()],
+            "服务端 selected 重放"
+        );
         assert!(status.contains("锚定 main.t"), "状态行报锚定：{status}");
 
         // 解除锚定：恢复全量 + 默认勾选重算。
@@ -1599,7 +1603,10 @@ mod tests {
         s.anchor_to("main", "missing");
         let msg = s.finish_diff(s.all_entries.clone());
         assert_eq!(s.entries.len(), 0);
-        assert!(msg.contains("无差异") && msg.contains("u"), "锚定空表提示：{msg}");
+        assert!(
+            msg.contains("无差异") && msg.contains("u"),
+            "锚定空表提示：{msg}"
+        );
         assert!(!msg.contains("两侧结构一致"), "不得误报全量一致");
     }
 

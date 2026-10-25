@@ -14,17 +14,106 @@ use lsp_types::{CompletionContext, CompletionItem, CompletionItemKind, Completio
 
 /// Common SQL keywords offered by the completion menu.
 const SQL_KEYWORDS: &[&str] = &[
-    "SELECT", "FROM", "WHERE", "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE", "CREATE",
-    "TABLE", "DROP", "ALTER", "ADD", "COLUMN", "INDEX", "VIEW", "DISTINCT", "AS", "ON", "JOIN",
-    "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "CROSS", "GROUP", "BY", "ORDER", "HAVING", "LIMIT",
-    "OFFSET", "ASC", "DESC", "AND", "OR", "NOT", "NULL", "IS", "IN", "EXISTS", "BETWEEN", "LIKE",
-    "ILIKE", "CASE", "WHEN", "THEN", "ELSE", "END", "UNION", "ALL", "EXPLAIN", "ANALYZE", "BEGIN",
-    "COMMIT", "ROLLBACK", "CAST", "COALESCE", "COUNT", "SUM", "AVG", "MIN", "MAX", "NOW",
-    "CURRENT_DATE", "CURRENT_TIMESTAMP", "PRIMARY", "KEY", "FOREIGN", "REFERENCES", "UNIQUE",
-    "CONSTRAINT", "DEFAULT", "TRUNCATE", "GRANT", "REVOKE", "USE", "SHOW", "DATABASE", "DATABASES",
-    "TABLES", "SCHEMA", "SCHEMAS", "RETURNING", "INTERSECT", "EXCEPT", "WITH", "RECURSIVE", "OVER",
-    "PARTITION", "FILTER", "WINDOW", "ROW", "ROWS", "PRECEDING", "FOLLOWING", "CASCADE",
-    "RESTRICT", "IF",
+    "SELECT",
+    "FROM",
+    "WHERE",
+    "INSERT",
+    "INTO",
+    "VALUES",
+    "UPDATE",
+    "SET",
+    "DELETE",
+    "CREATE",
+    "TABLE",
+    "DROP",
+    "ALTER",
+    "ADD",
+    "COLUMN",
+    "INDEX",
+    "VIEW",
+    "DISTINCT",
+    "AS",
+    "ON",
+    "JOIN",
+    "INNER",
+    "LEFT",
+    "RIGHT",
+    "FULL",
+    "OUTER",
+    "CROSS",
+    "GROUP",
+    "BY",
+    "ORDER",
+    "HAVING",
+    "LIMIT",
+    "OFFSET",
+    "ASC",
+    "DESC",
+    "AND",
+    "OR",
+    "NOT",
+    "NULL",
+    "IS",
+    "IN",
+    "EXISTS",
+    "BETWEEN",
+    "LIKE",
+    "ILIKE",
+    "CASE",
+    "WHEN",
+    "THEN",
+    "ELSE",
+    "END",
+    "UNION",
+    "ALL",
+    "EXPLAIN",
+    "ANALYZE",
+    "BEGIN",
+    "COMMIT",
+    "ROLLBACK",
+    "CAST",
+    "COALESCE",
+    "COUNT",
+    "SUM",
+    "AVG",
+    "MIN",
+    "MAX",
+    "NOW",
+    "CURRENT_DATE",
+    "CURRENT_TIMESTAMP",
+    "PRIMARY",
+    "KEY",
+    "FOREIGN",
+    "REFERENCES",
+    "UNIQUE",
+    "CONSTRAINT",
+    "DEFAULT",
+    "TRUNCATE",
+    "GRANT",
+    "REVOKE",
+    "USE",
+    "SHOW",
+    "DATABASE",
+    "DATABASES",
+    "TABLES",
+    "SCHEMA",
+    "SCHEMAS",
+    "RETURNING",
+    "INTERSECT",
+    "EXCEPT",
+    "WITH",
+    "RECURSIVE",
+    "OVER",
+    "PARTITION",
+    "FILTER",
+    "WINDOW",
+    "ROW",
+    "ROWS",
+    "PRECEDING",
+    "FOLLOWING",
+    "CASCADE",
+    "RESTRICT",
+    "IF",
 ];
 
 /// 单次补全弹出的条目上限。
@@ -60,7 +149,8 @@ impl SqlCompletionProvider {
     pub fn set_schema(&self, tables: Vec<(String, Vec<String>)>) {
         let mut guard = self.completions.borrow_mut();
         guard.retain(|(item, _)| {
-            item.kind != Some(CompletionItemKind::CLASS) && item.kind != Some(CompletionItemKind::FIELD)
+            item.kind != Some(CompletionItemKind::CLASS)
+                && item.kind != Some(CompletionItemKind::FIELD)
         });
         for (table, cols) in tables {
             guard.push(indexed(CompletionItem {
@@ -134,8 +224,7 @@ impl CompletionProvider for SqlCompletionProvider {
         let Some(trigger_character) = trigger.trigger_character else {
             return Task::ready(Ok(CompletionResponse::Array(vec![])));
         };
-        if trigger_character.is_empty()
-            || Self::is_mid_word(text, offset, trigger_character.len())
+        if trigger_character.is_empty() || Self::is_mid_word(text, offset, trigger_character.len())
         {
             return Task::ready(Ok(CompletionResponse::Array(vec![])));
         }

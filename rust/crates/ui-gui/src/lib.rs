@@ -6,8 +6,8 @@
 //! 概览/数据/结构/关系四 rails）+ SQL 编辑器（Enter 执行 / Shift+Enter 换行 /
 //! Ctrl+V 粘贴）+ 结果网格（左键预览、右键菜单、文本/JSON/HEX 面板）。
 
-mod app;
 mod ai;
+mod app;
 mod changes;
 mod cmpsync;
 mod explain;

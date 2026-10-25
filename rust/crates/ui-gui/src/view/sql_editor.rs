@@ -216,13 +216,11 @@ impl Render for SqlEditor {
             .id("sql-editor")
             .size_full()
             .when(self.vim_on, |el| {
-                el.capture_key_down(cx.listener(
-                    |this, event: &KeyDownEvent, window, cx| {
-                        if this.vim_handle_key(event, window, cx) {
-                            cx.stop_propagation();
-                        }
-                    },
-                ))
+                el.capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if this.vim_handle_key(event, window, cx) {
+                        cx.stop_propagation();
+                    }
+                }))
             })
             .capture_action(cx.listener(
                 |this, action: &Enter, _window: &mut Window, cx: &mut Context<Self>| {

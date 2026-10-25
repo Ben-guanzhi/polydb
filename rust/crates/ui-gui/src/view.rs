@@ -20,15 +20,15 @@ use crate::util::{
     MAX_RESULT_ROWS,
 };
 
+pub(crate) mod ai_panel;
 mod dialogs;
 mod grid;
 mod redis;
 mod shell;
 pub(crate) mod sql_completion;
 pub(crate) mod sql_editor;
-pub(crate) mod tables_tree;
-pub(crate) mod ai_panel;
 mod table;
+pub(crate) mod tables_tree;
 
 // 网格作用域 → 稳定元素 id 基数（workbench 与每个表 tab 的 id 空间隔离）。
 fn src_key(src: GridSrc) -> usize {

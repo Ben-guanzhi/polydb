@@ -28,9 +28,7 @@ use crate::presets;
 use crate::profile::{self, ProfileColumn};
 use crate::tabs::{self, ActiveView};
 use crate::theme::Theme;
-use crate::util::{
-    blob_fetch_err_text, char_ceil, char_floor, edit_line, split_statements,
-};
+use crate::util::{blob_fetch_err_text, char_ceil, char_floor, edit_line, split_statements};
 
 // ─── IO 桥 ─────────────────────────────────────────────────
 // gpui 自带 executor，而驱动（sqlx / tiberius / redis）的 future 需要 tokio
@@ -3473,7 +3471,10 @@ impl PolyDBApp {
             if *need_conn && !connected {
                 continue;
             }
-            all.push((QuickTarget::Command((*id).to_string()), format!("> {label}")));
+            all.push((
+                QuickTarget::Command((*id).to_string()),
+                format!("> {label}"),
+            ));
         }
         if q.is_empty() {
             all

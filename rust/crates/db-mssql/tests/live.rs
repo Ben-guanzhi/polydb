@@ -265,9 +265,12 @@ fn live_list_schemas_db_prefixed_user_schema_and_type_names() {
         let c = MssqlConn::open(&host, port, Some(&db), &user, &pass).expect("connect mssql");
 
         // 1) db_ 前缀的用户 schema
-        c.execute("IF SCHEMA_ID(N'db_admin') IS NULL EXEC('CREATE SCHEMA db_admin')", &[])
-            .await
-            .expect("create schema");
+        c.execute(
+            "IF SCHEMA_ID(N'db_admin') IS NULL EXEC('CREATE SCHEMA db_admin')",
+            &[],
+        )
+        .await
+        .expect("create schema");
         let schemas = c.list_schemas().await.expect("list schemas");
         let names: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
         assert!(
@@ -319,11 +322,23 @@ fn live_list_schemas_db_prefixed_user_schema_and_type_names() {
         let got: Vec<&str> = r.columns.iter().map(|c| c.data_type.as_str()).collect();
         assert_eq!(
             got,
-            vec!["int", "nvarchar", "decimal", "datetime2", "float", "varbinary", "bit"],
+            vec![
+                "int",
+                "nvarchar",
+                "decimal",
+                "datetime2",
+                "float",
+                "varbinary",
+                "bit"
+            ],
             "data_type 应为 SQL 拼写而非 tiberius Debug 输出"
         );
 
-        c.execute(&format!("DROP TABLE dbo.{table}"), &[]).await.expect("drop types table");
-        c.execute("DROP SCHEMA IF EXISTS db_admin", &[]).await.expect("drop schema");
+        c.execute(&format!("DROP TABLE dbo.{table}"), &[])
+            .await
+            .expect("drop types table");
+        c.execute("DROP SCHEMA IF EXISTS db_admin", &[])
+            .await
+            .expect("drop schema");
     });
 }

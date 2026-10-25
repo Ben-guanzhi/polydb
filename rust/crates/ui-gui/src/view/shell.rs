@@ -20,7 +20,11 @@ impl PolyDBApp {
 
     // ─── 主界面：顶栏 + 左栏 + 右栏 ───
 
-    pub(super) fn render_root(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_root(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let th = &self.theme;
         let root_bg = th.bg;
         let top_bar = self.render_top_bar(cx);
@@ -354,7 +358,6 @@ impl PolyDBApp {
             )
     }
 
-
     // ─── 主列：对象 tab 条 + 活动视图 ───
 
     pub(super) fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
@@ -478,7 +481,11 @@ impl PolyDBApp {
 
     // ─── 工作台视图 ───
 
-    pub(super) fn render_workbench(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_workbench(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let log_view = self.render_multi_log();
         let grid = self.render_grid(GridSrc::Workbench, Some(MAX_RESULT_ROWS), None, cx);
         let preview_panel = self.render_preview(GridSrc::Workbench, cx);
@@ -490,18 +497,21 @@ impl PolyDBApp {
             // 首次注入当前 schema（表名；列名后续由 TableDetail 回填）。
             Self::feed_editor_schema(cx, &editor, &self.tables);
             editor.update(cx, |e, _cx| e.set_has_connection(self.workspace.is_some()));
-            let sub = cx.subscribe(&editor, |this: &mut Self, _entity, event: &crate::view::sql_editor::SqlEditorEvent, cx| {
-                match event {
-                    crate::view::sql_editor::SqlEditorEvent::TextChanged(text) => {
-                        this.sql = text.clone();
+            let sub = cx.subscribe(
+                &editor,
+                |this: &mut Self, _entity, event: &crate::view::sql_editor::SqlEditorEvent, cx| {
+                    match event {
+                        crate::view::sql_editor::SqlEditorEvent::TextChanged(text) => {
+                            this.sql = text.clone();
+                        }
+                        crate::view::sql_editor::SqlEditorEvent::RunQuery(sql) => {
+                            this.sql = sql.clone();
+                            this.run_query(cx);
+                        }
                     }
-                    crate::view::sql_editor::SqlEditorEvent::RunQuery(sql) => {
-                        this.sql = sql.clone();
-                        this.run_query(cx);
-                    }
-                }
-                cx.notify();
-            });
+                    cx.notify();
+                },
+            );
             self.sql_editor = Some(editor);
             self.sql_editor_sub = Some(sub);
         } else {
@@ -536,9 +546,7 @@ impl PolyDBApp {
             .min_h(px(0.0))
             .flex()
             .flex_col()
-            .when_some(editor_view, |d, ed| {
-                d.child(ed.into_element())
-            })
+            .when_some(editor_view, |d, ed| d.child(ed.into_element()))
             .children(log_view)
             .children(export_bar)
             .children(grid)
@@ -548,7 +556,11 @@ impl PolyDBApp {
     }
 
     /// 把当前连接的表名清单注入编辑器补全器（列名为空，待 TableDetail 回填）。
-    fn feed_editor_schema(cx: &mut Context<Self>, editor: &Entity<crate::view::sql_editor::SqlEditor>, tables: &[TableInfo]) {
+    fn feed_editor_schema(
+        cx: &mut Context<Self>,
+        editor: &Entity<crate::view::sql_editor::SqlEditor>,
+        tables: &[TableInfo],
+    ) {
         let schema: Vec<(String, Vec<String>)> = tables
             .iter()
             .map(|t| (t.name.clone(), Vec::new()))

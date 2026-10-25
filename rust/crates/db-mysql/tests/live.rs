@@ -37,9 +37,12 @@ async fn conn_and_table() -> MySqlConn {
     )
     .await
     .expect("create table");
-    c.execute(&format!("INSERT INTO {TABLE} VALUES (1,'alpha'),(2,'beta')"), &[])
-        .await
-        .expect("insert");
+    c.execute(
+        &format!("INSERT INTO {TABLE} VALUES (1,'alpha'),(2,'beta')"),
+        &[],
+    )
+    .await
+    .expect("insert");
     // 建表/插数提交，测试事务从干净状态开始
     let tx = c
         .begin_tx(TxMode {
@@ -52,7 +55,9 @@ async fn conn_and_table() -> MySqlConn {
 }
 
 async fn cleanup(c: &MySqlConn) {
-    let _ = c.execute(&format!("DROP TABLE IF EXISTS {TABLE}"), &[]).await;
+    let _ = c
+        .execute(&format!("DROP TABLE IF EXISTS {TABLE}"), &[])
+        .await;
 }
 
 /// REPEATABLE READ 快照行为：事务内的两次读一致，看不到另一连接在事务开始
@@ -86,9 +91,13 @@ async fn live_transaction_repeatable_read_snapshot() {
         })
         .await
         .expect("begin tx b");
-    b.execute_in_tx(&mut tx_b, &format!("INSERT INTO {TABLE} VALUES (3,'gamma')"), &[])
-        .await
-        .expect("insert in tx b");
+    b.execute_in_tx(
+        &mut tx_b,
+        &format!("INSERT INTO {TABLE} VALUES (3,'gamma')"),
+        &[],
+    )
+    .await
+    .expect("insert in tx b");
     b.commit(tx_b).await.expect("commit b");
 
     // A 再读：RR 快照必须仍是 2 行
@@ -114,7 +123,11 @@ async fn live_transaction_repeatable_read_snapshot() {
         .execute_in_tx(&mut tx, &format!("SELECT COUNT(*) FROM {TABLE}"), &[])
         .await
         .expect("count new tx");
-    assert_eq!(r.rows[0][0], Value::Integer(3), "新事务应看到 B 提交的 3 行");
+    assert_eq!(
+        r.rows[0][0],
+        Value::Integer(3),
+        "新事务应看到 B 提交的 3 行"
+    );
     a.commit(tx).await.expect("commit c");
 
     cleanup(&a).await;

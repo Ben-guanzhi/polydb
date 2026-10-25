@@ -9,7 +9,10 @@
 //! - 图标改用文本标签（避免图标名在不同版本间漂移）。
 
 use gpui::prelude::*;
-use gpui::{div, px, App, ClickEvent, Context, Entity, IntoElement, Render, SharedString, Subscription, Window};
+use gpui::{
+    div, px, App, ClickEvent, Context, Entity, IntoElement, Render, SharedString, Subscription,
+    Window,
+};
 use gpui_component::{
     button::{Button, ButtonVariants as _},
     form::{field, v_form},
@@ -17,8 +20,8 @@ use gpui_component::{
     input::{Input, InputState},
     label::Label,
     list::ListItem,
-    select::{Select, SelectEvent, SelectItem, SelectState},
     scroll::ScrollableElement as _,
+    select::{Select, SelectEvent, SelectItem, SelectState},
     v_flex, ActiveTheme as _, Disableable as _, IndexPath, Selectable as _, Sizable as _,
 };
 
@@ -575,15 +578,11 @@ impl Render for AiPanel {
                     }))
                     .when(is_loading, |this| {
                         this.child(
-                            h_flex()
-                                .px_2()
-                                .py_1()
-                                .gap_2()
-                                .child(
-                                    Label::new("Thinking...")
-                                        .text_sm()
-                                        .text_color(cx.theme().muted_foreground),
-                                ),
+                            h_flex().px_2().py_1().gap_2().child(
+                                Label::new("Thinking...")
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground),
+                            ),
                         )
                     })
                     .into_any_element()

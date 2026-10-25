@@ -331,7 +331,13 @@ impl Ph {
 
 /// 渲染 LIKE 家族条件（behavior.md §13.5）：返回 SQL 片段与绑定值。
 /// 每种形态恰好一个占位符，由 [`Ph`] 按方言拼写。
-fn render_like(d: BrowseDialect, ph: &mut Ph, col: &str, tc: &TextCond, cs: Option<bool>) -> (String, Value) {
+fn render_like(
+    d: BrowseDialect,
+    ph: &mut Ph,
+    col: &str,
+    tc: &TextCond,
+    cs: Option<bool>,
+) -> (String, Value) {
     let not = if tc.neg { "NOT " } else { "" };
     let p = ph.next();
     if d.flavor == BrowseFlavor::Sqlite && cs == Some(true) {

@@ -13,16 +13,14 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use gpui::prelude::*;
-use gpui::{
-    div, px, App, ClickEvent, Context, Entity, Subscription, Window,
-};
-use gpui_component::{
-    h_flex, input::InputEvent, input::InputState, label::Label, list::ListItem,
-    tree::TreeEntry, tree::TreeEvent, tree::TreeItem, tree::TreeState, v_flex, ActiveTheme as _,
-    Icon, IconName, Sizable as _,
-};
+use gpui::{div, px, App, ClickEvent, Context, Entity, Subscription, Window};
 use gpui_component::input::Input;
 use gpui_component::tree::tree;
+use gpui_component::{
+    h_flex, input::InputEvent, input::InputState, label::Label, list::ListItem, tree::TreeEntry,
+    tree::TreeEvent, tree::TreeItem, tree::TreeState, v_flex, ActiveTheme as _, Icon, IconName,
+    Sizable as _,
+};
 use polydb_core::{ColumnInfo, TableInfo, TableType};
 
 use crate::app::PolyDBApp;
@@ -72,10 +70,14 @@ impl TablesTree {
                 }
             }),
             // 搜索框输入 → 重建。
-            cx.subscribe_in(&search, window, |this, _input, _ev: &InputEvent, _window, cx| {
-                this.search_query = this.search.read(cx).value().to_string();
-                this.rebuild(cx);
-            }),
+            cx.subscribe_in(
+                &search,
+                window,
+                |this, _input, _ev: &InputEvent, _window, cx| {
+                    this.search_query = this.search.read(cx).value().to_string();
+                    this.rebuild(cx);
+                },
+            ),
         ];
 
         let mut this = Self {
@@ -132,7 +134,11 @@ impl TablesTree {
         } else {
             theme.foreground
         };
-        let bg = if selected { theme.list_active } else { theme.list_even };
+        let bg = if selected {
+            theme.list_active
+        } else {
+            theme.list_even
+        };
 
         let icon = if is_folder {
             if entry.is_expanded() {
@@ -175,7 +181,11 @@ impl TablesTree {
                             .child(Icon::new(icon).size_4().text_color(text_color.opacity(0.7)))
                             .child(Label::new(item.label.clone()).text_sm()),
                     )
-                    .child(Label::new(prefix).text_xs().text_color(text_color.opacity(0.6))),
+                    .child(
+                        Label::new(prefix)
+                            .text_xs()
+                            .text_color(text_color.opacity(0.6)),
+                    ),
             )
             .when(is_table, |el| {
                 el.on_click(cx.listener(move |_this, _: &ClickEvent, _window, cx| {
@@ -300,7 +310,9 @@ impl Render for TablesTree {
             )
             .child(
                 tree(&tree_state, move |ix, entry, selected, _window, cx| {
-                    view.update(cx, |this, cx| this.render_tree_item(ix, entry, selected, cx))
+                    view.update(cx, |this, cx| {
+                        this.render_tree_item(ix, entry, selected, cx)
+                    })
                 })
                 .flex_1()
                 .min_h_0()
