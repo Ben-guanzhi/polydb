@@ -29,7 +29,7 @@ func (fakeBackend) ColumnIndexTypes(string, string) (map[string]string, error) {
 func (fakeBackend) Close() error { return nil }
 
 // key builds a KeyPressMsg from a key name or single printable string
-//（移植自 sqltui app_test.go）。
+// （移植自 sqltui app_test.go）。
 func key(s string) tea.KeyPressMsg {
 	switch s {
 	case "enter":
@@ -67,5 +67,3 @@ func newTestApp(t *testing.T) *App {
 	a.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	return a
 }
-
-

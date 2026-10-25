@@ -7,9 +7,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/polydb/polydb/internal/tui/backend"
 	"github.com/polydb/polydb/internal/theme"
 	"github.com/polydb/polydb/internal/tui"
+	"github.com/polydb/polydb/internal/tui/backend"
 )
 
 // --- key browser -----------------------------------------------------------------
@@ -40,7 +40,7 @@ type keyBrowser struct {
 	state    tui.ListState
 
 	filter    tui.LineInput // substring the shown keys must contain
-	filtering bool         // keys currently go to the filter input
+	filtering bool          // keys currently go to the filter input
 }
 
 func newKeyBrowser(kv backend.KVBackend, openTabs int) *keyBrowser {

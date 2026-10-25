@@ -19,11 +19,11 @@ import (
 type schemaCache struct {
 	mu      sync.Mutex
 	backend backend.Backend                 // connection the snapshot belongs to
-	listed  bool                       // namespace/table listing completed
-	ns      map[string]string          // table -> namespace (for column fetches)
-	cols    map[string][]string        // table -> columns (nil until fetched)
+	listed  bool                            // namespace/table listing completed
+	ns      map[string]string               // table -> namespace (for column fetches)
+	cols    map[string][]string             // table -> columns (nil until fetched)
 	meta    map[string][]backend.ColumnMeta // table -> full column metadata
-	fetched map[string]bool            // column fetch attempted (even if empty)
+	fetched map[string]bool                 // column fetch attempted (even if empty)
 
 	// ver bumps whenever anything above changes the answer CompletionSchema
 	// would compute; snap is the last assembled complete.Schema, keyed by
@@ -36,13 +36,13 @@ type schemaCache struct {
 	// caller until invalidated: Suggest/DotTable consume it read-only, and
 	// setting a field on the returned Schema value (as the inline prompt
 	// does with Tables) only touches the caller's copy.
-	ver        int
-	builds     int // snapshot builds; tests pin the must-hit property
-	snap       complete.Schema
-	snapOK     bool
-	snapVer    int
-	snapBe     backend.Backend
-	snapFrame  *tuidata.Frame
+	ver       int
+	builds    int // snapshot builds; tests pin the must-hit property
+	snap      complete.Schema
+	snapOK    bool
+	snapVer   int
+	snapBe    backend.Backend
+	snapFrame *tuidata.Frame
 }
 
 // completionCache returns the app's schema snapshot. The pointer is created

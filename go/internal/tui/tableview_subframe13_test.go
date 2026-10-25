@@ -29,8 +29,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/polydb/polydb/internal/tuidata"
 	"github.com/polydb/polydb/internal/theme"
+	"github.com/polydb/polydb/internal/tuidata"
 )
 
 const (

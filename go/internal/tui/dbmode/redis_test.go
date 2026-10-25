@@ -8,7 +8,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	
 	"github.com/polydb/polydb/internal/tui"
 )
 

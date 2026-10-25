@@ -6,8 +6,8 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/polydb/polydb/internal/tuidata"
 	"github.com/polydb/polydb/internal/theme"
+	"github.com/polydb/polydb/internal/tuidata"
 )
 
 // SearchBar implements live search over the current frame. While active it
@@ -20,7 +20,7 @@ type SearchBar struct {
 
 	base       *tuidata.Frame // frame being searched (top of stack at activation)
 	preview    *tuidata.Frame // live filtered result
-	searchCols []int       // when non-nil, search only these column indices
+	searchCols []int          // when non-nil, search only these column indices
 
 	// fold 缓存 base 每格的小写形，跨按键复用；随会话起止生灭。
 	fold tuidata.FoldCache

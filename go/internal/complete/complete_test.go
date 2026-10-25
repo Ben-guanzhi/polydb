@@ -5,7 +5,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-
 )
 
 // completionSchema is the fixture most Suggest tests run against.
@@ -341,7 +340,6 @@ func TestKeywords(t *testing.T) {
 		t.Error("Keywords returns shared backing array")
 	}
 }
-
 
 func TestSuggestKeywordListsSorted(t *testing.T) {
 	if !sort.StringsAreSorted(sqlKeywords) {

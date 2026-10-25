@@ -9,8 +9,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/sahilm/fuzzy"
 
-	"github.com/polydb/polydb/internal/tuidata"
 	"github.com/polydb/polydb/internal/theme"
+	"github.com/polydb/polydb/internal/tuidata"
 )
 
 // sheetSepChar is the vertical bar drawn between the key and value columns.

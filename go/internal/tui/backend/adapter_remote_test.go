@@ -51,50 +51,50 @@ func TestAdapterRemoteEndToEnd(t *testing.T) {
 		t.Fatalf("begin tx: %v", err)
 	}
 	if _, err := cli.ExecuteInTx(ctx, tx.ID, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)"); err != nil {
-			t.Fatalf("create table: %v", err)
-		}
-		if _, err := cli.ExecuteInTx(ctx, tx.ID, "INSERT INTO users (id, name) VALUES (1, 'alice'), (2, 'bob')"); err != nil {
-			t.Fatalf("insert: %v", err)
-		}
-		if _, err := cli.CommitTransaction(ctx, tx.ID); err != nil {
-			t.Fatalf("commit tx: %v", err)
-		}
+		t.Fatalf("create table: %v", err)
+	}
+	if _, err := cli.ExecuteInTx(ctx, tx.ID, "INSERT INTO users (id, name) VALUES (1, 'alice'), (2, 'bob')"); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if _, err := cli.CommitTransaction(ctx, tx.ID); err != nil {
+		t.Fatalf("commit tx: %v", err)
+	}
 
-		// 适配器把 transport 结果映射成 tuidata.Frame。
-		ad := backend.NewAdapter(cli, info)
-		if got := ad.Kind(); got != "sqlite" {
-			t.Fatalf("adapter kind = %q, want sqlite", got)
-		}
-		schemas, err := cli.ListSchemas(ctx, info.ID)
-		if err != nil {
-			t.Fatalf("list schemas: %v", err)
-		}
-		if len(schemas) == 0 {
-			t.Fatal("no schemas returned")
-		}
-		schema := schemas[0].Name
-		frame, err := ad.FetchTable(schema, "users", 100)
-		if err != nil {
-			t.Fatalf("fetch table: %v", err)
-		}
-		if frame == nil || frame.NumRows() != 2 {
-			t.Fatalf("frame rows = %v, want 2", frame)
-		}
-		if frame.NumCols() != 2 {
-			t.Fatalf("frame cols = %d, want 2", frame.NumCols())
-		}
+	// 适配器把 transport 结果映射成 tuidata.Frame。
+	ad := backend.NewAdapter(cli, info)
+	if got := ad.Kind(); got != "sqlite" {
+		t.Fatalf("adapter kind = %q, want sqlite", got)
+	}
+	schemas, err := cli.ListSchemas(ctx, info.ID)
+	if err != nil {
+		t.Fatalf("list schemas: %v", err)
+	}
+	if len(schemas) == 0 {
+		t.Fatal("no schemas returned")
+	}
+	schema := schemas[0].Name
+	frame, err := ad.FetchTable(schema, "users", 100)
+	if err != nil {
+		t.Fatalf("fetch table: %v", err)
+	}
+	if frame == nil || frame.NumRows() != 2 {
+		t.Fatalf("frame rows = %v, want 2", frame)
+	}
+	if frame.NumCols() != 2 {
+		t.Fatalf("frame cols = %d, want 2", frame.NumCols())
+	}
 
-		// PrimaryKeys 经 ListColumns 的 is_primary_key 推断。
-		pks, err := ad.PrimaryKeys(schema, "users")
-		if err != nil {
-			t.Fatalf("primary keys: %v", err)
-		}
-		if len(pks) != 1 || pks[0] != "id" {
-			t.Fatalf("primary keys = %v, want [id]", pks)
-		}
+	// PrimaryKeys 经 ListColumns 的 is_primary_key 推断。
+	pks, err := ad.PrimaryKeys(schema, "users")
+	if err != nil {
+		t.Fatalf("primary keys: %v", err)
+	}
+	if len(pks) != 1 || pks[0] != "id" {
+		t.Fatalf("primary keys = %v, want [id]", pks)
+	}
 
-		// Run 直查走 ExecuteQuery → tuidata.Frame。
-		res, err := ad.Run("SELECT name FROM users WHERE id = 2")
+	// Run 直查走 ExecuteQuery → tuidata.Frame。
+	res, err := ad.Run("SELECT name FROM users WHERE id = 2")
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}

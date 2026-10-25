@@ -257,7 +257,7 @@ var (
 )
 
 // NewConnectOverlay 导出连接选择器，供组合根在启动时压栈
-//（对应 sqltui dbmode.Run 的 PushOverlay(newConnForm(...))）。
+// （对应 sqltui dbmode.Run 的 PushOverlay(newConnForm(...))）。
 func NewConnectOverlay(ctx tui.AppContext) tui.Overlay {
 	return newConnPicker(ctx)
 }

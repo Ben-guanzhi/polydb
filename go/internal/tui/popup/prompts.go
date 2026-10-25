@@ -5,10 +5,10 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/polydb/polydb/internal/tuidata"
 	"github.com/polydb/polydb/internal/complete"
 	"github.com/polydb/polydb/internal/theme"
 	"github.com/polydb/polydb/internal/tui"
+	"github.com/polydb/polydb/internal/tuidata"
 )
 
 // qxPromptBuilders maps a prompt kind to its statement builder (queryexec.go).

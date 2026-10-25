@@ -20,8 +20,8 @@ import (
 
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/polydb/polydb/internal/tuidata"
 	"github.com/polydb/polydb/internal/theme"
+	"github.com/polydb/polydb/internal/tuidata"
 )
 
 // --- 造帧助手 ---------------------------------------------------------------
