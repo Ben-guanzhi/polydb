@@ -58,10 +58,15 @@ pub enum Role {
 #[derive(Debug, Clone)]
 pub struct CompletionResponse {
     pub content: String,
+    // Reported by providers that bill by token; not surfaced by any widget yet.
+    #[allow(dead_code)]
     pub tokens_used: Option<u32>,
 }
 
 /// Trait for LLM providers. Implement this to add new AI backends.
+// The provider registry is not wired into a panel yet, so nothing calls these
+// from inside the crate; they are part of the intended public surface.
+#[allow(dead_code)]
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     /// Get the name of this provider.

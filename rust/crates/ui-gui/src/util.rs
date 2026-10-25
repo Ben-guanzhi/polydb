@@ -201,6 +201,7 @@ pub(crate) fn char_ceil(s: &str, i: usize) -> usize {
 }
 
 // 光标所在行的字节边界 [start, end)，end 不含换行符。
+#[allow(dead_code)] // Vim 引擎的光标定位，待编辑器接线后启用
 pub(crate) fn line_bounds(s: &str, i: usize) -> (usize, usize) {
     let start = s[..i].rfind('\n').map(|p| p + 1).unwrap_or(0);
     let end = s[i..].find('\n').map(|p| i + p).unwrap_or(s.len());
@@ -208,6 +209,7 @@ pub(crate) fn line_bounds(s: &str, i: usize) -> (usize, usize) {
 }
 
 // 行内按“字符列”定位字节下标（越界钳到行尾，保证 char 边界）。
+#[allow(dead_code)] // Vim 引擎的按列定位，待编辑器接线后启用
 pub(crate) fn col_to_byte(line: &str, col_chars: usize) -> usize {
     line.char_indices()
         .nth(col_chars)

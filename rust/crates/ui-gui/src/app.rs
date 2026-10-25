@@ -1730,6 +1730,9 @@ impl PolyDBApp {
         );
     }
 
+    // Bound to the table-tree expand/collapse action, and open_quick_switcher
+    // to its keybinding; neither is reachable from the shell yet.
+    #[allow(dead_code)]
     pub(crate) fn toggle_expand(&mut self, ti: usize, cx: &mut Context<Self>) {
         if !self.expanded.remove(&ti) {
             self.expanded.insert(ti);
@@ -3426,6 +3429,7 @@ impl PolyDBApp {
 
     // ─── G5.3 Quick Switcher（Ctrl+P：在打开的对象标签间跳转）───
 
+    #[allow(dead_code)] // See toggle_expand: the keybinding is not wired yet.
     pub(crate) fn open_quick_switcher(&mut self, cx: &mut Context<Self>) {
         self.quick_open = true;
         self.quick_query.clear();

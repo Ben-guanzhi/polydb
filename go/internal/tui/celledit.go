@@ -139,7 +139,10 @@ func buildDelete(kind protocol.DatabaseKind, table string, pks []string, frame *
 
 // commitCellEdit runs the edit described by pe: it issues a PK-keyed UPDATE
 // and returns a command producing cellSavedMsg.
-func commitCellEdit(ctx AppContext, pe PendingEdit) tea.Cmd {
+//
+// It has no caller yet: the pending-edits queue lands in a later commit, so
+// golangci-lint only sees dead code here. Drop the directive once it is wired.
+func commitCellEdit(ctx AppContext, pe PendingEdit) tea.Cmd { //nolint:unused
 	be := ctx.Backend()
 	if be == nil {
 		return func() tea.Msg { return ErrorMsg{Err: fmt.Errorf("no backend, cannot edit")} }

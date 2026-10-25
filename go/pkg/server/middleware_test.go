@@ -24,7 +24,7 @@ func TestBodyLimitRejectsOversizedRequests(t *testing.T) {
 			t.Fatalf("inner read: %v", err)
 		}
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "read %d", n)
+		_, _ = fmt.Fprintf(w, "read %d", n)
 	})
 	handler := bodyLimitMiddleware(10, inner)
 
