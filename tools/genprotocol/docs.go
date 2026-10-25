@@ -38,6 +38,18 @@ var skipDirs = map[string]bool{
 	"node_modules": true, "dist": true, "build": true, ".qoder": true,
 }
 
+// skipDir reports whether a directory is build output or a vendored dependency
+// rather than project source. Cargo's output directory is named by
+// CARGO_TARGET_DIR, and this repo points it at rust/target-gnu (gitignored,
+// ~30GB after one local build); pruning only the bare name "target" let a
+// local `genprotocol docs` walk 30GB of artifacts and never finish. CI never
+// hit this because a fresh checkout has no build cache, which is exactly why
+// the bug survived: the gate was green where it was enforced and unusable
+// where it was needed. Match the prefix so any target dir name is covered.
+func skipDir(name string) bool {
+	return skipDirs[name] || strings.HasPrefix(name, "target")
+}
+
 // genprotocol already stops generated code from drifting off spec/. Docs drift
 // differently: nobody regenerates them, so a renamed or dropped error code and
 // env var keep living in prose forever and the reader follows a dead
@@ -133,7 +145,7 @@ func walkFiles(repo string, fn func(rel string, data []byte)) {
 			return nil
 		}
 		if d.IsDir() {
-			if skipDirs[d.Name()] {
+			if skipDir(d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil

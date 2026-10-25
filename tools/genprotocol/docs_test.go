@@ -157,3 +157,24 @@ func TestSpansAreExtractedFromSurroundingProse(t *testing.T) {
 		t.Errorf("refs = %d, want 1: only the backticked mention counts", refs)
 	}
 }
+
+func TestCargoTargetVariantsArePruned(t *testing.T) {
+	// CARGO_TARGET_DIR names the output dir; this repo uses rust/target-gnu.
+	// A token that exists only inside a cargo output dir must not count as a
+	// definition, or a doc citing it would pass while naming build garbage.
+	repo := writeRepo(t, map[string]string{
+		"go/pkg/protocol/error.go":   "package protocol\nconst Timeout = \"POLYDB_ERR_TIMEOUT\"\n",
+		"rust/target/debug/a.rs":     "const X = \"POLYDB_ERR_ONLY_IN_PLAIN_TARGET\";\n",
+		"rust/target-gnu/debug/b.rs": "const Y = \"POLYDB_ERR_ONLY_IN_GNU_TARGET\";\n",
+		"docs/errors.md":             "Both `POLYDB_ERR_ONLY_IN_PLAIN_TARGET` and `POLYDB_ERR_ONLY_IN_GNU_TARGET` are stale.",
+	})
+
+	drift, refs, _, _, _ := checkDocTokens(repo)
+
+	if len(drift) != 2 {
+		t.Fatalf("drift = %v, want both tokens reported: neither is defined outside cargo output dirs", drift)
+	}
+	if refs != 2 {
+		t.Errorf("refs = %d, want 2", refs)
+	}
+}
