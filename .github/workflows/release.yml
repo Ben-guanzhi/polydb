@@ -89,6 +89,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Release builds the Go binaries from go/, whose go.mod carries
+      # `replace github.com/dbcore/dbcore => ../../dbcore`. dbcore is unpublished
+      # at its placeholder module path, so this sibling checkout is what makes the
+      # replace resolvable here exactly as it does in ci.yml.
+      #
+      # Stopgap for CI only: see PUBLISH-BLOCKER-dbcore-module-path-2026-10-26.md
+      # at the workspace root for the permanent fix.
+      - name: check out dbcore (sibling, for the local replace)
+        env:
+          DBCORE_TOKEN: ${{ secrets.DBCORE_CHECKOUT_TOKEN }}
+        run: |
+          set -eu
+          dest="$(dirname "$GITHUB_WORKSPACE")/dbcore"
+          if [ -n "${DBCORE_TOKEN:-}" ]; then
+            hdr="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$DBCORE_TOKEN" | base64 -w0)"
+            git -c "http.extraheader=$hdr" clone --depth 1 https://github.com/Ben-guanzhi/dbcore.git "$dest"
+          else
+            git clone --depth 1 https://github.com/Ben-guanzhi/dbcore.git "$dest"
+          fi
+
       - uses: actions/setup-go@v6
         with:
           go-version: "1.25"
