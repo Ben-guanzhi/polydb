@@ -83,6 +83,9 @@ impl OracleConn {
                 Value::Float(f) => Box::new(*f) as Box<dyn ToSql>,
                 Value::Bool(b) => Box::new(*b) as Box<dyn ToSql>,
                 Value::String(s) => Box::new(s.clone()) as Box<dyn ToSql>,
+                // NULL 必须绑成 NULL：oracle crate 对 Option<T: ToSql + ToSqlNull>
+                // 的 None 绑定 NULL；此前兜底成 0i64 会把 NULL 过滤值静默变成 0。
+                Value::Null => Box::new(Option::<i64>::None) as Box<dyn ToSql>,
                 _ => Box::new(0i64) as Box<dyn ToSql>,
             })
             .collect()
@@ -165,26 +168,23 @@ pub struct OracleTxHandle;
 
 impl OracleConn {
     pub fn begin_tx(&self, mode: TxMode) -> CoreResult<OracleTxHandle> {
-        // 非默认隔离级别：在开启事务前设置会话隔离级别。
-        // 若当前会话已在事务中，SET TRANSACTION 会失败——因此仅在
-        // 默认 ReadCommitted 时跳过；其余级别尝试设置，失败回滚。
+        // Oracle 的隔离级别声明是 SET TRANSACTION：必须是新事务的第一条
+        // 语句（本连接是隐式事务模型——begin_tx 后、第一条 DML 前执行即成立）。
+        // 旧实现发的是 ALTER SESSION SET TRANSACTION …，两种拼写都不是
+        // Oracle 语法，一直靠"失败回退默认"掩盖。
         if mode.isolation_level != IsolationLevel::ReadCommitted {
             let sql = match mode.isolation_level {
-                IsolationLevel::ReadUncommitted => "ALTER SESSION SET TRANSACTION READ UNCOMMITTED",
-                IsolationLevel::RepeatableRead => {
-                    "ALTER SESSION SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"
-                }
-                IsolationLevel::Serializable => {
-                    "ALTER SESSION SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"
-                }
-                IsolationLevel::ReadCommitted => {
-                    return Ok(OracleTxHandle);
-                }
+                // Oracle 没有 READ UNCOMMITTED：回退默认 ReadCommitted。
+                IsolationLevel::ReadUncommitted => return Ok(OracleTxHandle),
+                // Oracle 也没有 REPEATABLE READ：最近的对应物是 SERIALIZABLE
+                //（与 Go 侧 go-ora 的映射一致）。
+                IsolationLevel::RepeatableRead => "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+                IsolationLevel::Serializable => "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+                IsolationLevel::ReadCommitted => return Ok(OracleTxHandle),
             };
-            // 非默认级别设置失败不视为致命错误：Oracle 对会话级隔离切换
-            // 有一定限制（如 REPEATABLE READ 需 SERIALIZABLE 模式启用），
-            // 回退到默认即可，与 Go 侧 go-ora 行为一致。
-            let _ = self.conn.lock().query_as::<i64>(sql, &[]);
+            // 非默认级别设置失败不视为致命错误：SET TRANSACTION 要求它确实是
+            // 新事务的第一条语句，若此前有语句意外开着事务会失败——回退默认。
+            let _ = self.conn.lock().execute(sql, &[]);
         }
         Ok(OracleTxHandle)
     }

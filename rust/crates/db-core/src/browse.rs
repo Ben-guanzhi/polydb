@@ -33,6 +33,10 @@ pub struct BrowseDialect {
     /// 分页子句要求 ORDER BY 且请求未带排序时使用（MSSQL）；None 表示无需兜底。
     pub order_by_fallback: Option<&'static str>,
     pub flavor: BrowseFlavor,
+    /// 位置占位符拼写：入参为该参数的 1 基序号。MySQL/PG/SQLite 的驱动接
+    /// `?`；tiberius 要求 `@P{n}`，oracle crate 要求 `:{n}`——由方言统一
+    /// 决定，调用方（db-mssql/db-oracle）不得再自行改写。
+    pub placeholder: fn(usize) -> String,
 }
 
 impl BrowseDialect {
@@ -44,12 +48,26 @@ impl BrowseDialect {
     }
 }
 
+fn placeholder_q(n: usize) -> String {
+    let _ = n;
+    "?".to_string()
+}
+
+fn placeholder_at_p(n: usize) -> String {
+    format!("@P{n}")
+}
+
+fn placeholder_colon(n: usize) -> String {
+    format!(":{n}")
+}
+
 /// ANSI 双引号标识符 + LIMIT/OFFSET（postgres）。
 pub const DIALECT_DEFAULT: BrowseDialect = BrowseDialect {
     quote: quote_double,
     limit_clause: limit_offset_clause,
     order_by_fallback: None,
     flavor: BrowseFlavor::Pg,
+    placeholder: placeholder_q,
 };
 
 /// SQLite：引号/分页同 ANSI，但大小写与正则形态不同。
@@ -58,6 +76,7 @@ pub const DIALECT_SQLITE: BrowseDialect = BrowseDialect {
     limit_clause: limit_offset_clause,
     order_by_fallback: None,
     flavor: BrowseFlavor::Sqlite,
+    placeholder: placeholder_q,
 };
 
 /// 反引号标识符 + LIMIT/OFFSET（mysql）。
@@ -66,6 +85,7 @@ pub const DIALECT_MYSQL: BrowseDialect = BrowseDialect {
     limit_clause: limit_offset_clause,
     order_by_fallback: None,
     flavor: BrowseFlavor::MySql,
+    placeholder: placeholder_q,
 };
 
 /// 方括号标识符 + OFFSET/FETCH + ORDER BY 兜底（mssql）。
@@ -74,6 +94,7 @@ pub const DIALECT_MSSQL: BrowseDialect = BrowseDialect {
     limit_clause: offset_fetch_clause,
     order_by_fallback: Some("(SELECT NULL)"),
     flavor: BrowseFlavor::MsSql,
+    placeholder: placeholder_at_p,
 };
 
 /// 双引号标识符 + OFFSET/FETCH（oracle 12c+）。
@@ -82,6 +103,7 @@ pub const DIALECT_ORACLE: BrowseDialect = BrowseDialect {
     limit_clause: offset_fetch_clause,
     order_by_fallback: None,
     flavor: BrowseFlavor::Oracle,
+    placeholder: placeholder_colon,
 };
 
 fn quote_double(name: &str) -> String {
@@ -289,11 +311,34 @@ fn text_cond(op: polydb_protocol::FilterOperator, v: &Value) -> CoreResult<TextC
     })
 }
 
+/// 位置占位符序号器：按方言的 placeholder 取 1 基序号拼写，保证与 args
+/// 的入参顺序一一对应。
+struct Ph {
+    d: BrowseDialect,
+    n: usize,
+}
+
+impl Ph {
+    fn new(d: BrowseDialect) -> Self {
+        Ph { d, n: 0 }
+    }
+
+    fn next(&mut self) -> String {
+        self.n += 1;
+        (self.d.placeholder)(self.n)
+    }
+}
+
 /// 渲染 LIKE 家族条件（behavior.md §13.5）：返回 SQL 片段与绑定值。
-fn render_like(d: BrowseDialect, col: &str, tc: &TextCond, cs: Option<bool>) -> (String, Value) {
+/// 每种形态恰好一个占位符，由 [`Ph`] 按方言拼写。
+fn render_like(d: BrowseDialect, ph: &mut Ph, col: &str, tc: &TextCond, cs: Option<bool>) -> (String, Value) {
     let not = if tc.neg { "NOT " } else { "" };
+    let p = ph.next();
     if d.flavor == BrowseFlavor::Sqlite && cs == Some(true) {
-        return (format!("{col} {not}GLOB ?"), Value::String(tc.glob.clone()));
+        return (
+            format!("{col} {not}GLOB {p}"),
+            Value::String(tc.glob.clone()),
+        );
     }
     let esc_clause = if tc.escaped {
         format!(" ESCAPE '{LIKE_ESCAPE}'")
@@ -303,18 +348,18 @@ fn render_like(d: BrowseDialect, col: &str, tc: &TextCond, cs: Option<bool>) -> 
     let sql = match (d.flavor, cs) {
         (BrowseFlavor::Pg, Some(false)) => {
             let op = if tc.neg { "NOT ILIKE" } else { "ILIKE" };
-            format!("{col} {op} ?{esc_clause}")
+            format!("{col} {op} {p}{esc_clause}")
         }
         // SQLite 的 LIKE 对 ASCII 本就不区分，无需再套 LOWER。
-        (BrowseFlavor::Sqlite, Some(false)) => format!("{col} {not}LIKE ?{esc_clause}"),
-        (_, Some(false)) => format!("LOWER({col}) {not}LIKE LOWER(?){esc_clause}"),
+        (BrowseFlavor::Sqlite, Some(false)) => format!("{col} {not}LIKE {p}{esc_clause}"),
+        (_, Some(false)) => format!("LOWER({col}) {not}LIKE LOWER({p}){esc_clause}"),
         (BrowseFlavor::MySql, Some(true)) => {
-            format!("CAST({col} AS BINARY) {not}LIKE CAST(? AS BINARY){esc_clause}")
+            format!("CAST({col} AS BINARY) {not}LIKE CAST({p} AS BINARY){esc_clause}")
         }
         (BrowseFlavor::MsSql, Some(true)) => {
-            format!("{col} COLLATE Latin1_General_CS_AS {not}LIKE ?{esc_clause}")
+            format!("{col} COLLATE Latin1_General_CS_AS {not}LIKE {p}{esc_clause}")
         }
-        (_, _) => format!("{col} {not}LIKE ?{esc_clause}"),
+        (_, _) => format!("{col} {not}LIKE {p}{esc_clause}"),
     };
     (sql, Value::String(tc.like.clone()))
 }
@@ -322,30 +367,32 @@ fn render_like(d: BrowseDialect, col: &str, tc: &TextCond, cs: Option<bool>) -> 
 /// 渲染 `regex` 条件；无原生正则的方言显式 NOT_SUPPORTED，绝不静默降级。
 fn render_regex(
     d: BrowseDialect,
+    ph: &mut Ph,
     col: &str,
     v: &Value,
     cs: Option<bool>,
 ) -> CoreResult<(String, Value)> {
     let raw = value_to_text(v).ok_or_else(|| invalid_param("op regex requires a scalar value"))?;
     let val = Value::String(raw);
+    let p = ph.next();
     Ok(match (d.flavor, cs) {
         (BrowseFlavor::MsSql, _) => {
             return Err(not_supported(
                 "op regex is not supported: MSSQL has no native regular expressions",
             ))
         }
-        (BrowseFlavor::Pg, Some(false)) => (format!("{col} ~* ?"), val),
-        (BrowseFlavor::Pg, _) => (format!("{col} ~ ?"), val),
+        (BrowseFlavor::Pg, Some(false)) => (format!("{col} ~* {p}"), val),
+        (BrowseFlavor::Pg, _) => (format!("{col} ~ {p}"), val),
         (BrowseFlavor::MySql, Some(true)) => (
-            format!("CAST({col} AS BINARY) REGEXP CAST(? AS BINARY)"),
+            format!("CAST({col} AS BINARY) REGEXP CAST({p} AS BINARY)"),
             val,
         ),
-        (BrowseFlavor::MySql, Some(false)) => (format!("LOWER({col}) REGEXP LOWER(?)"), val),
-        (BrowseFlavor::MySql, _) => (format!("{col} REGEXP ?"), val),
-        (BrowseFlavor::Oracle, Some(false)) => (format!("REGEXP_LIKE({col}, ?, 'i')"), val),
-        (BrowseFlavor::Oracle, _) => (format!("REGEXP_LIKE({col}, ?)"), val),
-        (BrowseFlavor::Sqlite, Some(false)) => (format!("{col} REGEXP '(?i)' || ?"), val),
-        (BrowseFlavor::Sqlite, _) => (format!("{col} REGEXP ?"), val),
+        (BrowseFlavor::MySql, Some(false)) => (format!("LOWER({col}) REGEXP LOWER({p})"), val),
+        (BrowseFlavor::MySql, _) => (format!("{col} REGEXP {p}"), val),
+        (BrowseFlavor::Oracle, Some(false)) => (format!("REGEXP_LIKE({col}, {p}, 'i')"), val),
+        (BrowseFlavor::Oracle, _) => (format!("REGEXP_LIKE({col}, {p})"), val),
+        (BrowseFlavor::Sqlite, Some(false)) => (format!("{col} REGEXP '(?i)' || {p}"), val),
+        (BrowseFlavor::Sqlite, _) => (format!("{col} REGEXP {p}"), val),
     })
 }
 
@@ -365,6 +412,7 @@ pub fn build_rows_where(
     };
     let mut sql = String::new();
     let mut args = Vec::new();
+    let mut ph = Ph::new(d);
     for (i, cond) in req.conditions.iter().enumerate() {
         if i > 0 {
             sql.push_str(joiner);
@@ -384,15 +432,17 @@ pub fn build_rows_where(
                     if j > 0 {
                         sql.push_str(", ");
                     }
-                    sql.push('?');
                     args.push(v.clone());
+                    sql.push_str(&ph.next());
                 }
                 sql.push(')');
             }
             Op::Between => {
-                sql.push_str(&format!("{col} BETWEEN ? AND ?"));
                 args.push(cond.value.clone());
+                let p1 = ph.next();
                 args.push(cond.second_value.clone());
+                let p2 = ph.next();
+                sql.push_str(&format!("{col} BETWEEN {p1} AND {p2}"));
             }
             Op::Eq | Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge => {
                 let op = match cond.op {
@@ -403,17 +453,17 @@ pub fn build_rows_where(
                     Op::Gt => ">",
                     _ => ">=",
                 };
-                sql.push_str(&format!("{col} {op} ?"));
+                sql.push_str(&format!("{col} {op} {}", ph.next()));
                 args.push(cond.value.clone());
             }
             Op::Regex => {
-                let (s, v) = render_regex(d, &col, &cond.value, cond.case_sensitive)?;
+                let (s, v) = render_regex(d, &mut ph, &col, &cond.value, cond.case_sensitive)?;
                 sql.push_str(&s);
                 args.push(v);
             }
             Op::Like | Op::NotLike | Op::Contains | Op::StartsWith | Op::EndsWith => {
                 let tc = text_cond(cond.op, &cond.value)?;
-                let (s, v) = render_like(d, &col, &tc, cond.case_sensitive);
+                let (s, v) = render_like(d, &mut ph, &col, &tc, cond.case_sensitive);
                 sql.push_str(&s);
                 args.push(v);
             }
@@ -615,7 +665,7 @@ mod tests {
         one(
             DIALECT_MSSQL,
             cond("name", Op::NotLike, s("%a_")),
-            "[name] NOT LIKE ?",
+            "[name] NOT LIKE @P1",
             s("%a_"),
         );
     }
@@ -637,7 +687,7 @@ mod tests {
         one(
             DIALECT_ORACLE,
             cond("x", Op::EndsWith, s("a!b")),
-            r#""x" LIKE ? ESCAPE '!'"#,
+            r#""x" LIKE :1 ESCAPE '!'"#,
             s("%a!!b"),
         );
     }
@@ -665,13 +715,13 @@ mod tests {
         one(
             DIALECT_MSSQL,
             with_cs(cond("x", Op::Like, s("a")), Some(false)),
-            "LOWER([x]) LIKE LOWER(?)",
+            "LOWER([x]) LIKE LOWER(@P1)",
             s("a"),
         );
         one(
             DIALECT_ORACLE,
             with_cs(cond("x", Op::Like, s("a")), Some(false)),
-            r#"LOWER("x") LIKE LOWER(?)"#,
+            r#"LOWER("x") LIKE LOWER(:1)"#,
             s("a"),
         );
         // SQLite 的 LIKE 本就不区分 ASCII：不套 LOWER
@@ -700,7 +750,7 @@ mod tests {
         one(
             DIALECT_MSSQL,
             with_cs(cond("x", Op::NotLike, s("a")), Some(true)),
-            "[x] COLLATE Latin1_General_CS_AS NOT LIKE ?",
+            "[x] COLLATE Latin1_General_CS_AS NOT LIKE @P1",
             s("a"),
         );
         // SQLite 强制区分走 GLOB，模式按 GLOB 规则重转义
@@ -755,7 +805,7 @@ mod tests {
         one(
             DIALECT_ORACLE,
             with_cs(cond("x", Op::Regex, s("^a")), Some(false)),
-            r#"REGEXP_LIKE("x", ?, 'i')"#,
+            r#"REGEXP_LIKE("x", :1, 'i')"#,
             s("^a"),
         );
         one(
@@ -827,6 +877,40 @@ mod tests {
         let (sql, args) = where_of(DIALECT_MYSQL, with_cs(inc, Some(false))).expect("render ok");
         assert_eq!(sql, "`n` IN (?, ?)");
         assert_eq!(args, vec![Value::Integer(1), Value::Integer(2)]);
+    }
+
+    #[test]
+    fn placeholder_numbering_follows_arg_order() {
+        // MSSQL：tiberius 要求 @P{n} 按出现顺序编号（IN/Between 各占一个序号）
+        let mut bt = cond("n", Op::Between, Value::Integer(1));
+        bt.second_value = Value::Integer(9);
+        let (sql, args) = where_of(DIALECT_MSSQL, bt).expect("render ok");
+        assert_eq!(sql, "[n] BETWEEN @P1 AND @P2");
+        assert_eq!(args, vec![Value::Integer(1), Value::Integer(9)]);
+
+        let mut inc = cond("n", Op::In, Value::Null);
+        inc.values = vec![Value::Integer(1), Value::Integer(2), Value::Integer(3)];
+        let (sql, _) = where_of(DIALECT_MSSQL, inc).expect("render ok");
+        assert_eq!(sql, "[n] IN (@P1, @P2, @P3)");
+
+        // Oracle：oracle crate 要求 :{n}；多条件时序号连续累加
+        let req = TableRowsRequest {
+            columns: Vec::new(),
+            conditions: vec![
+                cond("a", Op::Eq, Value::Integer(1)),
+                cond("b", Op::Like, s("x%")),
+            ],
+            logic: None,
+            order_by: Vec::new(),
+            offset: 0,
+            limit: 0,
+        };
+        let (sql, args) = build_rows_where(DIALECT_ORACLE, &req).expect("render ok");
+        assert_eq!(sql, r#""a" = :1 AND "b" LIKE :2"#);
+        assert_eq!(
+            args,
+            vec![Value::Integer(1), Value::String("x%".to_string())]
+        );
     }
 
     // ── Pagination limits ───────────────────────────────────────────────

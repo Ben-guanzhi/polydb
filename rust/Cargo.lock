@@ -5954,6 +5954,7 @@ dependencies = [
  "polydb-core",
  "polydb-db-core",
  "polydb-protocol",
+ "polydb-rt",
  "thiserror 2.0.20",
 ]
 

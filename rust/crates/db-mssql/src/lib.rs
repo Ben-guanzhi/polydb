@@ -29,6 +29,61 @@ use polydb_db_core::{DatabaseDriver, SqlDriver, TxMode};
 // 一律套超时，保证契约测试中无服务时快速失败而非挂死 tokio worker。
 const IO_TIMEOUT: Duration = Duration::from_secs(6);
 
+/// tiberius 没有 NULL 的 ToSql 实现：ColumnData 的各变体以 Option 承载，
+/// None 即 SQL NULL（选 I64 只承载可空性；TDS 参数无绑定类型强约束）。
+struct SqlNull;
+
+impl ToSql for SqlNull {
+    fn to_sql(&self) -> tiberius::ColumnData<'_> {
+        tiberius::ColumnData::I64(None)
+    }
+}
+
+/// tiberius 的 [`tiberius::ColumnType`] → SQL Server 类型名。
+/// Debug 输出（"Int4"、"NVarchar"）不是 SQL 拼写，此前直接塞进 data_type。
+/// 变长 "n" 类型的长度信息经 tiberius 的 From 折叠成定长变体（如 Intn(4)
+/// 已是 Int4），无法区分的按最常见拼写给出。
+fn column_type_name(t: tiberius::ColumnType) -> &'static str {
+    use tiberius::ColumnType as T;
+    match t {
+        T::Null => "",
+        T::Bit | T::Bitn => "bit",
+        T::Int1 => "tinyint",
+        T::Int2 => "smallint",
+        T::Int4 => "int",
+        T::Int8 => "bigint",
+        // 变长骨架在长度不落在 1/2/4/8 时保留原样（tiberius 的 From 折叠规则），
+        // 按最常见拼写兜底。
+        T::Intn => "int",
+        T::Datetime4 => "smalldatetime",
+        T::Datetime => "datetime",
+        T::Datetimen => "datetime",
+        T::Datetime2 => "datetime2",
+        T::Daten => "date",
+        T::Timen => "time",
+        T::DatetimeOffsetn => "datetimeoffset",
+        T::Float4 => "real",
+        T::Float8 | T::Floatn => "float",
+        T::Money => "money",
+        T::Money4 => "smallmoney",
+        T::Guid => "uniqueidentifier",
+        T::Decimaln => "decimal",
+        T::Numericn => "numeric",
+        T::BigVarBin => "varbinary",
+        T::BigBinary => "binary",
+        T::BigVarChar => "varchar",
+        T::BigChar => "char",
+        T::NVarchar => "nvarchar",
+        T::NChar => "nchar",
+        T::Xml => "xml",
+        T::Udt => "udt",
+        T::Text => "text",
+        T::Image => "image",
+        T::NText => "ntext",
+        T::SSVariant => "sql_variant",
+    }
+}
+
 pub struct MssqlConn {
     client: Arc<Mutex<Option<Client<Compat<TcpStream>>>>>,
     _dsn: String,
@@ -107,6 +162,10 @@ impl MssqlConn {
                 Value::Float(f) => Box::new(*f) as Box<dyn ToSql>,
                 Value::Bool(b) => Box::new(*b) as Box<dyn ToSql>,
                 Value::String(s) => Box::new(s.clone()) as Box<dyn ToSql>,
+                // NULL 必须绑成 NULL：tiberius 的 ColumnData 各变体以 Option
+                // 承载，None 即 SQL NULL；此前兜底成 0i64 会把 NULL 过滤值
+                // 静默变成 0。
+                Value::Null => Box::new(SqlNull) as Box<dyn ToSql>,
                 _ => Box::new(0i64) as Box<dyn ToSql>,
             })
             .collect()
@@ -190,7 +249,7 @@ impl MssqlConn {
             .map(|c| ResultColumn {
                 name: c.name().to_string(),
                 table: None,
-                data_type: format!("{:?}", c.column_type()),
+                data_type: column_type_name(c.column_type()).to_string(),
                 generic_type: None,
                 nullable: Some(true),
             })
@@ -464,10 +523,16 @@ impl SqlDriver for MssqlConn {
     }
 
     async fn list_schemas(&self) -> CoreResult<Vec<SchemaInfo>> {
+        // 系统内置对象按精确名单排除（与 Go 内核 sqltext.SchemasQuery 对齐）：
+        // db_ 前缀的 9 个固定数据库角色逐个点名，而不是 NOT LIKE 'db[_]%'——
+        // 否则 db_admin 这类以 db_ 开头的用户 schema 会被误藏。
         let rows = self.query_rows(
             "SELECT s.name FROM sys.schemas s \
-             WHERE s.name NOT IN ('sys','INFORMATION_SCHEMA','guest') \
-               AND s.name NOT LIKE 'db[_]%' AND s.name NOT LIKE '##%' ORDER BY s.name",
+             WHERE s.name NOT IN ('sys','INFORMATION_SCHEMA','guest',\
+               'db_owner','db_accessadmin','db_securityadmin','db_ddladmin',\
+               'db_backupoperator','db_datareader','db_datawriter',\
+               'db_denydatareader','db_denydatawriter') \
+               AND s.name NOT LIKE '##%' ORDER BY s.name",
             &[],
             "list_schemas",
         )?;
@@ -792,5 +857,38 @@ impl SqlDriver for MssqlConn {
         }
         b.push_str(");");
         Ok(b)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tiberius::ColumnType as T;
+
+    /// Debug 输出（"Int4"）与 SQL 拼写（"int"）的分界：主要类型逐一锁定。
+    #[test]
+    fn column_type_names_are_sql_spellings() {
+        assert_eq!(column_type_name(T::Int4), "int");
+        assert_eq!(column_type_name(T::Int8), "bigint");
+        assert_eq!(column_type_name(T::Int1), "tinyint");
+        assert_eq!(column_type_name(T::Int2), "smallint");
+        assert_eq!(column_type_name(T::Bit), "bit");
+        assert_eq!(column_type_name(T::Bitn), "bit");
+        assert_eq!(column_type_name(T::Float4), "real");
+        assert_eq!(column_type_name(T::Float8), "float");
+        assert_eq!(column_type_name(T::NVarchar), "nvarchar");
+        assert_eq!(column_type_name(T::NChar), "nchar");
+        assert_eq!(column_type_name(T::BigVarChar), "varchar");
+        assert_eq!(column_type_name(T::BigVarBin), "varbinary");
+        assert_eq!(column_type_name(T::Decimaln), "decimal");
+        assert_eq!(column_type_name(T::Numericn), "numeric");
+        assert_eq!(column_type_name(T::Datetime2), "datetime2");
+        assert_eq!(column_type_name(T::Daten), "date");
+        assert_eq!(column_type_name(T::Timen), "time");
+        assert_eq!(column_type_name(T::Guid), "uniqueidentifier");
+        assert_eq!(column_type_name(T::Money), "money");
+        assert_eq!(column_type_name(T::Xml), "xml");
+        assert_eq!(column_type_name(T::SSVariant), "sql_variant");
+        assert_eq!(column_type_name(T::Null), "");
     }
 }

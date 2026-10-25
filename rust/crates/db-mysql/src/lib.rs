@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use bigdecimal::BigDecimal;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use sqlx::mysql::{MySqlPool, MySqlPoolOptions, MySqlRow};
-use sqlx::{Column, Row, TypeInfo, ValueRef};
+use sqlx::{Column, Row, TransactionManager, TypeInfo, ValueRef};
 
 use polydb_core::{
     ColumnInfo, CoreError, CoreResult, DatabaseKind, ForeignKeyInfo, IndexColumn, IndexInfo,
@@ -22,10 +22,30 @@ pub struct MySqlConn {
     _dsn: String,
 }
 
-/// 事务句柄，包装 sqlx::Transaction。Transaction 需自持所有权（commit/rollback 消费 self），
-/// 因此 handle 也按值传递；app-core 的 ActiveTx::commit/rollback 通过 take() 从 Option 取出。
+/// 事务句柄：专用池连接上的手动事务。MySQL 的隔离级别没有 BEGIN 语法糖，
+/// 必须先 `SET TRANSACTION ISOLATION LEVEL …`（下一事务作用域）再
+/// `START TRANSACTION`，且两条语句必须落在同一条连接上——pool.begin_with
+/// 只接一条语句，因此拿专用连接走 [`sqlx::mysql::MySqlTransactionManager`]。
+/// commit/rollback 按值消费句柄；app-core 的 ActiveTx::commit/rollback
+/// 通过 take() 从 Option 取出。
 #[derive(Debug)]
-pub struct MySqlTxHandle(pub sqlx::Transaction<'static, sqlx::MySql>);
+pub struct MySqlTxHandle {
+    conn: Option<sqlx::pool::PoolConnection<sqlx::MySql>>,
+    in_tx: bool,
+}
+
+impl Drop for MySqlTxHandle {
+    fn drop(&mut self) {
+        // 未显式 commit/rollback 就丢弃句柄：sqlx 的 Transaction 原本靠 Drop
+        // 回滚，这里等价地让连接关闭而不是回池——开着事务回池会污染后续
+        // 租用者（无 async 上下文可用的 Drop 里做不了 await，关连接是确定性的）。
+        if self.in_tx {
+            if let Some(mut conn) = self.conn.take() {
+                conn.close_on_drop();
+            }
+        }
+    }
+}
 
 impl MySqlConn {
     /// DSN 形如 mysql://user@host:port/dbname（不含密码）。懒连接。
@@ -135,41 +155,57 @@ impl MySqlConn {
             .collect()
     }
 
-    pub fn begin_statement(mode: TxMode) -> Option<String> {
-        match mode.isolation_level {
-            IsolationLevel::ReadCommitted => {
-                Some("BEGIN ISOLATION LEVEL READ COMMITTED".to_string())
-            }
-            IsolationLevel::Serializable => Some("BEGIN ISOLATION LEVEL SERIALIZABLE".to_string()),
-            IsolationLevel::ReadUncommitted => {
-                Some("BEGIN ISOLATION LEVEL READ UNCOMMITTED".to_string())
-            }
-            IsolationLevel::RepeatableRead => {
-                Some("BEGIN ISOLATION LEVEL REPEATABLE READ".to_string())
-            }
+    /// 隔离级别 → MySQL 的 `SET TRANSACTION ISOLATION LEVEL` 取值。
+    /// 四个级别 MySQL 全部支持（与 PG 侧不同，无需映射）。
+    pub fn isolation_clause(level: IsolationLevel) -> &'static str {
+        match level {
+            IsolationLevel::ReadUncommitted => "READ UNCOMMITTED",
+            IsolationLevel::ReadCommitted => "READ COMMITTED",
+            IsolationLevel::RepeatableRead => "REPEATABLE READ",
+            IsolationLevel::Serializable => "SERIALIZABLE",
         }
     }
 
     pub async fn begin_tx(&self, mode: TxMode) -> CoreResult<MySqlTxHandle> {
-        let tx = match Self::begin_statement(mode) {
-            Some(st) => self.pool.begin_with(st).await,
-            None => self.pool.begin().await,
-        };
-        let tx = tx.map_err(|e| CoreError::Driver(format!("begin tx failed: {e}")))?;
-        Ok(MySqlTxHandle(tx))
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| CoreError::Driver(format!("acquire conn: {e}")))?;
+        // MySQL 没有 `BEGIN ISOLATION LEVEL …`（旧实现发的正是这句，对真实
+        // 服务端必然语法错误）：SET TRANSACTION 的"下一事务"作用域绑定在
+        // 连接上，所以必须先 acquire、SET、再 BEGIN，全程同一连接。
+        sqlx::query(&format!(
+            "SET TRANSACTION ISOLATION LEVEL {}",
+            Self::isolation_clause(mode.isolation_level)
+        ))
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| CoreError::Driver(format!("set isolation: {e}")))?;
+        sqlx::mysql::MySqlTransactionManager::begin(&mut *conn, None)
+            .await
+            .map_err(|e| CoreError::Driver(format!("begin tx failed: {e}")))?;
+        Ok(MySqlTxHandle {
+            conn: Some(conn),
+            in_tx: true,
+        })
     }
 
-    pub async fn commit(&self, tx: MySqlTxHandle) -> CoreResult<()> {
-        tx.0.commit()
+    pub async fn commit(&self, mut tx: MySqlTxHandle) -> CoreResult<()> {
+        let conn = tx.conn.as_mut().expect("tx conn present");
+        sqlx::mysql::MySqlTransactionManager::commit(conn)
             .await
             .map_err(|e| CoreError::Driver(format!("commit failed: {e}")))?;
+        tx.in_tx = false;
         Ok(())
     }
 
-    pub async fn rollback(&self, tx: MySqlTxHandle) -> CoreResult<()> {
-        tx.0.rollback()
+    pub async fn rollback(&self, mut tx: MySqlTxHandle) -> CoreResult<()> {
+        let conn = tx.conn.as_mut().expect("tx conn present");
+        sqlx::mysql::MySqlTransactionManager::rollback(conn)
             .await
             .map_err(|e| CoreError::Driver(format!("rollback failed: {e}")))?;
+        tx.in_tx = false;
         Ok(())
     }
 
@@ -228,7 +264,8 @@ impl MySqlConn {
         sql: &str,
         params: &[Value],
     ) -> CoreResult<QueryResult> {
-        Self::execute_on(tx.0.as_mut(), sql, params).await
+        let conn = tx.conn.as_mut().expect("tx conn present");
+        Self::execute_on(&mut **conn, sql, params).await
     }
 }
 

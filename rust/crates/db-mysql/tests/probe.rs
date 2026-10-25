@@ -639,35 +639,26 @@ fn detect_statement_type_test() {
     );
 }
 
-/// 测试 begin_statement 的隔离级别映射
+/// 测试 isolation_clause 的隔离级别映射（MySQL 四个级别全部原生支持）
 #[test]
-fn begin_statement_isolation_levels() {
+fn isolation_clause_levels() {
     use polydb_core::IsolationLevel;
-    use polydb_db_core::TxMode;
 
     assert_eq!(
-        MySqlConn::begin_statement(TxMode {
-            isolation_level: IsolationLevel::ReadCommitted
-        }),
-        Some("BEGIN ISOLATION LEVEL READ COMMITTED".to_string())
+        MySqlConn::isolation_clause(IsolationLevel::ReadCommitted),
+        "READ COMMITTED"
     );
     assert_eq!(
-        MySqlConn::begin_statement(TxMode {
-            isolation_level: IsolationLevel::Serializable
-        }),
-        Some("BEGIN ISOLATION LEVEL SERIALIZABLE".to_string())
+        MySqlConn::isolation_clause(IsolationLevel::Serializable),
+        "SERIALIZABLE"
     );
     assert_eq!(
-        MySqlConn::begin_statement(TxMode {
-            isolation_level: IsolationLevel::ReadUncommitted
-        }),
-        Some("BEGIN ISOLATION LEVEL READ UNCOMMITTED".to_string())
+        MySqlConn::isolation_clause(IsolationLevel::ReadUncommitted),
+        "READ UNCOMMITTED"
     );
     assert_eq!(
-        MySqlConn::begin_statement(TxMode {
-            isolation_level: IsolationLevel::RepeatableRead
-        }),
-        Some("BEGIN ISOLATION LEVEL REPEATABLE READ".to_string())
+        MySqlConn::isolation_clause(IsolationLevel::RepeatableRead),
+        "REPEATABLE READ"
     );
 }
 
