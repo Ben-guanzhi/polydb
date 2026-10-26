@@ -523,11 +523,11 @@ impl CompareState {
         self.applied = false;
         self.step = CmpStep::Review;
         if self.entries.is_empty() {
-            if self.anchor.is_some() && !self.all_entries.is_empty() {
-                let (_, table) = self.anchor.as_ref().unwrap();
-                format!("锚定表 {table} 无差异（按 u 解除锚定看全量）")
-            } else {
-                "两侧结构一致，无需同步".into()
+            match self.anchor.as_ref() {
+                Some((_, table)) if !self.all_entries.is_empty() => {
+                    format!("锚定表 {table} 无差异（按 u 解除锚定看全量）")
+                }
+                _ => "两侧结构一致，无需同步".into(),
             }
         } else {
             self.review_status()

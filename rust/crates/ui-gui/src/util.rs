@@ -220,6 +220,10 @@ pub(crate) fn col_to_byte(line: &str, col_chars: usize) -> usize {
 // ── Smart AutoIndent ──────────────────────────────────────────
 // PL/SQL Developer 的 Smart AutoIndent 词表（Tools > Preferences > Editor，
 // 随工具发行 SmartIndent.txt）：光标所在行以这些词开头时，换行给下一行缩进一级。
+//
+// 这一整段目前只有本文件的单测在用，编辑器（Vim 引擎）接线后才会被真正调用；
+// 在此之前 clippy 的 dead_code 会把它判成死代码，故逐个豁免。
+#[allow(dead_code)] // Smart AutoIndent 词表，待编辑器接线后启用
 pub(crate) const SMART_INDENT_WORDS: &[&str] = &[
     "BEGIN",
     "IF",
@@ -237,11 +241,14 @@ pub(crate) const SMART_INDENT_WORDS: &[&str] = &[
 ];
 
 // 裸换行，与「换行 + 一级缩进」：一级缩进是两个空格，与 Go 侧 SQL 模板同口径。
+#[allow(dead_code)] // 见上：Smart AutoIndent 待接线
 const PLAIN_NEWLINE: &str = "\n";
+#[allow(dead_code)] // 见上：Smart AutoIndent 待接线
 const INDENTED_NEWLINE: &str = "\n  ";
 
 // 行首第一个词（跳掉前导空白），返回切片引用不分配。以注释或字符串字面量
 // 开头的行不是语句，返回 None。
+#[allow(dead_code)] // 见上：Smart AutoIndent 待接线
 pub(crate) fn first_code_word(line: &str) -> Option<&str> {
     let rest = line.trim_start();
     let end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
@@ -260,12 +267,14 @@ pub(crate) fn first_code_word(line: &str) -> Option<&str> {
 }
 
 // 行首词是否命中词表（大小写不敏感、整词匹配：FORM 不算 FOR）。
+#[allow(dead_code)] // 见上：Smart AutoIndent 待接线
 pub(crate) fn smart_indent_line(line: &str) -> bool {
     first_code_word(line)
         .is_some_and(|w| SMART_INDENT_WORDS.iter().any(|k| k.eq_ignore_ascii_case(w)))
 }
 
 // 光标处换行应插入的文本：命中词表就带上缩进，否则是裸换行。
+#[allow(dead_code)] // 见上：Smart AutoIndent 待接线
 pub(crate) fn newline_insert(line: &str) -> &'static str {
     if smart_indent_line(line) {
         INDENTED_NEWLINE
@@ -274,13 +283,19 @@ pub(crate) fn newline_insert(line: &str) -> &'static str {
     }
 }
 
+// ── 词移动（Ctrl+←/→、双击选词）──────────────────────────────
+// 与 Smart AutoIndent 同批落地的编辑器 helper：只有本文件的单测在用，
+// 等编辑器把按键/鼠标事件接到这些函数上才会真正被调用，故逐个豁免 dead_code。
+
 // SQL 编辑器词移动：字母/数字/下划线视为词字符，其余（含空白、标点、换行）为分隔。
+#[allow(dead_code)] // 词移动判定，待编辑器接线后启用
 pub(crate) fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
 // Ctrl+Left：从光标（字节边界）向左跳到一个词的起点。
 // 先吞掉紧邻左侧的分隔符，再吞掉词字符；结果保证是 char 边界。
+#[allow(dead_code)] // 见上：词移动待接线
 pub(crate) fn word_floor(s: &str, pos: usize) -> usize {
     let chars: Vec<(usize, char)> = s.char_indices().collect();
     // boundary = 位于 chars[i] 之前的下标 i（i==chars.len() 表示串尾）。
@@ -303,6 +318,7 @@ pub(crate) fn word_floor(s: &str, pos: usize) -> usize {
 
 // Ctrl+Right：从光标向右跳到一个词的终点。
 // 先吞掉紧邻右侧的词字符（若无则先吞分隔符再吞词字符），结果保证是 char 边界。
+#[allow(dead_code)] // 见上：词移动待接线
 pub(crate) fn word_ceil(s: &str, pos: usize) -> usize {
     let chars: Vec<(usize, char)> = s.char_indices().collect();
     // i = 第一个起点 >= pos 的字符下标。
@@ -330,6 +346,7 @@ pub(crate) fn word_ceil(s: &str, pos: usize) -> usize {
 }
 
 // 双击选词：返回光标 pos 相邻词的连续区间 [start,end)；两侧都非词字符则 None。
+#[allow(dead_code)] // 见上：词移动待接线
 pub(crate) fn word_at(s: &str, pos: usize) -> Option<(usize, usize)> {
     let left = char_floor(s, pos);
     let right = char_ceil(s, pos);

@@ -88,6 +88,7 @@ impl SqlEditor {
     }
 
     /// 外部设置编辑器文本（如 Quick Switcher / 历史回填）。
+    #[allow(dead_code)] // Quick Switcher / 历史回填 尚未接线，接线后由 PolyDBApp 调用
     pub fn set_query(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.input_state.update(cx, |s, cx| {
             s.set_value(SharedString::from(query), window, cx);
