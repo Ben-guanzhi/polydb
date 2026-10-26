@@ -95,6 +95,10 @@ func ValueFromDB(v dbcore.Value) protocol.Value {
 		return protocol.NewStringValue(string(v.B))
 	case dbcore.ValTime:
 		return protocol.NewStringValue(v.T.Format(time.RFC3339Nano))
+	case dbcore.ValDecimal:
+		// Exact digits cross as text: protocol.Value is JSON-backed and would
+		// round them through float64, which is what ValDecimal exists to avoid.
+		return protocol.NewStringValue(v.S)
 	default:
 		return protocol.NewNullValue()
 	}
