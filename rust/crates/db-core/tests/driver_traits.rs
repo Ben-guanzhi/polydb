@@ -200,9 +200,7 @@ fn as_sql_on_sql_driver_succeeds() {
     let conn = Connection::new(Arc::new(SqlOnlyDriver {
         kind: DatabaseKind::MySql,
     }));
-    let sql = conn
-        .as_sql()
-        .expect("SQL driver should support as_sql");
+    let sql = conn.as_sql().expect("SQL driver should support as_sql");
     let kind = sql.kind();
     assert_eq!(kind, DatabaseKind::MySql);
 }
