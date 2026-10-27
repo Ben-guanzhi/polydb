@@ -35,7 +35,7 @@ fn value_msgpack_roundtrip_scalars() {
         Value::Integer(i64::MAX),
         Value::Float(0.0),
         Value::Float(-1.5),
-        Value::Float(3.14),
+        Value::Float(3.25),
         Value::String(String::new()),
         Value::String("hello".to_string()),
         Value::String("中文".to_string()),
@@ -88,7 +88,7 @@ fn value_json_roundtrip_scalars() {
         Value::Null,
         Value::Bool(true),
         Value::Integer(42),
-        Value::Float(3.14),
+        Value::Float(3.25),
         Value::String("hello".to_string()),
         Value::String("中文".to_string()),
     ];

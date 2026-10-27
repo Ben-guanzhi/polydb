@@ -671,7 +671,7 @@ fn bind_value_mapping() {
     let _q = MySqlConn::bind_value(sqlx::query::<sqlx::MySql>("SELECT ?"), &Value::Null);
     let _q = MySqlConn::bind_value(sqlx::query::<sqlx::MySql>("SELECT ?"), &Value::Bool(true));
     let _q = MySqlConn::bind_value(sqlx::query::<sqlx::MySql>("SELECT ?"), &Value::Integer(42));
-    let _q = MySqlConn::bind_value(sqlx::query::<sqlx::MySql>("SELECT ?"), &Value::Float(3.14));
+    let _q = MySqlConn::bind_value(sqlx::query::<sqlx::MySql>("SELECT ?"), &Value::Float(3.25));
     let _q = MySqlConn::bind_value(
         sqlx::query::<sqlx::MySql>("SELECT ?"),
         &Value::String("hello".to_string()),

@@ -264,7 +264,7 @@ mod blob_tests {
             assert_eq!(got, want, "len={len}");
             assert_eq!(
                 got.len(),
-                ((len + 2) / 3) * 4,
+                len.div_ceil(3) * 4,
                 "len={len} 输出宽度不是一组四位"
             );
         }

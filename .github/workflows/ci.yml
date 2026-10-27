@@ -49,7 +49,11 @@ jobs:
         run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" cargo fmt --all -- --check
       - name: clippy
         working-directory: rust
-        run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" cargo clippy --workspace -- -D warnings
+        # --all-targets lints the tests too: the lib target alone never sees them, so
+# test-only lints (approx_constant, ok_expect, ...) otherwise stay invisible
+# until someone runs clippy locally. Items kept deliberately dead while their
+# editor wiring is pending carry #[allow(dead_code)] with a comment saying why.
+        run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         working-directory: rust
         # polydb-gui holds no tests but is still linked, so the X11 headers

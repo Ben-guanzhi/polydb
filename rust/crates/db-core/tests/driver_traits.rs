@@ -202,7 +202,6 @@ fn as_sql_on_sql_driver_succeeds() {
     }));
     let sql = conn
         .as_sql()
-        .ok()
         .expect("SQL driver should support as_sql");
     let kind = sql.kind();
     assert_eq!(kind, DatabaseKind::MySql);
@@ -226,7 +225,7 @@ fn as_kv_on_kv_driver_succeeds() {
     let conn = Connection::new(Arc::new(KvOnlyDriver {
         kind: DatabaseKind::Redis,
     }));
-    let kv = conn.as_kv().ok().expect("KV driver should support as_kv");
+    let kv = conn.as_kv().expect("KV driver should support as_kv");
     let kind = kv.kind();
     assert_eq!(kind, DatabaseKind::Redis);
 }
@@ -249,7 +248,7 @@ fn sql_driver_arc_returns_arc() {
     let conn = Connection::new(Arc::new(SqlOnlyDriver {
         kind: DatabaseKind::Sqlite,
     }));
-    let arc = conn.sql_driver_arc().ok().expect("should succeed");
+    let arc = conn.sql_driver_arc().expect("should succeed");
     assert_eq!(arc.kind(), DatabaseKind::Sqlite);
 }
 

@@ -26,14 +26,13 @@ fn target() -> (String, u16, String, String, String) {
         p.len() == 5,
         "POLYDB_LIVE_ORACLE 形如 host,port,service,user,password"
     );
-    Some((
+    (
         p[0].to_string(),
         p[1].parse().expect("port"),
         p[2].to_string(),
         p[3].to_string(),
         p[4].to_string(),
-    ))
-    .expect("env set (gated at test entry)")
+    )
 }
 
 fn table(suffix: &str) -> String {

@@ -86,8 +86,8 @@ pub struct Tunnel {
     session: Arc<tokio::sync::Mutex<russh::client::Handle<TunnelHandler>>>,
     local_addr: String,
     // forward_loop 任务运行在该运行时上；运行时一 drop 任务即被取消，故必须持有。
-    #[allow(dead_code)]
-    runtime: tokio::runtime::Runtime,
+    // 从不读取：持有它就是为了它的 Drop（下划线前缀向编译器说明这是有意的）。
+    _runtime: tokio::runtime::Runtime,
 }
 
 impl Tunnel {
@@ -150,7 +150,7 @@ impl Tunnel {
         Ok(Tunnel {
             session,
             local_addr,
-            runtime,
+            _runtime: runtime,
         })
     }
 
