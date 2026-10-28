@@ -94,10 +94,18 @@ func mapFilterOp(op dbc.FilterOp) protocol.FilterOperator {
 		return protocol.FilterOpNe
 	case dbc.FilterGt:
 		return protocol.FilterOpGt
+	case dbc.FilterGte:
+		return protocol.FilterOpGe
 	case dbc.FilterLt:
 		return protocol.FilterOpLt
+	case dbc.FilterLte:
+		return protocol.FilterOpLe
 	case dbc.FilterLike:
 		return protocol.FilterOpLike
+	case dbc.FilterIsNull:
+		return protocol.FilterOpNull
+	case dbc.FilterIsNotNull:
+		return protocol.FilterOpNotNull
 	}
 	return protocol.FilterOpEq
 }

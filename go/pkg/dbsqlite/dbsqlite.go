@@ -120,7 +120,9 @@ func (c *Conn) ListColumns(ctx context.Context, schema, table string) ([]dbc.Col
 			s := *col.DefaultValue
 			def = &s
 		}
-		out[i] = dbc.ColumnInfo{Name: col.Name, Type: col.DataType, Nullable: col.Nullable, Default: def}
+		// Table is part of the kernel's column identity (P3-9): a JOIN
+		// projecting two `id`s stays distinguishable end to end.
+		out[i] = dbc.ColumnInfo{Name: col.Name, Table: table, Type: col.DataType, Nullable: col.Nullable, Default: def}
 	}
 	return out, nil
 }
@@ -133,10 +135,22 @@ func (c *Conn) ListIndexes(ctx context.Context, schema, table string) ([]dbc.Ind
 	out := make([]dbc.IndexInfo, len(infos))
 	for i, idx := range infos {
 		cols := make([]string, len(idx.Columns))
+		parts := make([]dbc.IndexPart, len(idx.Columns))
 		for j, col := range idx.Columns {
 			cols[j] = col.Name
+			parts[j] = dbc.IndexPart{Column: col.Name, Desc: col.Order == protocol.SortOrderDesc}
 		}
-		out[i] = dbc.IndexInfo{Name: idx.Name, Unique: idx.Unique, Columns: cols}
+		// Kind follows the kernel's consumer contract ("unique"/"index"/
+		// "primary"): consumers switch on it, so an empty kind is not an
+		// option. SQLite has only B-tree indexes, and the kernel documents
+		// that engines without a method concept report "btree".
+		kind := dbc.IndexKindIndex
+		if idx.Primary {
+			kind = dbc.IndexKindPrimary
+		} else if idx.Unique {
+			kind = dbc.IndexKindUnique
+		}
+		out[i] = dbc.IndexInfo{Name: idx.Name, Kind: kind, Unique: idx.Unique, Primary: idx.Primary, Method: "btree", Columns: cols, Parts: parts}
 	}
 	return out, nil
 }
@@ -149,11 +163,21 @@ func (c *Conn) ListForeignKeys(ctx context.Context, schema, table string) ([]dbc
 	out := make([]dbc.ForeignKeyInfo, len(infos))
 	for i, fk := range infos {
 		out[i] = dbc.ForeignKeyInfo{
-			Name:       fk.Name,
+			Name: fmt.Sprintf("fk_%s_%d", table, i+1),
+			// SQLite keeps no constraint names; the kernel contract only
+			// requires a non-empty, stable one (the kernel's own driver
+			// synthesizes fk_<id>). Synthesized here — in the dbcore view,
+			// not on the protocol wire — so polydb's content-pairing diff
+			// and the Rust line are untouched.
 			Columns:    fk.Columns,
 			RefSchema:  fk.ReferencedSchema,
 			RefTable:   fk.ReferencedTable,
 			RefColumns: fk.ReferencedColumns,
+			// polydb's enum spells actions lowercase ("cascade"); the kernel's
+			// contract (and every other adapter) compares the standard
+			// uppercase spellings via NormalizeFKAction.
+			OnDelete: dbc.NormalizeFKAction(string(fk.OnDelete)),
+			OnUpdate: dbc.NormalizeFKAction(string(fk.OnUpdate)),
 		}
 	}
 	return out, nil
@@ -167,8 +191,7 @@ func (c *Conn) CreateTableSQL(ctx context.Context, schema, table string) (string
 // Offset/Limit/OrderBy/Conditions form and delegates to the existing implementation.
 func (c *Conn) BrowseRows(ctx context.Context, schema, table string, req *dbc.TableRowsRequest) (*dbc.TableRowsResult, error) {
 	preq := &protocol.TableRowsRequest{
-		Offset: uint64(pageOffset(req.Page, req.PageSize)),
-		Limit:  uint32(req.PageSize),
+		Limit: uint32(req.PageSize),
 	}
 	for _, s := range req.Sort {
 		dir := protocol.SortAsc
@@ -184,6 +207,28 @@ func (c *Conn) BrowseRows(ctx context.Context, schema, table string, req *dbc.Ta
 			Value:  bridge.ValueFromDB(f.Value),
 		})
 	}
+	if len(req.After) > 0 {
+		// Keyset seek: resume strictly after the cursor row in the sort order.
+		// The seek condition is appended AFTER the filters so its argument
+		// position follows them (the kernel contract pins this — reusing a
+		// filter's placeholder made PostgreSQL reject whole pages). polydb's
+		// browse has no row-value comparison, so a composite cursor has no
+		// faithful rendering here: say so instead of silently mis-seeking.
+		if len(req.After) != 1 || len(req.Sort) != 1 {
+			return nil, fmt.Errorf("dbsqlite: keyset seek needs exactly one sort key and one cursor value (got %d sort / %d cursor)", len(req.Sort), len(req.After))
+		}
+		op := protocol.FilterOpGt
+		if req.Sort[0].Desc {
+			op = protocol.FilterOpLt
+		}
+		preq.Conditions = append(preq.Conditions, protocol.FilterCondition{
+			Column: req.Sort[0].Column,
+			Op:     op,
+			Value:  bridge.ValueFromDB(req.After[0]),
+		})
+	} else {
+		preq.Offset = uint64(pageOffset(req.Page, req.PageSize))
+	}
 	res, err := c.browseRowsP(ctx, schema, table, preq)
 	if err != nil {
 		return nil, err
@@ -195,7 +240,11 @@ func (c *Conn) BrowseRows(ctx context.Context, schema, table string, req *dbc.Ta
 	if cerr != nil {
 		total = 0
 	}
-	return browseResultToDBCore(res, total), nil
+	out := browseResultToDBCore(res, total)
+	// Total says the filtered set's size only when the count actually read:
+	// a failed count must be distinguishable from an empty table (P3-9).
+	out.TotalFound = cerr == nil
+	return out, nil
 }
 
 func (c *Conn) BrowseRowsCount(ctx context.Context, schema, table string, req *dbc.TableRowsRequest) (uint64, error) {
