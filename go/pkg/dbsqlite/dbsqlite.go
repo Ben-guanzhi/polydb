@@ -285,13 +285,13 @@ func (c *Conn) executeIn(ctx context.Context, exec pdb.SQLTx, sql string, args [
 	if shouldQuery(stmtType, sql) {
 		rows, err := exec.QueryContext(ctx, sql, driverArgs...)
 		if err != nil {
-			return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
+			return nil, bridge.ErrorFromKernel(err)
 		}
 		defer rows.Close()
 
 		colTypes, err := rows.ColumnTypes()
 		if err != nil {
-			return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: "column types: " + err.Error()}
+			return nil, bridge.ErrorFromKernel(fmt.Errorf("column types: %w", err))
 		}
 		columns := make([]protocol.ResultColumn, len(colTypes))
 		for i, ct := range colTypes {
@@ -306,7 +306,7 @@ func (c *Conn) executeIn(ctx context.Context, exec pdb.SQLTx, sql string, args [
 				raw[i] = new(any)
 			}
 			if err := rows.Scan(raw...); err != nil {
-				return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: "scan: " + err.Error()}
+				return nil, bridge.ErrorFromKernel(fmt.Errorf("scan: %w", err))
 			}
 			rowVals := make([]protocol.Value, len(raw))
 			for i, r := range raw {
@@ -315,7 +315,7 @@ func (c *Conn) executeIn(ctx context.Context, exec pdb.SQLTx, sql string, args [
 			resultRows = append(resultRows, rowVals)
 		}
 		if err := rows.Err(); err != nil {
-			return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
+			return nil, bridge.ErrorFromKernel(err)
 		}
 		return &protocol.QueryResult{
 			Columns:         columns,
@@ -328,7 +328,7 @@ func (c *Conn) executeIn(ctx context.Context, exec pdb.SQLTx, sql string, args [
 
 	res, err := exec.ExecContext(ctx, sql, driverArgs...)
 	if err != nil {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
+		return nil, bridge.ErrorFromKernel(err)
 	}
 	affected, _ := res.RowsAffected()
 	return &protocol.QueryResult{
@@ -344,7 +344,7 @@ func (c *Conn) beginP(ctx context.Context, _ pdb.TxMode) (*sql.Tx, error) {
 	tx, err := c.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelDefault})
 	c.mu.Unlock()
 	if err != nil {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
+		return nil, bridge.ErrorFromKernel(err)
 	}
 	return tx, nil
 }
@@ -357,7 +357,7 @@ func (c *Conn) listTablesP(ctx context.Context, schema string) ([]protocol.Table
 	rows, err := c.db.QueryContext(ctx,
 		"SELECT name, type FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY name")
 	if err != nil {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
+		return nil, bridge.ErrorFromKernel(err)
 	}
 	defer rows.Close()
 	out := make([]protocol.TableInfo, 0)
@@ -378,7 +378,7 @@ func (c *Conn) listTablesP(ctx context.Context, schema string) ([]protocol.Table
 func (c *Conn) listColumnsP(ctx context.Context, schema, table string) ([]protocol.ColumnInfo, error) {
 	rows, err := c.db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%q)", table))
 	if err != nil {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
+		return nil, bridge.ErrorFromKernel(err)
 	}
 	defer rows.Close()
 	out := make([]protocol.ColumnInfo, 0)
@@ -410,7 +410,7 @@ func (c *Conn) listColumnsP(ctx context.Context, schema, table string) ([]protoc
 func (c *Conn) listIndexesP(ctx context.Context, schema, table string) ([]protocol.IndexInfo, error) {
 	rows, err := c.db.QueryContext(ctx, fmt.Sprintf("PRAGMA index_list(%q)", table))
 	if err != nil {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
+		return nil, bridge.ErrorFromKernel(err)
 	}
 	type idxMeta struct {
 		name   string
@@ -456,7 +456,7 @@ func (c *Conn) listIndexesP(ctx context.Context, schema, table string) ([]protoc
 func (c *Conn) indexColumns(ctx context.Context, index string) ([]protocol.IndexColumn, error) {
 	rows, err := c.db.QueryContext(ctx, fmt.Sprintf("PRAGMA index_info(%q)", index))
 	if err != nil {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
+		return nil, bridge.ErrorFromKernel(err)
 	}
 	defer rows.Close()
 	out := make([]protocol.IndexColumn, 0)
@@ -492,7 +492,7 @@ func fkAction(raw string) protocol.ForeignKeyAction {
 func (c *Conn) listForeignKeysP(ctx context.Context, schema, table string) ([]protocol.ForeignKeyInfo, error) {
 	rows, err := c.db.QueryContext(ctx, fmt.Sprintf("PRAGMA foreign_key_list(%q)", table))
 	if err != nil {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
+		return nil, bridge.ErrorFromKernel(err)
 	}
 	defer rows.Close()
 
@@ -562,7 +562,7 @@ func (c *Conn) createTableSQLP(ctx context.Context, schema, table string) (strin
 		return "", &protocol.PolyDBError{Code: protocol.ErrTableNotFound, Message: "table not found: " + table}
 	}
 	if err != nil {
-		return "", &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
+		return "", bridge.ErrorFromKernel(err)
 	}
 	return ddl, nil
 }

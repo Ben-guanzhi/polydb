@@ -13,6 +13,7 @@ import (
 
 	dbc "github.com/dbcore/dbcore"
 	pdb "github.com/polydb/polydb/pkg/dbcore"
+	"github.com/polydb/polydb/pkg/dbcore/bridge"
 	"github.com/polydb/polydb/pkg/protocol"
 )
 
@@ -117,7 +118,7 @@ func (c *Conn) executeInP(ctx context.Context, exec pdb.SQLTx, sql string, args 
 	if stmtType == protocol.StatementTypeSelect || stmtType == protocol.StatementTypeOther {
 		rows, err := exec.QueryContext(ctx, sql, pdb.ValueArgs(args)...)
 		if err != nil {
-			return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
+			return nil, bridge.ErrorFromKernel(err)
 		}
 		defer rows.Close()
 		return queryResult(rows, stmtType, start)
@@ -125,7 +126,7 @@ func (c *Conn) executeInP(ctx context.Context, exec pdb.SQLTx, sql string, args 
 
 	res, err := exec.ExecContext(ctx, sql, pdb.ValueArgs(args)...)
 	if err != nil {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
+		return nil, bridge.ErrorFromKernel(err)
 	}
 	affected, _ := res.RowsAffected()
 	return &protocol.QueryResult{
@@ -142,7 +143,7 @@ func (c *Conn) beginP(ctx context.Context, mode pdb.TxMode) (*sql.Tx, error) {
 	defer c.mu.Unlock()
 	tx, err := c.db.BeginTx(ctx, pdb.TxOptionsFromMode(mode))
 	if err != nil {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
+		return nil, bridge.ErrorFromKernel(err)
 	}
 	return tx, nil
 }
@@ -150,7 +151,7 @@ func (c *Conn) beginP(ctx context.Context, mode pdb.TxMode) (*sql.Tx, error) {
 func queryResult(rows *sql.Rows, stmtType protocol.StatementType, start float64) (*protocol.QueryResult, error) {
 	colTypes, err := rows.ColumnTypes()
 	if err != nil {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: "column types: " + err.Error()}
+		return nil, bridge.ErrorFromKernel(fmt.Errorf("column types: %w", err))
 	}
 	columns := make([]protocol.ResultColumn, len(colTypes))
 	for i, ct := range colTypes {
@@ -163,7 +164,7 @@ func queryResult(rows *sql.Rows, stmtType protocol.StatementType, start float64)
 			raw[i] = new(any)
 		}
 		if err := rows.Scan(raw...); err != nil {
-			return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: "scan: " + err.Error()}
+			return nil, bridge.ErrorFromKernel(fmt.Errorf("scan: %w", err))
 		}
 		rowVals := make([]protocol.Value, len(raw))
 		for i, r := range raw {
@@ -172,7 +173,7 @@ func queryResult(rows *sql.Rows, stmtType protocol.StatementType, start float64)
 		resultRows = append(resultRows, rowVals)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
+		return nil, bridge.ErrorFromKernel(err)
 	}
 	return &protocol.QueryResult{
 		Columns:         columns,
@@ -190,7 +191,7 @@ func timeNowMs() float64 {
 
 // queryErr 把内核错误统一包成 ErrQueryFailed。
 func queryErr(err error) error {
-	return &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: err.Error()}
+	return bridge.ErrorFromKernel(err)
 }
 
 // fkActionFromKernel 把内核的标准动作拼写（"CASCADE"/"SET NULL"/…）映射为

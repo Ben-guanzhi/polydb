@@ -276,15 +276,31 @@ func (a *AppCore) Connect(ctx context.Context, id string) error {
 	}
 
 	a.mu.Lock()
-	// 覆盖写入前必须关掉被顶替的句柄：并发懒连接时两个 goroutine 都会打开驱动，
+	// 覆盖写入前必须摘掉被顶替的句柄：并发懒连接时两个 goroutine 都会打开驱动，
 	// 谁后写谁留下，前一个若不 Close 就永久泄漏（Go 没有 Drop，Rust 侧靠 insert
 	// 覆盖旧值自动释放）。隧道同理——它只服务于那个已关闭的连接。
+	// Close 与事务回滚都是 DB I/O（sql.DB.Close 会等在途查询），与 Disconnect
+	// 同一纪律：锁内只摘句柄，锁外收尾，否则一条慢查询让所有连接的全部操作
+	// 在 a.mu 上排队。被顶替连接的事务注册表一并收掉——TxManager 在创建时把
+	// driver 钉死，重连后复用旧注册表会把新事务开在已关闭的驱动上。
+	var staleDriver dbcore.Driver
+	var staleTunnel *sshtunnel.Tunnel
+	var staleMgr *bridge.TxManager
 	if prev, ok := a.connections[id]; ok {
-		_ = prev.Driver().Close()
+		staleDriver = prev.Driver()
 	}
 	if prevTunnel, ok := a.tunnels[id]; ok && prevTunnel != nil {
-		_ = prevTunnel.Close()
+		staleTunnel = prevTunnel
 		delete(a.tunnels, id)
+	}
+	if m, ok := a.txManagers[id]; ok {
+		staleMgr = m
+		delete(a.txManagers, id)
+	}
+	for tid, m := range a.txMeta {
+		if m.connID == id {
+			delete(a.txMeta, tid)
+		}
 	}
 	a.connections[id] = dbcore.NewConnection(d)
 	a.readOnly[id] = info.ReadOnly != nil && *info.ReadOnly
@@ -292,6 +308,17 @@ func (a *AppCore) Connect(ctx context.Context, id string) error {
 		a.tunnels[id] = tunnel
 	}
 	a.mu.Unlock()
+
+	if staleMgr != nil {
+		staleMgr.RollbackAll()
+		staleMgr.Close()
+	}
+	if staleDriver != nil {
+		_ = staleDriver.Close()
+	}
+	if staleTunnel != nil {
+		_ = staleTunnel.Close()
+	}
 	return nil
 }
 
@@ -325,13 +352,15 @@ func rejectWriteOnReadOnly(sqlText string) error {
 
 func (a *AppCore) Disconnect(id string) {
 	a.mu.Lock()
+	var driver dbcore.Driver
 	if c, ok := a.connections[id]; ok {
-		_ = c.Driver().Close()
+		driver = c.Driver()
 		delete(a.connections, id)
 	}
 	delete(a.readOnly, id)
+	var tunnel *sshtunnel.Tunnel
 	if t, ok := a.tunnels[id]; ok {
-		_ = t.Close()
+		tunnel = t
 		delete(a.tunnels, id)
 	}
 	mgr := a.txManagers[id]
@@ -344,11 +373,18 @@ func (a *AppCore) Disconnect(id string) {
 	a.mu.Unlock()
 
 	// 锁外收尾：回滚该连接上仍活跃的事务（避免 *sql.Tx 泄漏）并停掉其清扫
-	// goroutine。回滚是 DB I/O，不能抱着 AppCore 锁做——这也是 Disconnect
-	// 不再用 defer Unlock 的原因。
+	// goroutine，随后关驱动与隧道。这些都是 DB I/O（sql.DB.Close 会等在途
+	// 查询），不能抱着 AppCore 锁做——这也是 Disconnect 不再用 defer Unlock
+	// 的原因。
 	if mgr != nil {
 		mgr.RollbackAll()
 		mgr.Close()
+	}
+	if driver != nil {
+		_ = driver.Close()
+	}
+	if tunnel != nil {
+		_ = tunnel.Close()
 	}
 }
 
@@ -507,6 +543,14 @@ func (a *AppCore) BeginTransaction(ctx context.Context, req *protocol.BeginTrans
 		return nil, err
 	}
 	a.mu.Lock()
+	// Begin 在锁外做 DB I/O，期间 Disconnect 可能已把连接收走（注册表已
+	// RollbackAll+Close）。txMeta 不能无条件重插——那会留下一条永不清理的
+	// 孤儿记录和一个挂在已关驱动上的 *sql.Tx。复查失败就回滚刚开的事务。
+	if _, live := a.connections[req.ConnectionID]; !live {
+		a.mu.Unlock()
+		_ = mgr.Rollback(info.ID)
+		return nil, &protocol.PolyDBError{Code: protocol.ErrConnectionNotFound, Message: "connection closed while beginning transaction: " + req.ConnectionID}
+	}
 	a.txMeta[info.ID] = &txMeta{
 		connID:         req.ConnectionID,
 		startedAt:      now,

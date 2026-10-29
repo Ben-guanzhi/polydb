@@ -1118,3 +1118,96 @@ func TestSchemaDDLStaleSelectedIDReportsInvalidParam(t *testing.T) {
 		t.Fatalf("message=%v, want %q", body["message"], want)
 	}
 }
+
+// slowSQLiteCTE 在 sqlite 上造一条跑得足够久、且可被 ctx 中断的查询
+// （go-sqlite3 对 ctx 取消走 sqlite3_interrupt）：取消与超时的回归都需要它。
+const slowSQLiteCTE = `WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x < 100000000) SELECT count(*) FROM n`
+
+// WS 取消必须在查询执行中可达。此前 Execute 在入站 goroutine 同步执行，
+// query_cancel 只能等查询结束后才被读到——取消永远回 "query not found"，
+// behavior.md §12 的取消契约与 §6 的并发契约双双失守。
+func TestWSQueryCancelWhileRunning(t *testing.T) {
+	srv := newTestServer(t)
+	id := createSQLiteConn(t, srv)
+
+	w := wsDial(t, srv)
+	defer w.close()
+	w.send(map[string]any{"type": "hello", "connection_id": id, "client_version": "0.1.0"})
+	if typ, _ := w.recv(3 * time.Second); typ != "hello_ack" {
+		t.Fatalf("expected hello_ack")
+	}
+
+	qid := "11111111-2222-3333-4444-555555555555"
+	w.send(map[string]any{"type": "query", "query_id": qid, "sql": slowSQLiteCTE})
+	if typ, _ := w.recv(3 * time.Second); typ != "query_started" {
+		t.Fatalf("expected query_started")
+	}
+	w.send(map[string]any{"type": "query_cancel", "query_id": qid})
+	typ, msg := w.recv(10 * time.Second)
+	if typ != "query_cancelled" {
+		t.Fatalf("expected query_cancelled, got %q: %v", typ, msg)
+	}
+}
+
+// timeout_ms 与 HTTP 同义：到点回 TIMEOUT（可重试），被放弃的执行在后台
+// 随 ctx 取消自然结束。
+func TestWSQueryTimeout(t *testing.T) {
+	srv := newTestServer(t)
+	id := createSQLiteConn(t, srv)
+
+	w := wsDial(t, srv)
+	defer w.close()
+	w.send(map[string]any{"type": "hello", "connection_id": id, "client_version": "0.1.0"})
+	if typ, _ := w.recv(3 * time.Second); typ != "hello_ack" {
+		t.Fatalf("expected hello_ack")
+	}
+
+	qid := "11111111-2222-3333-4444-555555555556"
+	w.send(map[string]any{"type": "query", "query_id": qid, "sql": slowSQLiteCTE, "timeout_ms": 300})
+	if typ, _ := w.recv(3 * time.Second); typ != "query_started" {
+		t.Fatalf("expected query_started")
+	}
+	typ, msg := w.recv(10 * time.Second)
+	if typ != "query_error" {
+		t.Fatalf("expected query_error, got %q: %v", typ, msg)
+	}
+	errObj, _ := msg["error"].(map[string]any)
+	if errObj["code"] != "POLYDB_ERR_TIMEOUT" {
+		t.Fatalf("expected POLYDB_ERR_TIMEOUT, got %v", errObj)
+	}
+}
+
+// WS 结果与 HTTP 同受 max_rows 限行：截断置 truncated，total_rows 保留原数。
+func TestWSQueryMaxRows(t *testing.T) {
+	srv := newTestServer(t)
+	id := createSQLiteConn(t, srv)
+	_, _, _ = mpDo(t, srv, "POST", "/api/connections/"+id+"/query",
+		map[string]any{"sql": "CREATE TABLE t(x INTEGER); WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x < 25) INSERT INTO t SELECT x FROM n"})
+
+	w := wsDial(t, srv)
+	defer w.close()
+	w.send(map[string]any{"type": "hello", "connection_id": id, "client_version": "0.1.0"})
+	if typ, _ := w.recv(3 * time.Second); typ != "hello_ack" {
+		t.Fatalf("expected hello_ack")
+	}
+
+	w.send(map[string]any{
+		"type": "query", "query_id": "11111111-2222-3333-4444-555555555557",
+		"sql": "SELECT x FROM t", "max_rows": 10,
+	})
+	if typ, _ := w.recv(3 * time.Second); typ != "query_started" {
+		t.Fatalf("expected query_started")
+	}
+	typ, msg := w.recv(3 * time.Second)
+	if typ != "query_result" {
+		t.Fatalf("expected query_result, got %q: %v", typ, msg)
+	}
+	result, _ := msg["result"].(map[string]any)
+	rows, _ := result["rows"].([]any)
+	if len(rows) != 10 {
+		t.Fatalf("rows = %d, want 10", len(rows))
+	}
+	if truncated, _ := result["truncated"].(bool); !truncated {
+		t.Fatalf("expected truncated=true, got %v", result["truncated"])
+	}
+}

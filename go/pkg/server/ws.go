@@ -3,8 +3,10 @@ package server
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/vmihailenco/msgpack/v5"
@@ -66,14 +68,17 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 }
 
 type wsSession struct {
-	conn     *websocket.Conn
-	app      *appcore.AppCore
-	token    string
-	connID   string
-	authed   bool
-	inFlight map[string]chan struct{}
-	writeCh  chan []byte
-	shutdown chan struct{}
+	conn   *websocket.Conn
+	app    *appcore.AppCore
+	token  string
+	connID string
+	authed bool
+	// inFlightMu 只护 inFlight：查询在独立 goroutine 执行后（§6 并发契约），
+	// 注册表被入站循环、各查询的完成路径与取消消息并发访问。
+	inFlightMu sync.Mutex
+	inFlight   map[string]chan struct{}
+	writeCh    chan []byte
+	shutdown   chan struct{}
 }
 
 func (s *wsSession) runOutbound() {
@@ -125,6 +130,10 @@ func (s *wsSession) runInbound() {
 		case protocol.ClientMsgHello:
 			s.handleHello(msg)
 		case protocol.ClientMsgQuery:
+			// behavior.md §6/§12：同一连接可并发多个 query，取消只作用于对应
+			// query_id。此前 Execute 在本 goroutine 同步执行，query_cancel 只能
+			// 等查询结束后才被读到——WS 取消因此完全失效（HTTP 侧的后台执行 +
+			// registry 是正确范式）。执行移入独立 goroutine，入站循环保持读消息。
 			s.handleQuery(msg)
 		case protocol.ClientMsgQueryCancel:
 			s.handleCancel(msg)
@@ -170,6 +179,38 @@ func (s *wsSession) handleHello(msg protocol.ClientMessage) {
 	})
 }
 
+// wsMaxConcurrentQueries 是单个 WS 会话允许的并发在途查询数。HTTP 每请求一个
+// goroutine、由 HTTP 服务器自身的并发面兜底；WS 的会话是长活的，需要一个明确的
+// 闸门防失控客户端把 goroutine 堆满。
+const wsMaxConcurrentQueries = 16
+
+// registerQuery 把一条查询登记为可取消。返回 false 表示会话的在途查询已到闸门。
+func (s *wsSession) registerQuery(id string) bool {
+	s.inFlightMu.Lock()
+	defer s.inFlightMu.Unlock()
+	if len(s.inFlight) >= wsMaxConcurrentQueries {
+		return false
+	}
+	s.inFlight[id] = make(chan struct{})
+	return true
+}
+
+// retireQuery 注销一条在途查询并 close 它的取消通道。close 恰好发生一次：
+// 完成路径、query_cancel 与会话收尾都可能想关，先删后关（同一把锁内）让
+// 三者互斥，第二次 close 不会发生。
+func (s *wsSession) retireQuery(id string) bool {
+	s.inFlightMu.Lock()
+	cancel, ok := s.inFlight[id]
+	if ok {
+		delete(s.inFlight, id)
+	}
+	s.inFlightMu.Unlock()
+	if ok {
+		close(cancel)
+	}
+	return ok
+}
+
 func (s *wsSession) handleQuery(msg protocol.ClientMessage) {
 	// behavior.md §12.2：启用 token 时，未通过认证 hello 之前拒绝一切 query，
 	// 防止客户端跳过 hello 直接携带 connection_id 执行 SQL。
@@ -209,58 +250,129 @@ func (s *wsSession) handleQuery(msg protocol.ClientMessage) {
 		})
 		return
 	}
-
-	cancel := make(chan struct{})
-	s.inFlight[msg.QueryID] = cancel
+	if !s.registerQuery(msg.QueryID) {
+		s.send(&protocol.ServerMessage{
+			Type:    protocol.ServerMsgQueryError,
+			QueryID: msg.QueryID,
+			Error:   &protocol.PolyDBError{Code: protocol.ErrInvalidParam, Message: fmt.Sprintf("too many concurrent queries (max %d)", wsMaxConcurrentQueries)},
+		})
+		return
+	}
 
 	s.send(&protocol.ServerMessage{
 		Type:    protocol.ServerMsgQueryStarted,
 		QueryID: msg.QueryID,
 	})
+	go s.runQuery(msg, connID)
+}
+
+// runQuery executes one registered query to completion. It owns the whole
+// lifecycle: timeout race (§2.3, same shape as the HTTP handler), cancel via
+// the in-flight registry, row cap and the panic guard — panicMiddleware only
+// covers HTTP handler goroutines, so a panicking driver on this path would
+// otherwise take the process down.
+func (s *wsSession) runQuery(msg protocol.ClientMessage, connID string) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.retireQuery(msg.QueryID)
+			s.send(&protocol.ServerMessage{
+				Type:    protocol.ServerMsgQueryError,
+				QueryID: msg.QueryID,
+				Error:   &protocol.PolyDBError{Code: protocol.ErrUnknown, Message: fmt.Sprintf("internal error: %v", r)},
+			})
+		}
+	}()
 
 	ctx, cancelFn := context.WithCancel(context.Background())
 	defer cancelFn()
 	go func() {
 		select {
-		case <-cancel:
+		case <-s.cancelChanFor(msg.QueryID):
 			cancelFn()
 		case <-s.shutdown:
+			cancelFn()
 		}
 	}()
 
-	out, err := s.app.Execute(ctx, connID, msg.SQL, msg.Params...)
-	delete(s.inFlight, msg.QueryID)
-	if ctx.Err() != nil {
-		s.send(&protocol.ServerMessage{
-			Type:    protocol.ServerMsgQueryCancelled,
-			QueryID: msg.QueryID,
-		})
-		return
+	var timeoutCh <-chan time.Time
+	if msg.TimeoutMs != nil && *msg.TimeoutMs > 0 {
+		timer := time.NewTimer(time.Duration(*msg.TimeoutMs) * time.Millisecond)
+		defer timer.Stop()
+		timeoutCh = timer.C
 	}
-	if err != nil {
-		var pe *protocol.PolyDBError
-		if e, ok := err.(*protocol.PolyDBError); ok {
-			pe = e
-		} else {
-			pe = &protocol.PolyDBError{Code: protocol.ErrUnknown, Message: err.Error()}
+
+	type execOutcome struct {
+		res *protocol.QueryResult
+		err error
+	}
+	ch := make(chan execOutcome, 1)
+	go func() {
+		res, err := s.app.Execute(ctx, connID, msg.SQL, msg.Params...)
+		ch <- execOutcome{res, err}
+	}()
+
+	select {
+	case result := <-ch:
+		// 先取取消判定再注销：注销会 close 取消通道，watcher 随之触发
+		// cancelFn，晚一步读 ctx.Err() 会把正常完成误判成已取消。
+		cancelled := ctx.Err() != nil
+		s.retireQuery(msg.QueryID)
+		if cancelled {
+			s.send(&protocol.ServerMessage{
+				Type:    protocol.ServerMsgQueryCancelled,
+				QueryID: msg.QueryID,
+			})
+			return
 		}
+		if result.err != nil {
+			var pe *protocol.PolyDBError
+			if e, ok := result.err.(*protocol.PolyDBError); ok {
+				pe = e
+			} else {
+				pe = &protocol.PolyDBError{Code: protocol.ErrUnknown, Message: result.err.Error()}
+			}
+			s.send(&protocol.ServerMessage{
+				Type:    protocol.ServerMsgQueryError,
+				QueryID: msg.QueryID,
+				Error:   pe,
+			})
+			return
+		}
+		// 与 HTTP 同一限行（§5）：无上限的 SELECT 会在序列化进 socket 前先
+		// 打爆内存。max_rows 消息字段与 HTTP 的 max_rows 参数同义。
+		s.send(&protocol.ServerMessage{
+			Type:    protocol.ServerMsgQueryResult,
+			QueryID: msg.QueryID,
+			Result:  applyMaxRows(result.res, rowLimitFrom(msg.MaxRows)),
+		})
+	case <-timeoutCh:
+		// 到点先回 TIMEOUT，被放弃的执行在后台自然结束（best-effort）。
+		s.retireQuery(msg.QueryID)
 		s.send(&protocol.ServerMessage{
 			Type:    protocol.ServerMsgQueryError,
 			QueryID: msg.QueryID,
-			Error:   pe,
+			Error:   &protocol.PolyDBError{Code: protocol.ErrTimeout, Retryable: true, Message: fmt.Sprintf("query timed out: %s", msg.QueryID)},
 		})
-		return
 	}
-	s.send(&protocol.ServerMessage{
-		Type:    protocol.ServerMsgQueryResult,
-		QueryID: msg.QueryID,
-		Result:  out,
-	})
+}
+
+// cancelChanFor snapshots the cancel channel of an in-flight query. The query
+// may complete between registration and the watcher's read; a missing entry
+// yields nil, whose receive never fires — the watcher then just waits for
+// shutdown.
+func (s *wsSession) cancelChanFor(id string) <-chan struct{} {
+	s.inFlightMu.Lock()
+	defer s.inFlightMu.Unlock()
+	cancel, ok := s.inFlight[id]
+	if !ok {
+		return nil
+	}
+	return cancel
 }
 
 func (s *wsSession) handleCancel(msg protocol.ClientMessage) {
-	if cancel, ok := s.inFlight[msg.QueryID]; ok {
-		close(cancel)
+	// 已完成（已注销）的查询与 HTTP registry 同语义：回 query not found。
+	if s.retireQuery(msg.QueryID) {
 		return
 	}
 	s.send(&protocol.ServerMessage{
@@ -271,8 +383,14 @@ func (s *wsSession) handleCancel(msg protocol.ClientMessage) {
 }
 
 func (s *wsSession) cancelAll() {
-	for _, cancel := range s.inFlight {
-		close(cancel)
+	s.inFlightMu.Lock()
+	ids := make([]string, 0, len(s.inFlight))
+	for id := range s.inFlight {
+		ids = append(ids, id)
+	}
+	s.inFlightMu.Unlock()
+	for _, id := range ids {
+		s.retireQuery(id)
 	}
 	s.stop()
 }

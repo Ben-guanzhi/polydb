@@ -251,6 +251,20 @@ func (s *Server) testConnection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	start := time.Now()
+	// 已连接的连接直接 Ping 现有驱动：此前无条件 Connect+Disconnect 会把正在
+	// 使用的驱动 Close 掉，并经 RollbackAll 回滚用户未提交的事务——IsConnected
+	// 守卫在 appcore 里就是为这个场景设的。
+	if s.app.IsConnected(id) {
+		if err := s.app.Ping(r.Context(), id); err != nil {
+			status.Error = err.Error()
+			writeMsgpack(w, http.StatusOK, status)
+			return
+		}
+		status.Connected = true
+		status.LatencyMs = float64(time.Since(start).Microseconds()) / 1000.0
+		writeMsgpack(w, http.StatusOK, status)
+		return
+	}
 	if err := s.app.Connect(r.Context(), id); err != nil {
 		status.Error = err.Error()
 		writeMsgpack(w, http.StatusOK, status)
@@ -438,9 +452,15 @@ func (s *Server) executeQuery(w http.ResponseWriter, r *http.Request) {
 // queryRowLimit 计算 effective 行数上限（behavior.md §5）：默认 10000，
 // max_rows>0 覆盖，硬上限同为 10000；0 表示用默认。
 func queryRowLimit(req *protocol.QueryRequest) int64 {
+	return rowLimitFrom(req.MaxRows)
+}
+
+// rowLimitFrom 是 queryRowLimit 的字段形态，HTTP 请求与 WS 帧的 max_rows
+// 同义同限——两条传输面各写一份迟早漂移。
+func rowLimitFrom(maxRows *int64) int64 {
 	limit := int64(10000)
-	if req.MaxRows != nil && *req.MaxRows > 0 {
-		limit = *req.MaxRows
+	if maxRows != nil && *maxRows > 0 {
+		limit = *maxRows
 	}
 	if limit > 10000 {
 		limit = 10000
