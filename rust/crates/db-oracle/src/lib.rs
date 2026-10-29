@@ -1,5 +1,6 @@
 //! polydb-db-oracle：基于 oracle crate（ODPI-C）的驱动实现（对应 Go 侧 dboracle）。
-//! oracle crate 为阻塞式 API，与 db-sqlite 一致：同步调用直接放在 async 方法内。
+//! oracle crate 为阻塞式 API（ODPI-C）：主执行路径经 spawn_blocking 移出 runtime
+//! worker（见 execute），事务内的路径暂保持同步。
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -16,6 +17,7 @@ use polydb_core::{
     TableType, Value,
 };
 use polydb_db_core::{DatabaseDriver, SqlDriver, TxMode};
+use polydb_core::error_classify::driver_error;
 
 /// Oracle 自带维护 schema，默认不展示（对应 Go 侧 maintainedSchemas）。
 const MAINTAINED: &[&str] = &[
@@ -222,12 +224,12 @@ impl OracleConn {
         let mut stmt = conn
             .statement(sql)
             .build()
-            .map_err(|e| CoreError::Driver(format!("prepare failed: {e}")))?;
+            .map_err(|e| db_err(&e, "prepare failed"))?;
 
         if stmt_type == StatementType::Select || stmt_type == StatementType::Other {
             let mut rows = stmt
                 .query(&refs)
-                .map_err(|e| CoreError::Driver(format!("query failed: {e}")))?;
+                .map_err(|e| db_err(&e, "query failed"))?;
             let columns = rows
                 .column_info()
                 .iter()
@@ -243,7 +245,7 @@ impl OracleConn {
             while let Some(row) = rows
                 .next()
                 .transpose()
-                .map_err(|e| CoreError::Driver(format!("row failed: {e}")))?
+                .map_err(|e| db_err(&e, "row failed"))?
             {
                 data.push(row.sql_values().iter().map(Self::or_value).collect());
             }
@@ -259,10 +261,10 @@ impl OracleConn {
             })
         } else {
             stmt.execute(&refs)
-                .map_err(|e| CoreError::Driver(format!("execute failed: {e}")))?;
+                .map_err(|e| db_err(&e, "execute failed"))?;
             let affected = stmt
                 .row_count()
-                .map_err(|e| CoreError::Driver(format!("row_count failed: {e}")))?;
+                .map_err(|e| db_err(&e, "row_count failed"))?;
             Ok(QueryResult {
                 columns: vec![],
                 rows: vec![],
@@ -371,67 +373,79 @@ impl SqlDriver for OracleConn {
     }
 
     async fn execute(&self, sql: &str, params: &[Value]) -> CoreResult<QueryResult> {
-        let start = std::time::Instant::now();
-        let stmt_type = Self::detect_statement_type(sql);
-        let boxes = Self::to_sql_params(params);
-        let refs = Self::param_refs(&boxes);
+        // oracle crate 是阻塞式 API（ODPI-C）：整段执行直接在 runtime worker
+        // 上跑会阻塞该 worker，WS 的取消/超时臂没有机会被轮询（与 db-sqlite
+        // 同范式）。移入 spawn_blocking：语句本身仍在后台跑完（best-effort
+        // 取消，与 Go 侧语义一致），future 则能让步。事务内的 execute 暂不
+        // 迁移（handle 是 &mut 引用，拿不进 'static 闭包）。
+        let conn = Arc::clone(&self.conn);
+        let sql = sql.to_string();
+        let params = params.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let start = std::time::Instant::now();
+            let stmt_type = Self::detect_statement_type(&sql);
+            let boxes = Self::to_sql_params(&params);
+            let refs = Self::param_refs(&boxes);
 
-        let conn = self.conn.lock();
-        let mut stmt = conn
-            .statement(sql)
-            .build()
-            .map_err(|e| CoreError::Driver(format!("prepare failed: {e}")))?;
+            let guard = conn.lock();
+            let mut stmt = guard
+                .statement(&sql)
+                .build()
+                .map_err(|e| db_err(&e, "prepare failed"))?;
 
-        if stmt_type == StatementType::Select || stmt_type == StatementType::Other {
-            let mut rows = stmt
-                .query(&refs)
-                .map_err(|e| CoreError::Driver(format!("query failed: {e}")))?;
-            let columns = rows
-                .column_info()
-                .iter()
-                .map(|c| ResultColumn {
-                    name: c.name().to_string(),
-                    table: None,
-                    data_type: format!("{:?}", c.oracle_type()),
-                    generic_type: None,
-                    nullable: Some(true),
+            if stmt_type == StatementType::Select || stmt_type == StatementType::Other {
+                let mut rows = stmt
+                    .query(&refs)
+                    .map_err(|e| db_err(&e, "query failed"))?;
+                let columns = rows
+                    .column_info()
+                    .iter()
+                    .map(|c| ResultColumn {
+                        name: c.name().to_string(),
+                        table: None,
+                        data_type: format!("{:?}", c.oracle_type()),
+                        generic_type: None,
+                        nullable: Some(true),
+                    })
+                    .collect();
+                let mut data = Vec::new();
+                while let Some(row) = rows
+                    .next()
+                    .transpose()
+                    .map_err(|e| db_err(&e, "row failed"))?
+                {
+                    data.push(row.sql_values().iter().map(Self::or_value).collect());
+                }
+                Ok(QueryResult {
+                    columns,
+                    rows: data,
+                    affected_rows: 0,
+                    execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
+                    truncated: false,
+                    total_rows: None,
+                    has_more: false,
+                    statement_type: Some(stmt_type),
                 })
-                .collect();
-            let mut data = Vec::new();
-            while let Some(row) = rows
-                .next()
-                .transpose()
-                .map_err(|e| CoreError::Driver(format!("row failed: {e}")))?
-            {
-                data.push(row.sql_values().iter().map(Self::or_value).collect());
+            } else {
+                stmt.execute(&refs)
+                    .map_err(|e| db_err(&e, "execute failed"))?;
+                let affected = stmt
+                    .row_count()
+                    .map_err(|e| db_err(&e, "row_count failed"))?;
+                Ok(QueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                    affected_rows: affected,
+                    execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
+                    truncated: false,
+                    total_rows: None,
+                    has_more: false,
+                    statement_type: Some(stmt_type),
+                })
             }
-            Ok(QueryResult {
-                columns,
-                rows: data,
-                affected_rows: 0,
-                execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
-                truncated: false,
-                total_rows: None,
-                has_more: false,
-                statement_type: Some(stmt_type),
-            })
-        } else {
-            stmt.execute(&refs)
-                .map_err(|e| CoreError::Driver(format!("execute failed: {e}")))?;
-            let affected = stmt
-                .row_count()
-                .map_err(|e| CoreError::Driver(format!("row_count failed: {e}")))?;
-            Ok(QueryResult {
-                columns: vec![],
-                rows: vec![],
-                affected_rows: affected,
-                execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
-                truncated: false,
-                total_rows: None,
-                has_more: false,
-                statement_type: Some(stmt_type),
-            })
-        }
+        })
+        .await
+        .map_err(|e| CoreError::Internal(format!("oracle task join: {e}")))?
     }
 
     async fn list_schemas(&self) -> CoreResult<Vec<SchemaInfo>> {
@@ -716,4 +730,11 @@ impl SqlDriver for OracleConn {
         b.push_str(");");
         Ok(b)
     }
+}
+
+// oracle errors carry the numeric ORA-XXXXX code: the second evidence layer.
+fn db_err(e: &oracle::Error, what: &str) -> CoreError {
+    let text = format!("{what}: {e}");
+    let numeric = e.db_error().map(|d| d.code() as u32);
+    driver_error(None, numeric, None, &text)
 }

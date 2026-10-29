@@ -17,6 +17,19 @@ pub enum CoreError {
     #[error("driver error: {0}")]
     Driver(String),
 
+    // A driver error the kernel classified: the protocol code is what
+    // clients branch on, the raw text stays the message, and the SQLSTATE
+    // rides along in detail when there was one. The strings are boxed so the
+    // enum stays under the result_large_err size threshold (CoreError is
+    // returned from everywhere).
+    #[error("driver error ({code}): {message}")]
+    DriverClassified {
+        code: Box<str>,
+        message: Box<str>,
+        detail: Option<serde_json::Value>,
+        retryable: bool,
+    },
+
     #[error("connection failed: {0}")]
     Connection(String),
 
@@ -58,6 +71,21 @@ impl CoreError {
                 PolyDBError::new("POLYDB_ERR_BLOB_NOT_FOUND", format!("blob not found: {id}"))
             }
             Self::Driver(msg) => PolyDBError::new("POLYDB_ERR_QUERY_FAILED", msg.clone()),
+            Self::DriverClassified {
+                code,
+                message,
+                detail,
+                retryable,
+            } => {
+                let mut e = PolyDBError::new(code.to_string(), message.to_string());
+                if *retryable {
+                    e = e.retryable();
+                }
+                if let Some(d) = detail {
+                    e = e.with_detail(d.clone());
+                }
+                e
+            }
             Self::Connection(msg) => {
                 PolyDBError::new("POLYDB_ERR_CONNECTION_FAILED", msg.clone()).retryable()
             }

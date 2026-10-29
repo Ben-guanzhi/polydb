@@ -1,4 +1,5 @@
 pub mod error;
+pub mod error_classify;
 
 pub use polydb_protocol as protocol;
 pub use polydb_protocol::common::*;

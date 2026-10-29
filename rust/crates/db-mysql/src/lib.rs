@@ -16,6 +16,7 @@ use polydb_core::{
     TableType, Value,
 };
 use polydb_db_core::{DatabaseDriver, SqlDriver, TxMode};
+use polydb_core::error_classify::{driver_error, DriverClass};
 
 pub struct MySqlConn {
     pool: MySqlPool,
@@ -224,7 +225,7 @@ impl MySqlConn {
             let rows = q
                 .fetch_all(executor)
                 .await
-                .map_err(|e| CoreError::Driver(format!("query failed: {e}")))?;
+                .map_err(|e| db_err(&e, "query failed"))?;
             let columns = Self::columns_of(&rows);
             let data = rows
                 .iter()
@@ -244,7 +245,7 @@ impl MySqlConn {
             let res = q
                 .execute(executor)
                 .await
-                .map_err(|e| CoreError::Driver(format!("execute failed: {e}")))?;
+                .map_err(|e| db_err(&e, "execute failed"))?;
             Ok(QueryResult {
                 columns: vec![],
                 rows: vec![],
@@ -598,4 +599,20 @@ impl SqlDriver for MySqlConn {
             .map_err(|e| CoreError::Driver(format!("create_table_sql: {e}")))?;
         Ok(row.get::<String, _>(1))
     }
+}
+
+// sqlx errors carry SQLSTATE + ErrorKind: the strongest evidence of the six.
+fn db_err(e: &sqlx::Error, what: &str) -> CoreError {
+    let text = format!("{what}: {e}");
+    if let Some(db) = e.as_database_error() {
+        let kind = match db.kind() {
+            sqlx::error::ErrorKind::UniqueViolation => Some(DriverClass::Duplicate),
+            sqlx::error::ErrorKind::ForeignKeyViolation
+            | sqlx::error::ErrorKind::NotNullViolation
+            | sqlx::error::ErrorKind::CheckViolation => Some(DriverClass::Constraint),
+            _ => None,
+        };
+        return driver_error(db.code().as_deref(), None, kind, &text);
+    }
+    driver_error(None, None, None, &text)
 }

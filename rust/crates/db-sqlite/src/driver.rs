@@ -10,6 +10,7 @@ use polydb_core::{
     QueryResult, ResultColumn, SchemaInfo, StatementType, TableInfo, TableType, Value,
 };
 use polydb_db_core::{DatabaseDriver, SqlDriver, TxMode};
+use polydb_core::error_classify::driver_error;
 
 pub struct SqliteConn {
     conn: Arc<Mutex<RusqliteConnection>>,
@@ -179,7 +180,7 @@ impl SqliteConn {
 
         let mut stmt = conn
             .prepare(sql)
-            .map_err(|e| CoreError::Driver(format!("prepare failed: {e}")))?;
+            .map_err(|e| db_err(&e, "prepare failed"))?;
 
         let col_count = stmt.column_count();
         let columns: Vec<ResultColumn> = (0..col_count)
@@ -202,11 +203,11 @@ impl SqliteConn {
                 .query_map(param_slices.as_slice(), |row| {
                     Self::row_to_values(row, col_count)
                 })
-                .map_err(|e| CoreError::Driver(format!("query failed: {e}")))?;
+                .map_err(|e| db_err(&e, "query failed"))?;
 
             let mut rows = Vec::new();
             for row_result in rows_result {
-                let row = row_result.map_err(|e| CoreError::Driver(format!("row failed: {e}")))?;
+                let row = row_result.map_err(|e| db_err(&e, "row failed"))?;
                 rows.push(row);
             }
 
@@ -223,7 +224,7 @@ impl SqliteConn {
         } else {
             let affected = stmt
                 .execute(param_slices.as_slice())
-                .map_err(|e| CoreError::Driver(format!("execute failed: {e}")))?;
+                .map_err(|e| db_err(&e, "execute failed"))?;
 
             Ok(QueryResult {
                 columns: vec![],
@@ -584,6 +585,13 @@ impl SqlDriver for SqliteConn {
             .map_err(|e| CoreError::Driver(format!("create_table_sql: {e}")))?;
         Ok(sql)
     }
+}
+
+// rusqlite errors carry no structured code: the wordings are the whole
+// evidence, so the text-pattern layer of the kernel classifier does the
+// mapping (mirrors Go dberror's third evidence layer).
+fn db_err<E: std::fmt::Display>(e: &E, what: &str) -> CoreError {
+    driver_error(None, None, None, &format!("{what}: {e}"))
 }
 
 #[cfg(test)]

@@ -15,6 +15,7 @@ use polydb_core::{
     QueryResult, ResultColumn, SchemaInfo, StatementType, TableInfo, TableType, Value,
 };
 use polydb_db_core::{DatabaseDriver, SqlDriver, TxMode};
+use polydb_core::error_classify::{driver_error, DriverClass};
 
 pub struct PostgresConn {
     pool: PgPool,
@@ -205,7 +206,7 @@ impl PostgresConn {
             let rows = q
                 .fetch_all(executor)
                 .await
-                .map_err(|e| CoreError::Driver(format!("query failed: {e}")))?;
+                .map_err(|e| db_err(&e, "query failed"))?;
             let columns = Self::columns_of(&rows);
             let data = rows
                 .iter()
@@ -225,7 +226,7 @@ impl PostgresConn {
             let res = q
                 .execute(executor)
                 .await
-                .map_err(|e| CoreError::Driver(format!("execute failed: {e}")))?;
+                .map_err(|e| db_err(&e, "execute failed"))?;
             Ok(QueryResult {
                 columns: vec![],
                 rows: vec![],
@@ -626,4 +627,20 @@ impl SqlDriver for PostgresConn {
         b.push_str(");");
         Ok(b)
     }
+}
+
+// sqlx errors carry SQLSTATE + ErrorKind: the strongest evidence of the six.
+fn db_err(e: &sqlx::Error, what: &str) -> CoreError {
+    let text = format!("{what}: {e}");
+    if let Some(db) = e.as_database_error() {
+        let kind = match db.kind() {
+            sqlx::error::ErrorKind::UniqueViolation => Some(DriverClass::Duplicate),
+            sqlx::error::ErrorKind::ForeignKeyViolation
+            | sqlx::error::ErrorKind::NotNullViolation
+            | sqlx::error::ErrorKind::CheckViolation => Some(DriverClass::Constraint),
+            _ => None,
+        };
+        return driver_error(db.code().as_deref(), None, kind, &text);
+    }
+    driver_error(None, None, None, &text)
 }

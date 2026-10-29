@@ -23,6 +23,7 @@ use polydb_core::{
     TableType, Value,
 };
 use polydb_db_core::{DatabaseDriver, SqlDriver, TxMode};
+use polydb_core::error_classify::driver_error;
 
 // tiberius 0.12 无内置连接/查询超时；不可达主机（防火墙丢包）会让 TCP 握手
 // 挂到系统超时（本机实测 ~4s/地址，tokio 会串行尝试多个地址）。所有 block_on
@@ -108,7 +109,7 @@ where
     });
     match out {
         Out::Done(Ok(v)) => Ok(v),
-        Out::Done(Err(e)) => Err(CoreError::Driver(format!("{what}: {e}"))),
+        Out::Done(Err(e)) => Err(driver_error(None, None, None, &format!("{what}: {e}"))),
         Out::TimedOut => Err(CoreError::Driver(format!(
             "{what}: timeout after {IO_TIMEOUT:?}"
         ))),

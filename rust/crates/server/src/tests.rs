@@ -199,6 +199,25 @@ async fn query_flow_with_id_echo() {
     assert_eq!(value["code"], "POLYDB_ERR_QUERY_FAILED");
 }
 
+// 错误码面必须可编程：重复主键映射到 POLYDB_ERR_DUPLICATE_KEY，而不是
+// 一律 QUERY_FAILED（与 Go 侧 bridge.ErrorFromKernel 第 14 波的落地对齐）。
+#[tokio::test]
+async fn query_duplicate_key_classified() {
+    let router = new_test_router();
+    let id = create_sqlite_conn(&router, "dupkey").await;
+    let (status, value, _) =
+        query(&router, &id, json!({"sql": "CREATE TABLE pk1(id INTEGER PRIMARY KEY, name TEXT)"})).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    let (status, value, _) =
+        query(&router, &id, json!({"sql": "INSERT INTO pk1 VALUES(1, 'a')"})).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    let (status, value, _) =
+        query(&router, &id, json!({"sql": "INSERT INTO pk1 VALUES(1, 'b')"})).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(value["code"], "POLYDB_ERR_DUPLICATE_KEY", "{value}");
+    assert_eq!(value["retryable"], false);
+}
+
 #[tokio::test]
 async fn query_max_rows_truncation() {
     let router = new_test_router();
