@@ -1,7 +1,8 @@
 //! /ws WebSocket 处理器。契约见 spec/asyncapi.yaml。
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -101,7 +102,7 @@ async fn session(app: AppRef, token: Option<String>, socket: WebSocket) {
         tx: tx.clone(),
         connection_id: None,
         authed: false,
-        in_flight: HashMap::new(),
+        in_flight: Arc::new(Mutex::new(HashMap::new())),
     };
 
     let mut send = tokio::spawn(async move {
@@ -135,7 +136,32 @@ struct Session {
     tx: mpsc::UnboundedSender<ServerMessage>,
     connection_id: Option<ConnectionId>,
     authed: bool,
-    in_flight: HashMap<Uuid, Arc<Notify>>,
+    // 共享给每个查询的后台任务：完成路径必须注销自己，否则条目无界增长、
+    // 对已完成查询的取消永远石沉大海。std Mutex 够用——临界区里没有 await。
+    in_flight: Arc<Mutex<HashMap<Uuid, Arc<Notify>>>>,
+}
+
+// 单会话并发在途查询闸门，与 Go 侧 wsMaxConcurrentQueries 对齐。
+const WS_MAX_IN_FLIGHT: usize = 16;
+
+fn register_in_flight(
+    registry: &Mutex<HashMap<Uuid, Arc<Notify>>>,
+    query_id: Uuid,
+) -> Option<Arc<Notify>> {
+    let mut map = registry.lock().expect("in_flight poisoned");
+    if map.len() >= WS_MAX_IN_FLIGHT {
+        return None;
+    }
+    let cancel = Arc::new(Notify::new());
+    map.insert(query_id, Arc::clone(&cancel));
+    Some(cancel)
+}
+
+/// 注销一条在途查询；返回是否仍登记着（完成路径与取消路径经同一出口，
+/// notify_one 只会送达仍在等待的一方）。
+fn retire_in_flight(registry: &Mutex<HashMap<Uuid, Arc<Notify>>>, query_id: Uuid) -> bool {
+    let mut map = registry.lock().expect("in_flight poisoned");
+    map.remove(&query_id).is_some()
 }
 
 async fn receive_loop(
@@ -274,8 +300,18 @@ impl Session {
             return;
         }
 
-        let cancel = Arc::new(Notify::new());
-        self.in_flight.insert(query_id, Arc::clone(&cancel));
+        // behavior.md §6/§12：同一连接可并发多个查询。注册表满时如实拒绝，
+        // 不让失控客户端把 goroutine 堆满。
+        let Some(cancel) = register_in_flight(&self.in_flight, query_id) else {
+            let _ = self.send(ServerMessage::QueryError {
+                query_id,
+                error: PolyDBError::new(
+                    codes::INVALID_PARAM,
+                    format!("too many concurrent queries (max {WS_MAX_IN_FLIGHT})"),
+                ),
+            });
+            return;
+        };
 
         let _ = self.send(ServerMessage::QueryStarted { query_id });
 
@@ -283,16 +319,44 @@ impl Session {
         let tx = self.tx.clone();
         let sql = request.sql.clone();
         let params = request.params.clone();
+        let in_flight = Arc::clone(&self.in_flight);
+        // §2.3：timeout_ms>0 生效，超时回 POLYDB_ERR_TIMEOUT。此前 WS 路径
+        // 完全忽略该字段，一条慢查询永不返回。
+        let timeout = request.timeout_ms.filter(|ms| *ms > 0).map(Duration::from_millis);
+        let max_rows = crate::query_row_limit(&request);
 
         tokio::spawn(async move {
-            let cancel = cancel;
             let outcome = tokio::select! {
                 r = app.execute(conn_id, &sql, &params) => Some(r),
                 _ = cancel.notified() => None,
+                _ = async {
+                    match timeout {
+                        Some(d) => tokio::time::sleep(d).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    retire_in_flight(&in_flight, query_id);
+                    let _ = tx.send(ServerMessage::QueryError {
+                        query_id,
+                        error: PolyDBError::new(
+                            codes::TIMEOUT,
+                            format!("query timed out: {query_id}"),
+                        )
+                        .retryable(),
+                    });
+                    return;
+                }
             };
+            // 出口注销：查询自然完成也必须离开注册表。
+            retire_in_flight(&in_flight, query_id);
             match outcome {
                 Some(Ok(result)) => {
-                    let _ = tx.send(ServerMessage::QueryResult { query_id, result });
+                    // 与 HTTP 同一限行（§5）：无上限的 SELECT 会在序列化进
+                    // socket 前先打爆内存。max_rows 帧字段与 REST 参数同义。
+                    let _ = tx.send(ServerMessage::QueryResult {
+                        query_id,
+                        result: crate::apply_max_rows(result, max_rows),
+                    });
                 }
                 Some(Err(e)) => {
                     let _ = tx.send(ServerMessage::QueryError {
@@ -311,7 +375,7 @@ impl Session {
     }
 
     fn handle_cancel(&mut self, query_id: Uuid) {
-        if let Some(cancel) = self.in_flight.remove(&query_id) {
+        if let Some(cancel) = self.in_flight.lock().expect("in_flight poisoned").remove(&query_id) {
             cancel.notify_one();
             return;
         }
@@ -322,7 +386,7 @@ impl Session {
     }
 
     fn cancel_all(&mut self) {
-        for (_, cancel) in self.in_flight.drain() {
+        for (_, cancel) in self.in_flight.lock().expect("in_flight poisoned").drain() {
             cancel.notify_one();
         }
     }

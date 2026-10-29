@@ -169,7 +169,18 @@ impl Transport for LocalTransport {
         sql: &str,
         params: &[Value],
     ) -> CoreResult<QueryResult> {
-        self.app.execute(id, sql, params).await
+        let mut result = self.app.execute(id, sql, params).await?;
+        // 本地（GUI）路径与 HTTP/WS 同受 §5 限行：驱动 fetch_all 全量物化，
+        // MAX_RESULT_ROWS 只是渲染截断——一条无 LIMIT 的 SELECT 在此处就该
+        // 被截住，而不是等 UI 拿着千万行去渲染。
+        const LOCAL_MAX_ROWS: u64 = 10000;
+        if result.rows.len() as u64 > LOCAL_MAX_ROWS {
+            let total = result.rows.len() as u64;
+            result.rows.truncate(LOCAL_MAX_ROWS as usize);
+            result.truncated = true;
+            result.total_rows = Some(total);
+        }
+        Ok(result)
     }
 
     async fn list_schemas(&self, id: ConnectionId) -> CoreResult<Vec<SchemaInfo>> {

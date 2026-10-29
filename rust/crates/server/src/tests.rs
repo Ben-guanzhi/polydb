@@ -1223,3 +1223,139 @@ async fn body_under_the_limit_reaches_the_handler() {
     );
     assert_eq!(err_code(&body), "POLYDB_ERR_CONNECTION_NOT_FOUND");
 }
+
+// ─── WS 取消失效/超时忽略/无限行 的回归（对拍 Go 侧 TestWSQuery*，第 15 波）──
+
+// 取消/超时带起的阻塞查询会在后台跑完（best-effort），runtime drop 会等它的
+// 阻塞任务收尾——用比 SLOW_SQL 短一档的规模，保证窗口足够而用例不拖几十秒。
+const MEDIUM_SQL: &str = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 5000000) SELECT MAX(x) FROM c";
+
+fn ws_query_with(query_id: uuid::Uuid, id: &str, sql: &str, timeout_ms: Option<u64>, max_rows: Option<u64>) -> ClientMessage {
+    ClientMessage::Query {
+        query_id,
+        request: QueryRequest {
+            sql: sql.into(),
+            params: vec![],
+            connection_id: Some(id.parse().unwrap()),
+            query_id: None,
+            schema: None,
+            pagination: None,
+            timeout_ms,
+            max_rows,
+        },
+    }
+}
+
+async fn ws_hello(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    id: &str,
+) {
+    let hello = ClientMessage::Hello {
+        connection_id: id.parse().unwrap(),
+        client_version: Some("0.1.0".into()),
+        auth: None,
+    };
+    ws.send(WsMessage::Binary(ws_encode(&hello).into()))
+        .await
+        .unwrap();
+    assert!(matches!(
+        ws_recv(ws).await,
+        ServerMessage::HelloAck { .. }
+    ));
+}
+
+// 取消必须在查询执行中可达：此前 in_flight 的 notify 从未被等待的一方读走。
+#[tokio::test]
+async fn ws_query_cancel_while_running() {
+    let router = new_test_router();
+    let id = create_sqlite_conn(&router, "ws-cancel").await;
+    let url = spawn_ws_server(router).await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    ws_hello(&mut ws, &id).await;
+
+    let query_id = uuid::Uuid::new_v4();
+    let msg = ws_query_with(query_id, &id, MEDIUM_SQL, None, None);
+    ws.send(WsMessage::Binary(ws_encode(&msg).into()))
+        .await
+        .unwrap();
+    assert!(matches!(
+        ws_recv(&mut ws).await,
+        ServerMessage::QueryStarted { .. }
+    ));
+
+    let cancel = ClientMessage::QueryCancel { query_id };
+    ws.send(WsMessage::Binary(ws_encode(&cancel).into()))
+        .await
+        .unwrap();
+    match ws_recv(&mut ws).await {
+        ServerMessage::QueryCancelled { .. } => {}
+        other => panic!("expected query_cancelled, got {other:?}"),
+    }
+}
+
+// timeout_ms 与 REST 同义（behavior.md §2.3）：WS 此前完全忽略该字段。
+#[tokio::test]
+async fn ws_query_timeout() {
+    let router = new_test_router();
+    let id = create_sqlite_conn(&router, "ws-timeout").await;
+    let url = spawn_ws_server(router).await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    ws_hello(&mut ws, &id).await;
+
+    let query_id = uuid::Uuid::new_v4();
+    let msg = ws_query_with(query_id, &id, MEDIUM_SQL, Some(300), None);
+    ws.send(WsMessage::Binary(ws_encode(&msg).into()))
+        .await
+        .unwrap();
+    assert!(matches!(
+        ws_recv(&mut ws).await,
+        ServerMessage::QueryStarted { .. }
+    ));
+    match ws_recv(&mut ws).await {
+        ServerMessage::QueryError { error, .. } => {
+            assert_eq!(error.code, "POLYDB_ERR_TIMEOUT", "got: {error:?}");
+            assert!(error.retryable);
+        }
+        other => panic!("expected query_error(TIMEOUT), got {other:?}"),
+    }
+}
+
+// WS 结果与 REST 同受 §5 限行：此前 WS 直接整包回发原始结果集。
+#[tokio::test]
+async fn ws_query_max_rows() {
+    let router = new_test_router();
+    let id = create_sqlite_conn(&router, "ws-maxrows").await;
+    let (status, value, _) = query(&router, &id, json!({"sql": "CREATE TABLE seq(v INTEGER)"})).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    let seed = (1..=25).map(|i| i.to_string()).collect::<Vec<_>>().join("),(");
+    let (status, value, _) = query(
+        &router,
+        &id,
+        json!({"sql": format!("INSERT INTO seq(v) VALUES({seed})")}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+
+    let url = spawn_ws_server(router).await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    ws_hello(&mut ws, &id).await;
+
+    let query_id = uuid::Uuid::new_v4();
+    let msg = ws_query_with(query_id, &id, "SELECT v FROM seq ORDER BY v", None, Some(10));
+    ws.send(WsMessage::Binary(ws_encode(&msg).into()))
+        .await
+        .unwrap();
+    assert!(matches!(
+        ws_recv(&mut ws).await,
+        ServerMessage::QueryStarted { .. }
+    ));
+    match ws_recv(&mut ws).await {
+        ServerMessage::QueryResult { result, .. } => {
+            assert_eq!(result.rows.len(), 10, "rows = {}", result.rows.len());
+            assert!(result.truncated);
+        }
+        other => panic!("expected query_result, got {other:?}"),
+    }
+}

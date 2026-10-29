@@ -582,6 +582,32 @@ async fn test_connection(State(app): State<AppState>, Path(id): Path<String>) ->
         error: None,
     };
     let start = Instant::now();
+    // 已连接的连接直接 ping 现有驱动：无条件 connect+disconnect 会砸掉在用的
+    // 驱动、丢弃其上活动事务并关闭 SSH 隧道（Go 侧 server.go 的 IsConnected
+    // 分支 2026-10-28 已修，双端行为对齐）。
+    let already_connected = app
+        .connection_status(id)
+        .map(|st| st.connected)
+        .unwrap_or(false);
+    if already_connected {
+        return match app.ping(id).await {
+            Ok(()) => msgpack_response(
+                StatusCode::OK,
+                ConnectionStatus {
+                    connected: true,
+                    latency_ms: Some(Instant::now().duration_since(start).as_micros() as f64 / 1000.0),
+                    ..status
+                },
+            ),
+            Err(e) => msgpack_response(
+                StatusCode::OK,
+                ConnectionStatus {
+                    error: Some(e.to_string()),
+                    ..status
+                },
+            ),
+        };
+    }
     if let Err(e) = app.connect(id) {
         return msgpack_response(
             StatusCode::OK,
@@ -870,7 +896,7 @@ async fn execute_query(
 // 默认行数上限（behavior.md §5）；max_rows 缺省或 0 视为使用默认，硬上限同为 10000。
 const DEFAULT_MAX_ROWS: u64 = 10000;
 
-fn query_row_limit(req: &QueryRequest) -> u64 {
+pub(crate) fn query_row_limit(req: &QueryRequest) -> u64 {
     match req.max_rows {
         Some(0) | None => DEFAULT_MAX_ROWS,
         Some(n) => n.min(DEFAULT_MAX_ROWS),
@@ -879,7 +905,7 @@ fn query_row_limit(req: &QueryRequest) -> u64 {
 
 // apply_max_rows 按 behavior.md §5 截断结果行：超过 limit 时截断并置
 // truncated=true、total_rows 记录原始行数（不额外 count）。
-fn apply_max_rows(mut result: QueryResult, limit: u64) -> QueryResult {
+pub(crate) fn apply_max_rows(mut result: QueryResult, limit: u64) -> QueryResult {
     if result.rows.len() as u64 <= limit {
         return result;
     }

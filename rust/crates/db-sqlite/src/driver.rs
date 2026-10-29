@@ -364,8 +364,22 @@ impl SqlDriver for SqliteConn {
     }
 
     async fn execute(&self, sql: &str, params: &[Value]) -> CoreResult<QueryResult> {
-        let conn = self.conn.lock();
-        Self::execute_on(&conn, sql, params)
+        // rusqlite is synchronous: running it on a runtime worker blocks that
+        // worker for the whole query. On a current-thread runtime — and with
+        // the GUI's four workers under a few slow queries — every other task
+        // (WS cancel/timeout timers, heartbeat) starves. Hand the work to the
+        // blocking pool: this future then yields, the timers fire, and the
+        // statement itself keeps running to completion on the blocking thread
+        // (best-effort cancel, the same semantics the Go drivers have).
+        let conn = Arc::clone(&self.conn);
+        let sql = sql.to_string();
+        let params = params.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let guard = conn.lock();
+            Self::execute_on(&guard, &sql, &params)
+        })
+        .await
+        .map_err(|e| CoreError::Internal(format!("sqlite task join: {e}")))?
     }
 
     async fn list_schemas(&self) -> CoreResult<Vec<SchemaInfo>> {
