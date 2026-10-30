@@ -5956,6 +5956,7 @@ dependencies = [
  "polydb-db-core",
  "polydb-protocol",
  "polydb-rt",
+ "serde_json",
  "thiserror 2.0.20",
  "tokio",
 ]
@@ -5970,6 +5971,7 @@ dependencies = [
  "polydb-core",
  "polydb-db-core",
  "polydb-protocol",
+ "serde_json",
  "sqlx",
  "thiserror 2.0.20",
  "tokio",
@@ -7875,6 +7877,7 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -7956,6 +7959,7 @@ dependencies = [
  "stringprep",
  "thiserror 2.0.20",
  "tracing",
+ "uuid",
  "whoami",
 ]
 
@@ -7996,6 +8000,7 @@ dependencies = [
  "stringprep",
  "thiserror 2.0.20",
  "tracing",
+ "uuid",
  "whoami",
 ]
 
@@ -8022,6 +8027,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tracing",
  "url",
+ "uuid",
 ]
 
 [[package]]

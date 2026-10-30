@@ -88,7 +88,12 @@ impl OracleConn {
                 // NULL 必须绑成 NULL：oracle crate 对 Option<T: ToSql + ToSqlNull>
                 // 的 None 绑定 NULL；此前兜底成 0i64 会把 NULL 过滤值静默变成 0。
                 Value::Null => Box::new(Option::<i64>::None) as Box<dyn ToSql>,
-                _ => Box::new(0i64) as Box<dyn ToSql>,
+                // Array/Object（含 blob_value 编码出的 $blob Object）：序列化为
+                // JSON 字符串绑定，与 Go 侧 ValueToDriver 的 json.Marshal 对齐。
+                // 此前兜底成 0i64 会把 JSON/blob 列的数据静默写成 0。
+                Value::Array(_) | Value::Object(_) => {
+                    Box::new(serde_json::to_string(val).unwrap_or_default()) as Box<dyn ToSql>
+                }
             })
             .collect()
     }

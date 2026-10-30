@@ -68,7 +68,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Database
 rusqlite = { version = "0.32", features = ["bundled", "functions"] }
-sqlx = { version = "0.8", features = ["runtime-tokio", "mysql", "postgres", "chrono", "bigdecimal"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "mysql", "postgres", "chrono", "bigdecimal", "uuid", "json"] }
 tiberius = { version = "0.12", default-features = false, features = ["tds73", "tokio", "chrono", "rustls", "rust_decimal"] }
 oracle = { version = "0.6" }
 redis = { version = "0.29", default-features = false, features = ["tokio-comp"] }

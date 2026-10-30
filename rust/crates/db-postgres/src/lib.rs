@@ -8,6 +8,8 @@ use async_trait::async_trait;
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
+use sqlx::types::uuid::Uuid;
+use sqlx::types::Json;
 use sqlx::{Column, Row, TypeInfo, ValueRef};
 
 use polydb_core::{
@@ -93,6 +95,16 @@ impl PostgresConn {
         }
         if let Ok(v) = row.try_get::<BigDecimal, _>(i) {
             return Value::String(v.to_string());
+        }
+        // uuid / json / jsonb: sqlx's try_get::<String> fails for these OIDs
+        // (they don't implement Decode for String), so without explicit
+        // branches they fall through to the <type> placeholder — the user
+        // sees "<uuid>" instead of the actual value.
+        if let Ok(v) = row.try_get::<Uuid, _>(i) {
+            return Value::String(v.to_string());
+        }
+        if let Ok(v) = row.try_get::<Json<serde_json::Value>, _>(i) {
+            return Value::String(v.0.to_string());
         }
         if let Ok(v) = row.try_get::<DateTime<Utc>, _>(i) {
             return Value::String(v.format("%Y-%m-%d %H:%M:%S").to_string());
