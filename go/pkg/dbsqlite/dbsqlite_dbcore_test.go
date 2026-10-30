@@ -84,3 +84,61 @@ func TestDBCoreBrowseTranslation(t *testing.T) {
 		t.Fatalf("unfiltered count = %d, want 5 (PageSize must not limit COUNT)", all)
 	}
 }
+
+// 委托内核后，DESC 索引列必须如实回读：此前手写目录只填 Name/Position
+// （Order 恒升序），内核用 pragma_index_xinfo + CREATE INDEX 解析覆盖 DESC
+// 与表达式。这是目录委托的直接收益之一。
+func TestDescIndexRoundTrips(t *testing.T) {
+	ctx := context.Background()
+	c, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	if _, err := c.Execute(ctx, "CREATE TABLE t(x INTEGER, y TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Execute(ctx, "CREATE INDEX idx_desc ON t(x DESC, y)"); err != nil {
+		t.Fatal(err)
+	}
+	idx, err := c.ListIndexes(ctx, "main", "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ix := range idx {
+		if ix.Name != "idx_desc" {
+			continue
+		}
+		if len(ix.Parts) < 2 {
+			t.Fatalf("index parts = %+v, want at least 2", ix.Parts)
+		}
+		if !ix.Parts[0].Desc {
+			t.Fatalf("first part must be DESC: %+v", ix.Parts)
+		}
+		if ix.Parts[1].Desc {
+			t.Fatalf("second part must be ASC: %+v", ix.Parts)
+		}
+		return
+	}
+	t.Fatalf("idx_desc missing from %+v", idx)
+}
+
+// 列目录经内核后携带 Table 身份（JOIN 同名列此前不可区分——dbcore P3-9）。
+func TestListColumnsCarriesTableIdentity(t *testing.T) {
+	ctx := context.Background()
+	c, err := Open(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	if _, err := c.Execute(ctx, "CREATE TABLE t(id INTEGER)"); err != nil {
+		t.Fatal(err)
+	}
+	cols, err := c.ListColumns(ctx, "main", "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cols) == 0 || cols[0].Table != "t" {
+		t.Fatalf("columns = %+v, want Table=t", cols)
+	}
+}

@@ -979,14 +979,15 @@ impl PolyDBApp {
         }
         self.workspace = Some(i);
         self.active = ActiveView::Workbench;
-        self.tabs.clear();
-        self.result = None;
-        self.preview = None;
-        self.ctx_menu = None;
-        self.explain = None;
-        self.compare = None;
-        self.editing = None;
-        self.multi_log.clear();
+        // 同一套清空口径（clear_shell_state 之外再补 Redis/大字段/心跳的
+        // 残留）：此前手抄的字段清单漏了它们——从连接 A（db5、模式 foo*）
+        // 切到 B，旧键名列表原样可见，点击即对 B 执行 get_value。
+        self.clear_shell_state();
+        self.redis_db = 0;
+        self.redis_pattern = "*".into();
+        self.blob_key = None;
+        self.blob_data = None;
+        self.hb = None;
         self.status = "Enter 执行 · Shift+Enter 换行 · 双击侧栏表开标签".into();
         self.load_schema(cx);
         self.beat(cx);
@@ -1672,14 +1673,25 @@ impl PolyDBApp {
         self.tables.clear();
         self.expanded.clear();
         self.cols_cache.clear();
+        // 连接表单收集的 DefaultSchema 在这里消费（此前只进 app-core 的 diff
+        // 路径，侧栏树完全无视它）。
+        let default_schema = self
+            .conns
+            .iter()
+            .find(|c| c.id == id)
+            .and_then(|c| c.default_schema.clone());
         self.io(
             cx,
             move |t| {
                 Box::pin(async move {
                     let schemas = t.list_schemas(id).await.unwrap_or_default();
-                    let schema = schemas
-                        .first()
-                        .map(|s| s.name.clone())
+                    // 连接配置的 default_schema 优先（且必须真实存在）：此前
+                    // 一律取第一个 schema，而 MySQL 的 list_schemas 按名排序
+                    // 让 information_schema 几乎恒排最前——MySQL 连接默认落
+                    // 在系统库上。配置缺失或拼错时才回落 first()。
+                    let schema = default_schema
+                        .filter(|d| schemas.iter().any(|s| &s.name == d))
+                        .or_else(|| schemas.first().map(|s| s.name.clone()))
                         .unwrap_or_else(|| "main".to_string());
                     let tables = t.list_tables(id, &schema).await;
                     (schemas, schema, tables)

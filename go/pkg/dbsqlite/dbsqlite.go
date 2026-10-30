@@ -10,6 +10,7 @@ import (
 	"time"
 
 	dbc "github.com/dbcore/dbcore"
+	dbcoresqlite "github.com/dbcore/dbcore/sqlite"
 	pdb "github.com/polydb/polydb/pkg/dbcore"
 	"github.com/polydb/polydb/pkg/dbcore/bridge"
 	"github.com/polydb/polydb/pkg/protocol"
@@ -19,6 +20,13 @@ type Conn struct {
 	db   *sql.DB
 	path string
 	mu   sync.Mutex
+	// kern is the kernel sqlite driver over the same handle. The dbc-facing
+	// catalog/browse methods delegate to it, so this package carries no
+	// catalog SQL of its own: the hand-rolled versions had drifted from the
+	// kernel — DESC index columns read back as ascending, columns without
+	// their Table identity, multi-key keyset cursors erroring where the
+	// kernel degrades safely. The other four engines delegated on 2026-10-25.
+	kern *dbcoresqlite.SQLiteDriver
 }
 
 func Open(ctx context.Context, path string) (*Conn, error) {
@@ -38,7 +46,7 @@ func Open(ctx context.Context, path string) (*Conn, error) {
 		db.Close()
 		return nil, fmt.Errorf("enable foreign keys: %w", err)
 	}
-	return &Conn{db: db, path: path}, nil
+	return &Conn{db: db, path: path, kern: dbcoresqlite.NewFromDB(db)}, nil
 }
 
 // ─── dbcore-native implementation (shared github.com/dbcore/dbcore contract) ───
@@ -93,175 +101,32 @@ func (c *Conn) ListSchemas(ctx context.Context) ([]dbc.SchemaInfo, error) {
 }
 
 func (c *Conn) ListTables(ctx context.Context, schema string) ([]dbc.TableInfo, error) {
-	infos, err := c.listTablesP(ctx, schema)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]dbc.TableInfo, len(infos))
-	for i, t := range infos {
-		typ := "table"
-		if t.Type == protocol.TableTypeView {
-			typ = "view"
-		}
-		out[i] = dbc.TableInfo{Schema: t.Schema, Name: t.Name, Type: typ}
-	}
-	return out, nil
+	return c.kern.ListTables(ctx, schema)
 }
 
 func (c *Conn) ListColumns(ctx context.Context, schema, table string) ([]dbc.ColumnInfo, error) {
-	infos, err := c.listColumnsP(ctx, schema, table)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]dbc.ColumnInfo, len(infos))
-	for i, col := range infos {
-		var def *string
-		if col.DefaultValue != nil {
-			s := *col.DefaultValue
-			def = &s
-		}
-		// Table is part of the kernel's column identity (P3-9): a JOIN
-		// projecting two `id`s stays distinguishable end to end.
-		out[i] = dbc.ColumnInfo{Name: col.Name, Table: table, Type: col.DataType, Nullable: col.Nullable, Default: def}
-	}
-	return out, nil
+	return c.kern.ListColumns(ctx, schema, table)
 }
 
 func (c *Conn) ListIndexes(ctx context.Context, schema, table string) ([]dbc.IndexInfo, error) {
-	infos, err := c.listIndexesP(ctx, schema, table)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]dbc.IndexInfo, len(infos))
-	for i, idx := range infos {
-		cols := make([]string, len(idx.Columns))
-		parts := make([]dbc.IndexPart, len(idx.Columns))
-		for j, col := range idx.Columns {
-			cols[j] = col.Name
-			parts[j] = dbc.IndexPart{Column: col.Name, Desc: col.Order == protocol.SortOrderDesc}
-		}
-		// Kind follows the kernel's consumer contract ("unique"/"index"/
-		// "primary"): consumers switch on it, so an empty kind is not an
-		// option. SQLite has only B-tree indexes, and the kernel documents
-		// that engines without a method concept report "btree".
-		kind := dbc.IndexKindIndex
-		if idx.Primary {
-			kind = dbc.IndexKindPrimary
-		} else if idx.Unique {
-			kind = dbc.IndexKindUnique
-		}
-		out[i] = dbc.IndexInfo{Name: idx.Name, Kind: kind, Unique: idx.Unique, Primary: idx.Primary, Method: "btree", Columns: cols, Parts: parts}
-	}
-	return out, nil
+	return c.kern.ListIndexes(ctx, schema, table)
 }
 
 func (c *Conn) ListForeignKeys(ctx context.Context, schema, table string) ([]dbc.ForeignKeyInfo, error) {
-	infos, err := c.listForeignKeysP(ctx, schema, table)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]dbc.ForeignKeyInfo, len(infos))
-	for i, fk := range infos {
-		out[i] = dbc.ForeignKeyInfo{
-			Name: fmt.Sprintf("fk_%s_%d", table, i+1),
-			// SQLite keeps no constraint names; the kernel contract only
-			// requires a non-empty, stable one (the kernel's own driver
-			// synthesizes fk_<id>). Synthesized here — in the dbcore view,
-			// not on the protocol wire — so polydb's content-pairing diff
-			// and the Rust line are untouched.
-			Columns:    fk.Columns,
-			RefSchema:  fk.ReferencedSchema,
-			RefTable:   fk.ReferencedTable,
-			RefColumns: fk.ReferencedColumns,
-			// polydb's enum spells actions lowercase ("cascade"); the kernel's
-			// contract (and every other adapter) compares the standard
-			// uppercase spellings via NormalizeFKAction.
-			OnDelete: dbc.NormalizeFKAction(string(fk.OnDelete)),
-			OnUpdate: dbc.NormalizeFKAction(string(fk.OnUpdate)),
-		}
-	}
-	return out, nil
+	return c.kern.ListForeignKeys(ctx, schema, table)
 }
 
 func (c *Conn) CreateTableSQL(ctx context.Context, schema, table string) (string, error) {
-	return c.createTableSQLP(ctx, schema, table)
+	return c.kern.CreateTableSQL(ctx, schema, table)
 }
 
-// BrowseRows translates dbcore's Page/PageSize/Sort/Filter request into polydb's
-// Offset/Limit/OrderBy/Conditions form and delegates to the existing implementation.
 func (c *Conn) BrowseRows(ctx context.Context, schema, table string, req *dbc.TableRowsRequest) (*dbc.TableRowsResult, error) {
-	preq := &protocol.TableRowsRequest{
-		Limit: uint32(req.PageSize),
-	}
-	for _, s := range req.Sort {
-		dir := protocol.SortAsc
-		if s.Desc {
-			dir = protocol.SortDesc
-		}
-		preq.OrderBy = append(preq.OrderBy, protocol.OrderClause{Column: s.Column, Dir: dir})
-	}
-	for _, f := range req.Filter {
-		preq.Conditions = append(preq.Conditions, protocol.FilterCondition{
-			Column: f.Column,
-			Op:     mapFilterOp(f.Op),
-			Value:  bridge.ValueFromDB(f.Value),
-		})
-	}
-	if len(req.After) > 0 {
-		// Keyset seek: resume strictly after the cursor row in the sort order.
-		// The seek condition is appended AFTER the filters so its argument
-		// position follows them (the kernel contract pins this — reusing a
-		// filter's placeholder made PostgreSQL reject whole pages). polydb's
-		// browse has no row-value comparison, so a composite cursor has no
-		// faithful rendering here: say so instead of silently mis-seeking.
-		if len(req.After) != 1 || len(req.Sort) != 1 {
-			return nil, fmt.Errorf("dbsqlite: keyset seek needs exactly one sort key and one cursor value (got %d sort / %d cursor)", len(req.Sort), len(req.After))
-		}
-		op := protocol.FilterOpGt
-		if req.Sort[0].Desc {
-			op = protocol.FilterOpLt
-		}
-		preq.Conditions = append(preq.Conditions, protocol.FilterCondition{
-			Column: req.Sort[0].Column,
-			Op:     op,
-			Value:  bridge.ValueFromDB(req.After[0]),
-		})
-	} else {
-		preq.Offset = uint64(pageOffset(req.Page, req.PageSize))
-	}
-	res, err := c.browseRowsP(ctx, schema, table, preq)
-	if err != nil {
-		return nil, err
-	}
-	// polydb's RowsResultToBrowsePage leaves TotalEstimate nil; backfill it via a
-	// companion COUNT(*) that respects the same filters but no pagination.
-	countReq := &protocol.TableRowsRequest{Conditions: preq.Conditions}
-	total, cerr := c.browseRowsCountP(ctx, schema, table, countReq)
-	if cerr != nil {
-		total = 0
-	}
-	out := browseResultToDBCore(res, total)
-	// Total says the filtered set's size only when the count actually read:
-	// a failed count must be distinguishable from an empty table (P3-9).
-	out.TotalFound = cerr == nil
-	return out, nil
+	return c.kern.BrowseRows(ctx, schema, table, req)
 }
 
 func (c *Conn) BrowseRowsCount(ctx context.Context, schema, table string, req *dbc.TableRowsRequest) (uint64, error) {
-	// A count is the size of the filtered set; pagination must NOT be applied as a
-	// LIMIT, or the result under-counts. Only filters carry over.
-	preq := &protocol.TableRowsRequest{}
-	for _, f := range req.Filter {
-		preq.Conditions = append(preq.Conditions, protocol.FilterCondition{
-			Column: f.Column,
-			Op:     mapFilterOp(f.Op),
-			Value:  bridge.ValueFromDB(f.Value),
-		})
-	}
-	return c.browseRowsCountP(ctx, schema, table, preq)
+	return c.kern.BrowseRowsCount(ctx, schema, table, req)
 }
-
-// ─── protocol-native helpers (legacy polydb API; consumed via ProtocolDriver) ───
 
 func (c *Conn) execP(ctx context.Context, sql string, args ...protocol.Value) (*protocol.QueryResult, error) {
 	c.mu.Lock()

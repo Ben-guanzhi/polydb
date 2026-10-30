@@ -232,6 +232,9 @@ pub struct AppCore {
     blobs: Arc<BlobStore>,
     kr: Arc<dyn Keyring>,
     connections: RwLock<HashMap<ConnectionId, Connection>>,
+    // 用户主动断开的连接：心跳 ping 不得把它悄悄拉回来（否则状态栏显示
+    // "已断开"、后台却每 30s 对同一台死主机重建连接）。显式 connect 清除。
+    user_disconnected: RwLock<std::collections::HashSet<ConnectionId>>,
     tunnels: RwLock<HashMap<ConnectionId, Arc<Tunnel>>>,
     txs: Arc<Mutex<HashMap<String, TxEntry>>>,
     // 已打开连接的只读标志快照（behavior.md §12.3）；disconnect 时移除。
@@ -267,6 +270,7 @@ impl AppCore {
             blobs,
             kr,
             connections: RwLock::new(HashMap::new()),
+            user_disconnected: RwLock::new(std::collections::HashSet::new()),
             tunnels: RwLock::new(HashMap::new()),
             txs: Arc::new(Mutex::new(HashMap::new())),
             read_only: RwLock::new(std::collections::HashSet::new()),
@@ -346,6 +350,8 @@ impl AppCore {
     }
 
     pub fn connect(&self, id: ConnectionId) -> CoreResult<()> {
+        // 显式 connect 清除"用户断开"意图（心跳恢复工作）。
+        self.user_disconnected.write().remove(&id);
         let info = self
             .storage
             .connections()
@@ -502,6 +508,7 @@ impl AppCore {
         }
         self.connections.write().remove(&id);
         self.read_only.write().remove(&id);
+        self.user_disconnected.write().insert(id);
         if let Some(t) = self.tunnels.write().remove(&id) {
             t.close();
         }
@@ -525,6 +532,12 @@ impl AppCore {
     }
 
     pub async fn ping(&self, id: ConnectionId) -> CoreResult<()> {
+        // 心跳是断开连接事实上的重连器：ping 不得复活用户主动断开的连接
+        // （对不可达主机每 30s 重建一次 SSH 隧道+连接）。显式 connect 恢复；
+        // execute 的懒连接语义保持不变（首次查询仍可免显式 connect）。
+        if self.user_disconnected.read().contains(&id) {
+            return Err(CoreError::Connection("connection is disconnected".into()));
+        }
         self.ensure_connected(&id)?;
         let conn = self.get_conn(id)?;
         conn.driver().ping().await

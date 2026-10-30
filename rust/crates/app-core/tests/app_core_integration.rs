@@ -278,3 +278,30 @@ fn concurrent_lazy_connect_via_execute() {
 
     app.disconnect(id);
 }
+
+// 用户主动断开后，心跳 ping 不得把连接悄悄拉回来（对不可达主机每 30s 重建
+// 一次 SSH 隧道+连接，状态栏却显示"已断开"）；显式 connect 恢复。execute 的
+// 懒连接语义保持不变（首次查询仍可免显式 connect）。
+#[test]
+fn ping_respects_user_disconnect() {
+    let rt = polydb_rt::runtime();
+    rt.block_on(async {
+        let app = setup();
+        let info = app.create_connection(&sqlite_req("hb")).unwrap();
+        let id = info.id;
+
+        app.connect(id).unwrap();
+        app.ping(id).await.unwrap();
+
+        app.disconnect(id);
+        let err = app.ping(id).await.unwrap_err();
+        assert!(
+            err.to_string().contains("disconnected"),
+            "ping after disconnect = {err}"
+        );
+
+        // 显式 connect 恢复心跳。
+        app.connect(id).unwrap();
+        app.ping(id).await.unwrap();
+    });
+}
