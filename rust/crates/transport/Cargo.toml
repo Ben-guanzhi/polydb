@@ -9,6 +9,7 @@ polydb-core = { workspace = true }
 polydb-protocol = { workspace = true }
 polydb-app-core = { workspace = true }
 async-trait = { workspace = true }
+tokio = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

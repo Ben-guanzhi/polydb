@@ -261,3 +261,33 @@ fn schema_diff_and_ddl_delegate() {
         assert!(!script.rollback.is_empty(), "回滚脚本随正向一起给出");
     });
 }
+
+// 取消通道：慢查询在跑时 cancel_latest 停掉它。sqlite 的语句走 spawn_blocking
+// （best-effort——语句本身继续在阻塞线程跑完，但执行立即以 POLYDB_ERR_CANCELLED
+// 返回、注册表清空、后续 cancel_latest 如实报空），与 Go 侧 CancelRunning 语义一致。
+#[test]
+fn cancel_latest_stops_running_statement() {
+    let app = setup();
+    let t = Arc::new(LocalTransport::new(Arc::clone(&app)));
+    let info = t.create_connection(&sqlite_req("cancel")).unwrap();
+    let id: ConnectionId = info.id;
+
+    polydb_rt::block_on(async {
+        t.execute(id, "CREATE TABLE t(x INTEGER)", &[]).await.unwrap();
+
+        // 足够久（注册与取消的窗口）、足够短（runtime 收尾等阻塞线程的时长）。
+        const MEDIUM_CTE: &str = "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x < 5000000) SELECT count(*) FROM n";
+        let t2 = Arc::clone(&t);
+        let task = tokio::spawn(async move { t2.execute(id, MEDIUM_CTE, &[]).await });
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(t.cancel_latest().await, "cancel_latest must find the statement in flight");
+        assert!(!t.cancel_latest().await, "the registry must be empty after a cancel");
+
+        let err = task.await.unwrap().unwrap_err();
+        assert!(err.to_string().contains("CANCELLED"), "unexpected: {err}");
+
+        // 没有在跑的语句时如实报空。
+        assert!(!t.cancel_latest().await);
+    });
+}

@@ -88,7 +88,7 @@ impl PolyDBApp {
                 th,
             )
         });
-        let cancel_btn = (self.busy && !self.multi_log.is_empty()).then(|| {
+        let cancel_btn = self.busy.then(|| {
             div()
                 .id("btn-cancel")
                 .px(px(8.0))

@@ -6097,6 +6097,7 @@ dependencies = [
  "polydb-rt",
  "polydb-storage",
  "thiserror 2.0.20",
+ "tokio",
  "uuid",
 ]
 

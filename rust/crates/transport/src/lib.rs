@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tokio::sync::{Mutex, Notify};
 use polydb_app_core::AppCore;
 use polydb_core::{
     BeginTransactionRequest, ColumnInfo, ConnectionId, ConnectionInfo, ConnectionStatus,
+    CoreError,
     CoreResult, CreateConnectionRequest, DdlScript, ForeignKeyInfo, IndexInfo, QueryResult,
     RedisKeyType, RedisReply, RedisScanPage, RedisValue, SchemaDdlRequest, SchemaDiffPlan,
     SchemaDiffRequest, SchemaInfo, TableInfo, TableRowsRequest, TableRowsResult, TransactionInfo,
@@ -31,6 +33,14 @@ pub trait Transport: Send + Sync {
         sql: &str,
         params: &[Value],
     ) -> CoreResult<QueryResult>;
+
+    /// Cancel the statement currently in flight (the most recent execute).
+    /// False means nothing was running. sqlite/oracle best-effort: their
+    /// statements run on a blocking thread and continue to completion after
+    /// the cancel - what this guarantees is the UI unblocking and the
+    /// protocol semantic (POLYDB_ERR_CANCELLED), the same contract the
+    /// server-side WS/HTTP cancel has.
+    async fn cancel_latest(&self) -> bool;
     async fn list_schemas(&self, id: ConnectionId) -> CoreResult<Vec<SchemaInfo>>;
     async fn list_tables(&self, id: ConnectionId, schema: &str) -> CoreResult<Vec<TableInfo>>;
     async fn list_columns(
@@ -113,11 +123,19 @@ pub trait Transport: Send + Sync {
 
 pub struct LocalTransport {
     app: Arc<AppCore>,
+    // The cancel handle of the statement in flight. The GUI serializes
+    // statements (one join.await before the next starts), so "the most recent
+    // registration" is "the one running" - same semantics as the Go side's
+    // CancelRunning.
+    cancel_handle: Arc<Mutex<Option<Arc<Notify>>>>,
 }
 
 impl LocalTransport {
     pub fn new(app: Arc<AppCore>) -> Self {
-        Self { app }
+        Self {
+            app,
+            cancel_handle: Arc::new(Mutex::new(None)),
+        }
     }
 }
 
@@ -169,18 +187,46 @@ impl Transport for LocalTransport {
         sql: &str,
         params: &[Value],
     ) -> CoreResult<QueryResult> {
-        let mut result = self.app.execute(id, sql, params).await?;
+        let notify = Arc::new(Notify::new());
+        *self.cancel_handle.lock().await = Some(Arc::clone(&notify));
+        let outcome = tokio::select! {
+            r = self.app.execute(id, sql, params) => Some(r),
+            _ = notify.notified() => None,
+        };
+        *self.cancel_handle.lock().await = None;
+
+        match outcome {
+            Some(Ok(mut result)) => {
         // 本地（GUI）路径与 HTTP/WS 同受 §5 限行：驱动 fetch_all 全量物化，
         // MAX_RESULT_ROWS 只是渲染截断——一条无 LIMIT 的 SELECT 在此处就该
         // 被截住，而不是等 UI 拿着千万行去渲染。
-        const LOCAL_MAX_ROWS: u64 = 10000;
-        if result.rows.len() as u64 > LOCAL_MAX_ROWS {
-            let total = result.rows.len() as u64;
-            result.rows.truncate(LOCAL_MAX_ROWS as usize);
-            result.truncated = true;
-            result.total_rows = Some(total);
+            const LOCAL_MAX_ROWS: u64 = 10000;
+            if result.rows.len() as u64 > LOCAL_MAX_ROWS {
+                let total = result.rows.len() as u64;
+                result.rows.truncate(LOCAL_MAX_ROWS as usize);
+                result.truncated = true;
+                result.total_rows = Some(total);
+            }
+            Ok(result)
         }
-        Ok(result)
+        Some(Err(e)) => Err(e),
+        None => Err(CoreError::Protocol(Box::new(
+            polydb_protocol::PolyDBError::new(
+                polydb_protocol::error::codes::CANCELLED,
+                "query cancelled",
+            ),
+        ))),
+    }
+    }
+
+    async fn cancel_latest(&self) -> bool {
+        let take = self.cancel_handle.lock().await.take();
+        if let Some(notify) = take {
+            notify.notify_one();
+            true
+        } else {
+            false
+        }
     }
 
     async fn list_schemas(&self, id: ConnectionId) -> CoreResult<Vec<SchemaInfo>> {

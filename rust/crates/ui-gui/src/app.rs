@@ -745,6 +745,9 @@ pub struct PolyDBApp {
 
     // ── 心跳 ──
     pub(crate) hb: Option<HbState>,
+    // 心跳退避：连续 ping 失败的次数。达 3 次后停 ping——对不可达主机每 30s
+    // 重建一次 SSH 隧道+连接毫无收益，切换连接/重连时清零。
+    pub(crate) hb_failures: u32,
 }
 
 impl PolyDBApp {
@@ -814,6 +817,7 @@ impl PolyDBApp {
             cols_cache: HashMap::new(),
             cols_loading: HashSet::new(),
             hb: None,
+            hb_failures: 0,
         };
         this.refresh(cx);
         this.start_heartbeat(cx);
@@ -972,6 +976,9 @@ impl PolyDBApp {
 
     /// 点选侧栏连接：切活动连接并重置壳层态；重复点击当前连接=重拉 schema 树。
     pub(crate) fn enter_workspace(&mut self, i: usize, cx: &mut Context<Self>) {
+        // 用户切换连接/重连：退避计数清零（无论目标是不是同一个连接——
+        // 重点击当前连接也是重试意图）。
+        self.hb_failures = 0;
         if self.workspace == Some(i) {
             self.load_schema(cx);
             self.beat(cx);
@@ -1634,6 +1641,10 @@ impl PolyDBApp {
         let Some(id) = self.sel_id().filter(|_| self.workspace.is_some()) else {
             return;
         };
+        // 退避：连续 3 次失败后停 ping（不再每 30s 重建死主机的 SSH 隧道）。
+        if self.hb_failures >= 3 {
+            return;
+        }
         self.io(
             cx,
             move |t| {
@@ -1647,6 +1658,7 @@ impl PolyDBApp {
             |this, out, cx| {
                 let (ok, err, ms) = out;
                 this.hb = Some(HbState { ok, ms, err });
+                this.hb_failures = if ok { 0 } else { this.hb_failures + 1 };
                 cx.notify();
             },
         );
@@ -2923,6 +2935,24 @@ impl PolyDBApp {
     pub(crate) fn request_cancel(&mut self, cx: &mut Context<Self>) {
         self.cancel.store(true, Ordering::Relaxed);
         self.status = "取消中：当前语句将执行完，剩余跳过".into();
+        // 真正停掉在跑的那条语句：此前只翻标志，单条长查询期间工作台永久
+        // busy。cancel_latest 停掉最近一条 execute 的 ctx——与 Go 侧
+        // CancelRunning 语义一致（sqlite/oracle best-effort，语句在阻塞线程
+        // 跑完，但 GUI 立即解 busy）。
+        let t = Arc::clone(&self.transport);
+        cx.spawn(async move |this, cx| {
+            let canceled = t.cancel_latest().await;
+            let _ = this.update(cx, |this, cx| {
+                this.status = if canceled {
+                    "已取消当前查询"
+                } else {
+                    "没有在跑的查询"
+                }
+                .into();
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
