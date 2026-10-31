@@ -291,3 +291,33 @@ fn cancel_latest_stops_running_statement() {
         assert!(!t.cancel_latest().await);
     });
 }
+
+// 同步取消入口（GUI 用）：语义与异步 cancel_latest 一致——在飞语句被停、
+// 注册表清空、无语句时报空。GUI 在按下取消按钮的瞬间同步 take 句柄：此前
+// spawn 异步取消，用户立刻跑新查询时，新 execute 注册的新句柄会被陈旧取消
+// 命中——取消打到错误的语句上（wave-27 修复）。
+#[test]
+fn cancel_latest_now_pins_the_target() {
+    let app = setup();
+    let t = Arc::new(LocalTransport::new(Arc::clone(&app)));
+    let info = t.create_connection(&sqlite_req("cancel_now")).unwrap();
+    let id: ConnectionId = info.id;
+
+    polydb_rt::block_on(async {
+        t.execute(id, "CREATE TABLE t2(x INTEGER)", &[]).await.unwrap();
+
+        const MEDIUM_CTE: &str = "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x < 5000000) SELECT count(*) FROM n";
+        let t2 = Arc::clone(&t);
+        let task = tokio::spawn(async move { t2.execute(id, MEDIUM_CTE, &[]).await });
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(t.cancel_latest_now(), "cancel_latest_now must find the statement in flight");
+        assert!(!t.cancel_latest_now(), "the registry must be empty after a cancel");
+
+        let err = task.await.unwrap().unwrap_err();
+        assert!(err.to_string().contains("CANCELLED"), "unexpected: {err}");
+
+        // 空注册表如实报空（GUI 无语句可取消时的状态文案依赖它）。
+        assert!(!t.cancel_latest_now());
+    });
+}

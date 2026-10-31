@@ -1,7 +1,7 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::Notify;
 use polydb_app_core::AppCore;
 use polydb_core::{
     BeginTransactionRequest, ColumnInfo, ConnectionId, ConnectionInfo, ConnectionStatus,
@@ -41,6 +41,15 @@ pub trait Transport: Send + Sync {
     /// protocol semantic (POLYDB_ERR_CANCELLED), the same contract the
     /// server-side WS/HTTP cancel has.
     async fn cancel_latest(&self) -> bool;
+
+    /// Synchronous variant for UI threads: takes the in-flight handle and
+    /// wakes it right now, pinning the target at call time. A spawned async
+    /// cancel could be outrun by a newer execute registering a fresh handle
+    /// and get hit by a stale cancel instead. Local only; remote transports
+    /// keep the async path.
+    fn cancel_latest_now(&self) -> bool {
+        false
+    }
     async fn list_schemas(&self, id: ConnectionId) -> CoreResult<Vec<SchemaInfo>>;
     async fn list_tables(&self, id: ConnectionId, schema: &str) -> CoreResult<Vec<TableInfo>>;
     async fn list_columns(
@@ -137,6 +146,19 @@ impl LocalTransport {
             cancel_handle: Arc::new(Mutex::new(None)),
         }
     }
+
+    // fire_cancel takes the in-flight handle and wakes it. Sync on purpose:
+    // the handle swap is a quick critical section with no await inside, and
+    // the GUI needs to pin the cancel target at button-press time.
+    fn fire_cancel(&self) -> bool {
+        let take = self.cancel_handle.lock().unwrap().take();
+        if let Some(notify) = take {
+            notify.notify_one();
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[async_trait]
@@ -188,12 +210,12 @@ impl Transport for LocalTransport {
         params: &[Value],
     ) -> CoreResult<QueryResult> {
         let notify = Arc::new(Notify::new());
-        *self.cancel_handle.lock().await = Some(Arc::clone(&notify));
+        *self.cancel_handle.lock().unwrap() = Some(Arc::clone(&notify));
         let outcome = tokio::select! {
             r = self.app.execute(id, sql, params) => Some(r),
             _ = notify.notified() => None,
         };
-        *self.cancel_handle.lock().await = None;
+        *self.cancel_handle.lock().unwrap() = None;
 
         match outcome {
             Some(Ok(mut result)) => {
@@ -220,13 +242,11 @@ impl Transport for LocalTransport {
     }
 
     async fn cancel_latest(&self) -> bool {
-        let take = self.cancel_handle.lock().await.take();
-        if let Some(notify) = take {
-            notify.notify_one();
-            true
-        } else {
-            false
-        }
+        self.fire_cancel()
+    }
+
+    fn cancel_latest_now(&self) -> bool {
+        self.fire_cancel()
     }
 
     async fn list_schemas(&self, id: ConnectionId) -> CoreResult<Vec<SchemaInfo>> {

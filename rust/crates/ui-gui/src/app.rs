@@ -745,9 +745,13 @@ pub struct PolyDBApp {
 
     // ── 心跳 ──
     pub(crate) hb: Option<HbState>,
-    // 心跳退避：连续 ping 失败的次数。达 3 次后停 ping——对不可达主机每 30s
-    // 重建一次 SSH 隧道+连接毫无收益，切换连接/重连时清零。
+    // 心跳退避：连续 ping 失败的次数。达 3 次后不再每 30s ping——对不可达
+    // 主机反复重建 SSH 隧道+连接毫无收益；但不是永久停摆，而是每 10 拍
+    // （约 5 分钟）重试一次，主机恢复后 keepalive 自愈。清零时机：ping
+    // 成功、切换/重连/连接（enter_workspace / connect）。
     pub(crate) hb_failures: u32,
+    // 退避期间已跳过的拍数：达 10 时放行一次 ping。
+    pub(crate) hb_backoff: u32,
 }
 
 impl PolyDBApp {
@@ -818,6 +822,7 @@ impl PolyDBApp {
             cols_loading: HashSet::new(),
             hb: None,
             hb_failures: 0,
+            hb_backoff: 0,
         };
         this.refresh(cx);
         this.start_heartbeat(cx);
@@ -1012,7 +1017,13 @@ impl PolyDBApp {
             move |t| Box::pin(async move { t.connect(id) }),
             |this, out, cx| {
                 this.status = match out {
-                    Ok(()) => "已连接（驱动实例已打开）".into(),
+                    Ok(()) => {
+                        // 新连接从头计心跳：退避状态是按连接算的，跨连接
+                        // 带过来会让刚换上的好连接静默不 ping。
+                        this.hb_failures = 0;
+                        this.hb_backoff = 0;
+                        "已连接（驱动实例已打开）".into()
+                    }
                     Err(e) => format!("连接失败: {e}"),
                 };
                 cx.notify();
@@ -1641,9 +1652,14 @@ impl PolyDBApp {
         let Some(id) = self.sel_id().filter(|_| self.workspace.is_some()) else {
             return;
         };
-        // 退避：连续 3 次失败后停 ping（不再每 30s 重建死主机的 SSH 隧道）。
+        // 退避：连续 3 次失败后不再每 30s ping（死主机的 SSH 隧道重建毫无
+        // 收益），但每 10 拍放行一次——主机恢复后 keepalive 自愈，而不是
+        // 永久静默（NAT/防火墙会掐断无人照看的连接且客户端毫无感知）。
         if self.hb_failures >= 3 {
-            return;
+            self.hb_backoff += 1;
+            if !self.hb_backoff.is_multiple_of(10) {
+                return;
+            }
         }
         self.io(
             cx,
@@ -1658,7 +1674,12 @@ impl PolyDBApp {
             |this, out, cx| {
                 let (ok, err, ms) = out;
                 this.hb = Some(HbState { ok, ms, err });
-                this.hb_failures = if ok { 0 } else { this.hb_failures + 1 };
+                if ok {
+                    this.hb_failures = 0;
+                    this.hb_backoff = 0;
+                } else {
+                    this.hb_failures += 1;
+                }
                 cx.notify();
             },
         );
@@ -2934,25 +2955,20 @@ impl PolyDBApp {
 
     pub(crate) fn request_cancel(&mut self, cx: &mut Context<Self>) {
         self.cancel.store(true, Ordering::Relaxed);
-        self.status = "取消中：当前语句将执行完，剩余跳过".into();
         // 真正停掉在跑的那条语句：此前只翻标志，单条长查询期间工作台永久
-        // busy。cancel_latest 停掉最近一条 execute 的 ctx——与 Go 侧
-        // CancelRunning 语义一致（sqlite/oracle best-effort，语句在阻塞线程
-        // 跑完，但 GUI 立即解 busy）。
-        let t = Arc::clone(&self.transport);
-        cx.spawn(async move |this, cx| {
-            let canceled = t.cancel_latest().await;
-            let _ = this.update(cx, |this, cx| {
-                this.status = if canceled {
-                    "已取消当前查询"
-                } else {
-                    "没有在跑的查询"
-                }
-                .into();
-                cx.notify();
-            });
-        })
-        .detach();
+        // busy。与 Go 侧 CancelRunning 语义一致（sqlite/oracle best-effort，
+        // 语句在阻塞线程跑完，但 GUI 立即解 busy）。
+        //
+        // 取消目标在按下瞬间同步钉死：此前 spawn 异步 cancel_latest，用户
+        // 立刻跑新查询时，新 execute 注册的新句柄会被陈旧取消命中——取消
+        // 打到错误的语句上。同步 take 之后 spawn 里的时序竞争不存在了。
+        let canceled = self.transport.cancel_latest_now();
+        self.status = if canceled {
+            "已取消当前查询"
+        } else {
+            "没有在跑的查询"
+        }
+        .into();
         cx.notify();
     }
 
