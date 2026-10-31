@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"sync"
 
 	"github.com/polydb/polydb/pkg/appcore"
 	"github.com/polydb/polydb/pkg/protocol"
@@ -10,11 +11,19 @@ import (
 // Local 是进程内传输：直接委托 app-core，零序列化（AGENTS.md §5 编码约定）。
 type Local struct {
 	app *appcore.AppCore
+
+	// 在飞查询注册表：queryID → 取消函数。ExecuteQuery 为每条语句派生可
+	// 取消 ctx 并登记，CancelQuery 按 queryID 精确命中并取消——进程内取消
+	// 自此真实生效（此前恒返回未命中，TUI 的 F8 在 local 模式是死按钮）。
+	// 精确按 ID 命中同时免疫"陈旧取消打中新语句"：查询完成后条目即删，
+	// 陈旧 ID 查不到，如实报未命中。
+	mu       sync.Mutex
+	inflight map[string]context.CancelFunc
 }
 
 // NewLocal 构造进程内客户端（TUI 默认模式、GUI 未来模式）。
 func NewLocal(app *appcore.AppCore) *Local {
-	return &Local{app: app}
+	return &Local{app: app, inflight: make(map[string]context.CancelFunc)}
 }
 
 func (l *Local) ListConnections() ([]protocol.ConnectionInfo, error) {
@@ -82,13 +91,33 @@ func (l *Local) Execute(ctx context.Context, id, sql string, args ...protocol.Va
 }
 
 // ExecuteQuery 进程内没有服务端 in-flight registry，queryID 无意义（取消靠 ctx）。
-func (l *Local) ExecuteQuery(ctx context.Context, _, id, sql string, args ...protocol.Value) (*protocol.QueryResult, error) {
-	return l.app.Execute(ctx, id, sql, args...)
+func (l *Local) ExecuteQuery(ctx context.Context, queryID, id, sql string, args ...protocol.Value) (*protocol.QueryResult, error) {
+	// 派生可取消 ctx 并登记：ctx 中途被父级取消照常生效，CancelQuery 则按
+	// queryID 取消这一条。完成后（含取消）注销条目，陈旧 ID 自然未命中。
+	runCtx, cancel := context.WithCancel(ctx)
+	l.mu.Lock()
+	l.inflight[queryID] = cancel
+	l.mu.Unlock()
+	defer func() {
+		l.mu.Lock()
+		delete(l.inflight, queryID)
+		l.mu.Unlock()
+	}()
+	return l.app.Execute(runCtx, id, sql, args...)
 }
 
-// CancelQuery 进程内取消由调用方 cancel 自己的 ctx 完成，此处恒返回未命中。
+// CancelQuery 按 queryID 精确取消在飞的进程内查询：命中即取消其 ctx，
+// 内核驱动（经 app-core 透传）据此中止语句。查询已完成的陈旧 ID 不命中，
+// 如实返回 false。
 func (l *Local) CancelQuery(ctx context.Context, queryID string) (bool, error) {
-	return false, nil
+	l.mu.Lock()
+	cancel, ok := l.inflight[queryID]
+	l.mu.Unlock()
+	if !ok {
+		return false, nil
+	}
+	cancel()
+	return true, nil
 }
 
 // BrowseRows 进程内委托 app-core（零序列化）。

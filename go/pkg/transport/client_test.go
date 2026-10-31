@@ -397,8 +397,8 @@ func TestRemoteQueryCancel(t *testing.T) {
 	}
 }
 
-// TestLocalCancelIsCtxOnly：Local 没有服务端 registry，CancelQuery 恒 (false,nil)，
-// 取消完全靠 ctx。
+// TestLocalCancelNoop：未注册的 queryID 不命中（false,nil）；父级 ctx 已取消
+// 时执行立即失败（Local 的在飞注册表派生可取消 ctx，父级取消照常传播）。
 func TestLocalCancelNoop(t *testing.T) {
 	fx := newFixture(t)
 	c := NewLocal(fx.app)
@@ -424,6 +424,49 @@ func TestLocalCancelNoop(t *testing.T) {
 	}
 	if _, err := c.ExecuteQuery(ctx, "x", info.ID, "SELECT 1"); err == nil {
 		t.Fatal("已取消 ctx 下执行未报错（已建连路径）")
+	}
+}
+
+// TestLocalQueryCancel：Local 的在飞注册表——F8（按 queryID 取消）对进程内
+// 查询真实生效。慢 CTE 中途取消，ExecuteQuery 以错误返回；完成后条目注销，
+// 陈旧 ID 未命中（按 ID 精确命中也免疫"陈旧取消打中新语句"）。
+func TestLocalQueryCancel(t *testing.T) {
+	fx := newFixture(t)
+	c := NewLocal(fx.app)
+	info, err := c.CreateConnection(&protocol.CreateConnectionRequest{
+		Name: "lc", Kind: protocol.DatabaseKindSQLite, Database: ":memory:",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := c.ExecuteQuery(context.Background(), "setup", info.ID, "CREATE TABLE t(x INTEGER)"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+
+	// 足够久（注册与取消的窗口）、足够短（测试收尾时长）。
+	const MEDIUM_CTE = "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x < 50000000) SELECT count(*) FROM n"
+	qid := "local-cancel-1"
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.ExecuteQuery(context.Background(), qid, info.ID, MEDIUM_CTE)
+		done <- err
+	}()
+	time.Sleep(300 * time.Millisecond)
+
+	hit, err := c.CancelQuery(context.Background(), qid)
+	if err != nil || !hit {
+		t.Fatalf("cancel hit = %v err = %v, want true/nil", hit, err)
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("取消后 ExecuteQuery 未报错")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("取消后 ExecuteQuery 未返回")
+	}
+	if hit, err := c.CancelQuery(context.Background(), qid); err != nil || hit {
+		t.Fatalf("stale cancel = %v/%v, want false/nil", hit, err)
 	}
 }
 
