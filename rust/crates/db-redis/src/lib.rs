@@ -186,9 +186,24 @@ impl KvDriver for RedisConn {
                         .arg(count)
                         .query(conn)
                         .map_err(Self::err)?;
-                    for k in batch {
-                        let typ: String = redis::cmd("TYPE").arg(&k).query(conn).map_err(Self::err)?;
-                        let ttl: i64 = redis::cmd("TTL").arg(&k).query(conn).map_err(Self::err)?;
+                    if batch.is_empty() {
+                        cursor = next;
+                        if cursor == 0 {
+                            break;
+                        }
+                        continue;
+                    }
+                    // TYPE + TTL 经 pipeline 整批往返（与 Go 侧
+                    // ScanKeysEnriched 波 38 同款）：每键两次串行 RTT 在
+                    // 一页 100 键上是 200+ 次等待。
+                    let mut pipe = redis::pipe();
+                    for k in &batch {
+                        pipe.cmd("TYPE").arg(k).cmd("TTL").arg(k);
+                    }
+                    let pairs: Vec<(String, i64)> = pipe
+                        .query(conn)
+                        .map_err(Self::err)?;
+                    for (k, (typ, ttl)) in batch.into_iter().zip(pairs) {
                         keys.push(RedisKeyInfo {
                             key: k,
                             key_type: Self::key_type_of(&typ),
