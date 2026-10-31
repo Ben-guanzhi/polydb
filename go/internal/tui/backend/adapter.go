@@ -369,7 +369,9 @@ func valueToCell(v protocol.Value) any {
 	case string:
 		return t
 	case float64:
-		if t == math.Trunc(t) && math.Abs(t) < 2^53 {
+		// 1<<53（不是 2^53——Go 里那是按位异或，值为 55）：IEEE754 整数精确
+		// 表示的上界，整值 float 在此范围内才安全收敛 int64。
+		if t == math.Trunc(t) && math.Abs(t) < 1<<53 {
 			return int64(t)
 		}
 		return t
