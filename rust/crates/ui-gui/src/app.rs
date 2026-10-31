@@ -2877,6 +2877,13 @@ impl PolyDBApp {
                         r.rows.len(),
                         r.execution_time_ms
                     );
+                } else if last_err
+                    .as_ref()
+                    .is_some_and(|e| e.contains("CANCELLED"))
+                {
+                    // 用户主动取消（POLYDB_ERR_CANCELLED）不是失败：如实报
+                    // 已取消，别让取消自己的查询看起来像出了错。
+                    this.status = "已取消当前查询".into();
                 } else {
                     this.status = format!("查询失败: {}", last_err.unwrap_or_default());
                 }
