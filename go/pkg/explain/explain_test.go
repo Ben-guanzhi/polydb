@@ -37,6 +37,12 @@ func TestBuildSQL(t *testing.T) {
 		{"comment inside literal kept", "SELECT '/*a*/' AS a", protocol.DatabaseKindSQLite, "EXPLAIN QUERY PLAN SELECT '/*a*/' AS a"},
 		{"doubled quote literal", "SELECT 'it''s' AS a", protocol.DatabaseKindSQLite, "EXPLAIN QUERY PLAN SELECT 'it''s' AS a"},
 		{"only comments", "  -- nothing\n", protocol.DatabaseKindSQLite, ""},
+		// 方言感知：MySQL 的 '#' 行注释（旧私有 stripComments 不认，会把
+		// 前导 '#' 当成语句开头而重复包裹 EXPLAIN）。
+		{"mysql hash comment leading no double-wrap", "# c\nEXPLAIN SELECT 1", protocol.DatabaseKindMySQL, "EXPLAIN SELECT 1"},
+		{"mysql hash comment inline", "SELECT 1 # tail", protocol.DatabaseKindMySQL, "EXPLAIN FORMAT=JSON SELECT 1"},
+		// PG 的 $$…$$ 是字面量（旧私有实现会错把里面的 ' 当引号边界）。
+		{"pg dollar quote literal preserved", "SELECT $$a'b$$ AS x", protocol.DatabaseKindPostgres, "EXPLAIN (FORMAT JSON) SELECT $$a'b$$ AS x"},
 	}
 	for _, c := range cases {
 		if got := BuildSQL(c.raw, c.kind); got != c.want {

@@ -82,13 +82,13 @@ fn node_label(n: &Node) -> String {
 /// session 最近一次 EXPLAIN PLAN 的计划，所以顺序不能反。
 /// 空输入返回空 vec；已经以 EXPLAIN 开头的原样返回。
 pub(crate) fn explain_statements(raw: &str, kind: DatabaseKind) -> Vec<String> {
-    let clean = strip_comments(raw)
+    let clean = polydb_db_core::strip_comments(raw, Some(kind))
         .trim_matches(|c| " \t\r\n;".contains(c))
         .to_string();
     if clean.is_empty() {
         return Vec::new();
     }
-    if starts_with_explain(&clean) {
+    if polydb_db_core::leading_keyword(&clean, Some(kind)) == "EXPLAIN" {
         return vec![clean];
     }
     match kind {
@@ -101,77 +101,6 @@ pub(crate) fn explain_statements(raw: &str, kind: DatabaseKind) -> Vec<String> {
         ],
         _ => vec![format!("EXPLAIN {clean}")],
     }
-}
-
-fn starts_with_explain(s: &str) -> bool {
-    let low = s.to_lowercase();
-    match low.strip_prefix("explain") {
-        Some(rest) => rest.is_empty() || rest.starts_with([' ', '\t', '\n', '\r']),
-        None => false,
-    }
-}
-
-/// 去掉 `--` 行注释与 `/* */` 块注释，字符串字面量内的内容保持原样。
-fn strip_comments(s: &str) -> String {
-    let b: Vec<char> = s.chars().collect();
-    let mut out = String::with_capacity(s.len());
-    let mut i = 0usize;
-    while i < b.len() {
-        let c = b[i];
-        if c == '\'' || c == '"' {
-            let j = end_of_quoted(&b, i);
-            out.extend(&b[i..j]);
-            i = j;
-        } else if c == '-' && b.get(i + 1) == Some(&'-') {
-            match b[i..].iter().position(|&x| x == '\n') {
-                // 换行本身保留，避免把两行语句粘成一行
-                Some(nl) => i += nl,
-                None => break,
-            }
-        } else if c == '/' && b.get(i + 1) == Some(&'*') {
-            match find_pair(&b[i + 2..], '*', '/') {
-                Some(end) => i += 2 + end + 2,
-                None => break,
-            }
-        } else {
-            out.push(c);
-            i += 1;
-        }
-    }
-    out
-}
-
-/// 在 `chars` 中找 `left` 紧跟 `right` 的位置，返回 `left` 的下标。
-fn find_pair(chars: &[char], left: char, right: char) -> Option<usize> {
-    let mut i = 0usize;
-    while i + 1 < chars.len() {
-        if chars[i] == left && chars[i + 1] == right {
-            return Some(i);
-        }
-        i += 1;
-    }
-    None
-}
-
-/// 返回闭合引号之后的下标（未闭合则到串尾）。
-fn end_of_quoted(b: &[char], start: usize) -> usize {
-    let q = b[start];
-    let mut i = start + 1;
-    while i < b.len() {
-        if b[i] == '\\' && q == '\'' {
-            i += 2; // MySQL 反斜杠转义
-            continue;
-        }
-        if b[i] == q {
-            if b.get(i + 1) == Some(&q) {
-                i += 2; // SQL 双写引号转义
-                continue;
-            }
-            return i + 1;
-        }
-        i += 1;
-    }
-    b.len()
 }
 
 /// 把一次 EXPLAIN 查询的结果解析为计划树或表格文本。
@@ -970,6 +899,29 @@ mod tests {
         assert_eq!(
             explain_statements(sql, Sqlite),
             vec!["EXPLAIN QUERY PLAN SELECT '--不是注释'  FROM t".to_string()]
+        );
+    }
+
+    /// 与 Go 侧 TestBuildSQL 的方言感知用例镜像：MySQL 的 '#' 行注释、PG 的
+    /// $$…$$ 字面量都要被正确识别——旧的私有字符扫描两者都不认，会重复包裹
+    /// EXPLAIN 或把字面量里的引号当引号边界。
+    #[test]
+    fn explain_statements_strips_dialect_aware_comments() {
+        // MySQL '#' 前导注释：旧实现会把它当成语句开头，重复包裹成
+        // "EXPLAIN # c\nEXPLAIN SELECT 1"。
+        assert_eq!(
+            explain_statements("# c\nEXPLAIN SELECT 1", MySql),
+            vec!["EXPLAIN SELECT 1".to_string()]
+        );
+        // MySQL '#' 行内注释被剥掉。
+        assert_eq!(
+            explain_statements("SELECT 1 # tail", MySql),
+            vec!["EXPLAIN FORMAT=JSON SELECT 1".to_string()]
+        );
+        // PG $$…$$ 是字面量，里面的 ' 不是引号边界，整段保留。
+        assert_eq!(
+            explain_statements("SELECT $$a'b$$ AS x", Postgres),
+            vec!["EXPLAIN (FORMAT JSON) SELECT $$a'b$$ AS x".to_string()]
         );
     }
 

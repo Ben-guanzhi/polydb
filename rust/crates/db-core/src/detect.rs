@@ -139,6 +139,28 @@ pub fn strip_leading_comments(sql: &str, kind: Option<DatabaseKind>) -> &str {
     ""
 }
 
+/// 去掉 SQL 里所有注释（-- 行、# 行（MySQL）、/* */ 块），保留其余字符
+/// （含空白与字面量）。EXPLAIN 包装与任何需要「清洗掉所有注释」的地方统一走这里，
+/// 避免方言盲区（MySQL 的 '#' 行注释、PG 的 $$…$$ 字面量）造成误判。
+///
+/// 重建方式：只跳过 TokenKind::Comment 的区间，其余字节原样保留。扫描器会把空白
+/// 跳过（不 emit 成 token），空白因此落在 token 之间的间隔里，一并保留。MySQL 的
+/// /*! … */ 在扫描时已被当作代码重扫（见 scan.rs），不会成为注释 token，内容原样
+/// 保留——这与服务端真的执行它一致。
+pub fn strip_comments(sql: &str, kind: Option<DatabaseKind>) -> String {
+    let p = scan::profile_for_kind(kind);
+    let mut out = String::with_capacity(sql.len());
+    let mut last = 0usize;
+    for t in scan::scan_tokens(sql, p) {
+        if t.kind == TokenKind::Comment {
+            out.push_str(&sql[last..t.start]);
+            last = t.end;
+        }
+    }
+    out.push_str(&sql[last..]);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

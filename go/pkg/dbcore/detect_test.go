@@ -307,3 +307,32 @@ func TestStripLeadingComments(t *testing.T) {
 		}
 	}
 }
+
+// StripComments 去掉所有注释，保留其余字符（含空白与字面量）；方言感知。
+func TestStripComments(t *testing.T) {
+	cases := []struct {
+		sql  string
+		kind protocol.DatabaseKind
+		want string
+	}{
+		{"SELECT 1 -- tail", protocol.DatabaseKindSQLite, "SELECT 1 "},
+		{"SELECT/* hi */ 1", protocol.DatabaseKindSQLite, "SELECT 1"},
+		// MySQL 的 '#' 是行注释（标准剖面不认，应保留为位异或）。
+		{"SELECT 1 # tail", protocol.DatabaseKindMySQL, "SELECT 1 "},
+		{"SELECT 1 # tail", protocol.DatabaseKindSQLite, "SELECT 1 # tail"},
+		// PG 的 $$…$$ 是字面量：整段保留，里面的 ' 不是引号边界。
+		{"SELECT $$a'b$$ AS x", protocol.DatabaseKindPostgres, "SELECT $$a'b$$ AS x"},
+		// 字面量里的注释记号不算注释。
+		{"SELECT '--x' AS a", protocol.DatabaseKindSQLite, "SELECT '--x' AS a"},
+		{"SELECT '/*a*/' AS a", protocol.DatabaseKindSQLite, "SELECT '/*a*/' AS a"},
+		// 行尾换行属于空白、不在注释 token 内，原样保留。
+		{"SELECT 1 -- tail\n", protocol.DatabaseKindSQLite, "SELECT 1 \n"},
+		// 仅注释 → 只剩尾随换行。
+		{"-- nothing\n", protocol.DatabaseKindSQLite, "\n"},
+	}
+	for _, c := range cases {
+		if got := StripComments(c.sql, c.kind); got != c.want {
+			t.Errorf("StripComments(%q, %q) = %q, want %q", c.sql, c.kind, got, c.want)
+		}
+	}
+}

@@ -6,6 +6,7 @@ description = "PolyDB GPUI components"
 
 [dependencies]
 polydb-core = { workspace = true }
+polydb-db-core = { workspace = true }
 polydb-protocol = { workspace = true }
 polydb-transport = { workspace = true }
 polydb-vim = { workspace = true }

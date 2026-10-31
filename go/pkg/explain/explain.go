@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/polydb/polydb/pkg/dbcore"
 	"github.com/polydb/polydb/pkg/protocol"
 )
 
@@ -87,13 +88,17 @@ func nodeLabel(n Node) string {
 
 // BuildSQL 按方言把编辑器里的 SQL 包成 EXPLAIN 语句（注释与尾分号先剥）。
 // 空输入返回空串；已经以 EXPLAIN 开头的原样返回。
+//
+// 注释剥离与「是否已 EXPLAIN」判定统一走 dbcore 的方言感知词法（StripComments /
+// LeadingKeyword），不再用本包私有、方言盲区（MySQL 的 '#' 行注释、PG 的 $$…$$
+// 字面量）的字符扫描——详见 dbcore/detect.go 只读红线说明。
 func BuildSQL(raw string, kind protocol.DatabaseKind) string {
-	clean := strings.TrimRight(stripComments(raw), " \t\r\n;")
+	clean := strings.TrimRight(dbcore.StripComments(raw, kind), " \t\r\n;")
 	clean = strings.TrimSpace(clean)
 	if clean == "" {
 		return ""
 	}
-	if startsWithExplain(clean) {
+	if dbcore.LeadingKeyword(clean, kind) == "EXPLAIN" {
 		return clean
 	}
 	switch kind {
@@ -108,65 +113,6 @@ func BuildSQL(raw string, kind protocol.DatabaseKind) string {
 	default:
 		return "EXPLAIN " + clean
 	}
-}
-
-func startsWithExplain(s string) bool {
-	low := strings.ToLower(s)
-	if !strings.HasPrefix(low, "explain") {
-		return false
-	}
-	rest := low[len("explain"):]
-	return rest == "" || rest[0] == ' ' || rest[0] == '\t' || rest[0] == '\n' || rest[0] == '\r'
-}
-
-// stripComments 去掉 -- 行注释与 /* */ 块注释，字符串字面量内的内容保持原样。
-func stripComments(s string) string {
-	var b strings.Builder
-	b.Grow(len(s))
-	for i := 0; i < len(s); {
-		c := s[i]
-		switch {
-		case c == '\'' || c == '"':
-			j := endOfQuoted(s, i)
-			b.WriteString(s[i:j])
-			i = j
-		case c == '-' && i+1 < len(s) && s[i+1] == '-':
-			nl := strings.IndexByte(s[i:], '\n')
-			if nl < 0 {
-				return b.String()
-			}
-			i += nl // 换行本身保留，避免把两行语句粘成一行
-		case c == '/' && i+1 < len(s) && s[i+1] == '*':
-			end := strings.Index(s[i:], "*/")
-			if end < 0 {
-				return b.String()
-			}
-			i += end + 2
-		default:
-			b.WriteByte(c)
-			i++
-		}
-	}
-	return b.String()
-}
-
-// endOfQuoted 返回闭合引号之后的下标（未闭合则到串尾）。
-func endOfQuoted(s string, start int) int {
-	q := s[start]
-	for i := start + 1; i < len(s); i++ {
-		if s[i] == '\\' && q == '\'' { // MySQL 反斜杠转义
-			i++
-			continue
-		}
-		if s[i] == q {
-			if i+1 < len(s) && s[i+1] == q { // SQL 双写引号转义
-				i++
-				continue
-			}
-			return i + 1
-		}
-	}
-	return len(s)
 }
 
 // RenderResult 把一次 EXPLAIN 查询的结果解析为计划树或表格文本。

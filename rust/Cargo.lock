@@ -6118,6 +6118,7 @@ dependencies = [
  "lsp-types",
  "polydb-app-core",
  "polydb-core",
+ "polydb-db-core",
  "polydb-protocol",
  "polydb-rt",
  "polydb-storage",

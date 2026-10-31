@@ -15,7 +15,8 @@ pub use browse::{
 };
 pub use connection::*;
 pub use detect::{
-    detect_statement_type, leading_keyword, mutates_data, split_statements, strip_leading_comments,
+    detect_statement_type, leading_keyword, mutates_data, split_statements, strip_comments,
+    strip_leading_comments,
 };
 pub use driver::*;
 pub use scan::{profiles_for, scan_tokens, LexProfile, Token, TokenKind};
