@@ -309,7 +309,14 @@ impl AppCore {
         if self.connections.read().contains_key(id) {
             return Ok(());
         }
-        self.connect(*id)
+        // 拨号本身是阻塞的（SSH 隧道、ODPI-C connect，冷路径可达数十秒）：
+        // 在 async 上下文里用 block_in_place 让出 worker（execute 的
+        // spawn_blocking 同理）；runtime 之外直呼，同步路径不受影响。
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::block_in_place(|| self.connect(*id))
+        } else {
+            self.connect(*id)
+        }
     }
 
     pub fn create_connection(&self, req: &CreateConnectionRequest) -> CoreResult<ConnectionInfo> {

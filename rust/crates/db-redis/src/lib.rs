@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -27,7 +28,9 @@ mod scan_tests;
 
 /// conn 为 Option：close() 时 take 掉并 drop，同步 Connection 在 Drop 时关闭 socket。
 pub struct RedisConn {
-    conn: Mutex<Option<redis::Connection>>,
+    // Arc 包裹：阻塞调用经 spawn_blocking 卸载到阻塞池，闭包需要 'static
+    // 的连接句柄（sqlite/oracle 同范式）。
+    conn: Arc<Mutex<Option<redis::Connection>>>,
     /// 该专用连接当前所在 db：SELECT 是连接级状态，驱动独占此连接，故即服务端真值。
     db: AtomicU32,
     _addr: String,
@@ -73,7 +76,7 @@ impl RedisConn {
                 .map_err(|e| CoreError::Driver(format!("select db {db_index}: {e}")))?;
         }
         Ok(Self {
-            conn: Mutex::new(Some(conn)),
+            conn: Arc::new(Mutex::new(Some(conn))),
             db: AtomicU32::new(db_index),
             _addr: format!("redis://{addr}/{db_index}"),
         })
@@ -98,6 +101,24 @@ impl RedisConn {
             _ => RedisKeyType::None,
         }
     }
+
+    // with_conn runs one blocking redis round-trip on the blocking pool: the
+    // sync client called inline would pin a runtime worker for the whole
+    // round trip (sqlite/oracle 同范式，wave 15/16 + 38).
+    async fn with_conn<T, F>(&self, f: F) -> CoreResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut redis::Connection) -> CoreResult<T> + Send + 'static,
+    {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let mut guard = conn.lock();
+            let conn = guard.as_mut().ok_or_else(Self::closed)?;
+            f(conn)
+        })
+        .await
+        .map_err(|e| CoreError::Driver(format!("redis task: {e}")))?
+    }
 }
 
 #[async_trait]
@@ -107,16 +128,22 @@ impl DatabaseDriver for RedisConn {
     }
 
     async fn ping(&self) -> CoreResult<()> {
-        let mut guard = self.conn.lock();
-        let conn = guard.as_mut().ok_or_else(Self::closed)?;
-        redis::cmd("PING").query::<()>(conn).map_err(Self::err)
+        self.with_conn(|conn| redis::cmd("PING").query::<()>(conn).map_err(Self::err))
+            .await
     }
 
     async fn close(&self) -> CoreResult<()> {
-        // take 后 drop：同步 Connection 在 Drop 时关闭底层 socket。
-        let mut guard = self.conn.lock();
-        drop(guard.take());
-        Ok(())
+        // take 后 drop：同步 Connection 在 Drop 时关闭底层 socket。不走
+        // with_conn——take 需要的是 Option 本体，而 with_conn 交付的是已
+        // 解引用的连接。
+        let conn = Arc::clone(&self.conn);
+        let res = tokio::task::spawn_blocking(move || {
+            drop(conn.lock().take());
+            Ok(())
+        })
+        .await
+        .map_err(|e| CoreError::Driver(format!("redis task: {e}")))?;
+        res
     }
 
     fn as_kv(&self) -> Option<&dyn KvDriver> {
@@ -127,101 +154,117 @@ impl DatabaseDriver for RedisConn {
 #[async_trait]
 impl KvDriver for RedisConn {
     async fn select_db(&self, index: u32) -> CoreResult<()> {
-        {
-            let mut guard = self.conn.lock();
-            let conn = guard.as_mut().ok_or_else(Self::closed)?;
+        // 只在服务端确认 OK 后更新：失败时连接的 db 未变。
+        self.with_conn(move |conn| {
             redis::cmd("SELECT")
                 .arg(index)
                 .query::<()>(conn)
                 .map_err(Self::err)?;
-        }
-        // 只在服务端确认 OK 后更新：失败时连接的 db 未变。
+            Ok(())
+        })
+        .await?;
         self.db.store(index, Ordering::Relaxed);
         Ok(())
     }
 
     async fn scan_keys(&self, cursor: u64, pattern: &str, count: u32) -> CoreResult<RedisScanPage> {
-        let pattern = if pattern.is_empty() { "*" } else { pattern };
+        let pattern: String = if pattern.is_empty() { "*".to_string() } else { pattern.to_string() };
         let count = if count == 0 { 100 } else { count };
-        let mut guard = self.conn.lock();
-        let conn = guard.as_mut().ok_or_else(Self::closed)?;
-        // D5 服务端游标循环（spec/behavior.md §1.3）：单轮 SCAN 只给建议批次，
-        // 这里续扫到凑满 count、游标回 0，或触及轮次上限（与 Go 侧严格一致）。
-        let mut cursor = cursor;
-        let mut keys: Vec<RedisKeyInfo> = Vec::new();
-        for _ in 0..SCAN_MAX_ROUNDS {
-            let (next, batch): (u64, Vec<String>) = redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH")
-                .arg(pattern)
-                .arg("COUNT")
-                .arg(count)
-                .query(conn)
-                .map_err(Self::err)?;
-            for k in batch {
-                let typ: String = redis::cmd("TYPE").arg(&k).query(conn).map_err(Self::err)?;
-                let ttl: i64 = redis::cmd("TTL").arg(&k).query(conn).map_err(Self::err)?;
-                keys.push(RedisKeyInfo {
-                    key: k,
-                    key_type: Self::key_type_of(&typ),
-                    ttl: Some(ttl),
-                });
-            }
-            cursor = next;
-            if cursor == 0 || keys.len() >= count as usize {
-                break;
-            }
-        }
+        let db = self.db.load(Ordering::Relaxed);
+        let (cursor, keys) = self
+            .with_conn(move |conn| {
+                // D5 服务端游标循环（spec/behavior.md §1.3）：单轮 SCAN 只给建议批次，
+                // 这里续扫到凑满 count、游标回 0，或触及轮次上限（与 Go 侧严格一致）。
+                let mut cursor = cursor;
+                let mut keys: Vec<RedisKeyInfo> = Vec::new();
+                for _ in 0..SCAN_MAX_ROUNDS {
+                    let (next, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+                        .arg(cursor)
+                        .arg("MATCH")
+                        .arg(&pattern)
+                        .arg("COUNT")
+                        .arg(count)
+                        .query(conn)
+                        .map_err(Self::err)?;
+                    for k in batch {
+                        let typ: String = redis::cmd("TYPE").arg(&k).query(conn).map_err(Self::err)?;
+                        let ttl: i64 = redis::cmd("TTL").arg(&k).query(conn).map_err(Self::err)?;
+                        keys.push(RedisKeyInfo {
+                            key: k,
+                            key_type: Self::key_type_of(&typ),
+                            ttl: Some(ttl),
+                        });
+                    }
+                    cursor = next;
+                    if cursor == 0 || keys.len() >= count as usize {
+                        break;
+                    }
+                }
+                Ok((cursor, keys))
+            })
+            .await?;
         Ok(RedisScanPage {
             cursor,
-            db: Some(self.db.load(Ordering::Relaxed)),
+            db: Some(db),
             keys,
         })
     }
 
     async fn key_type(&self, key: &str) -> CoreResult<RedisKeyType> {
-        let mut guard = self.conn.lock();
-        let conn = guard.as_mut().ok_or_else(Self::closed)?;
-        let typ: String = redis::cmd("TYPE").arg(key).query(conn).map_err(Self::err)?;
+        let owned = key.to_string();
+        let typ: String = self
+            .with_conn(move |conn| redis::cmd("TYPE").arg(owned).query(conn).map_err(Self::err))
+            .await?;
         Ok(Self::key_type_of(&typ))
     }
 
     async fn get_value(&self, key: &str) -> CoreResult<RedisValue> {
-        let mut guard = self.conn.lock();
-        let conn = guard.as_mut().ok_or_else(Self::closed)?;
-        let typ: String = redis::cmd("TYPE").arg(key).query(conn).map_err(Self::err)?;
+        let owned = key.to_string();
+        let probe = owned.clone();
+        let typ: String = self
+            .with_conn(move |conn| redis::cmd("TYPE").arg(probe).query(conn).map_err(Self::err))
+            .await?;
         match Self::key_type_of(&typ) {
-            RedisKeyType::None => Err(CoreError::Driver(format!("key not found: {key}"))),
+            RedisKeyType::None => Err(CoreError::Driver(format!("key not found: {owned}"))),
             RedisKeyType::String => {
-                let v: String = redis::cmd("GET").arg(key).query(conn).map_err(Self::err)?;
+                let v: String = self
+                    .with_conn(move |conn| redis::cmd("GET").arg(owned).query(conn).map_err(Self::err))
+                    .await?;
                 Ok(RedisValue::String(v))
             }
             RedisKeyType::List => {
-                let v: Vec<String> = redis::cmd("LRANGE")
-                    .arg(key)
-                    .arg(0)
-                    .arg(-1)
-                    .query(conn)
-                    .map_err(Self::err)?;
+                let list_key = owned.clone();
+                let v: Vec<String> = self
+                    .with_conn(move |conn| {
+                        redis::cmd("LRANGE").arg(list_key).arg(0).arg(-1).query(conn).map_err(Self::err)
+                    })
+                    .await?;
                 Ok(RedisValue::List(v))
             }
             RedisKeyType::Set => {
-                let v: Vec<String> = redis::cmd("SMEMBERS")
-                    .arg(key)
-                    .query(conn)
-                    .map_err(Self::err)?;
+                let set_key = owned.clone();
+                let v: Vec<String> = self
+                    .with_conn(move |conn| {
+                        redis::cmd("SMEMBERS").arg(set_key).query(conn).map_err(Self::err)
+                    })
+                    .await?;
                 Ok(RedisValue::Set(v))
             }
             RedisKeyType::Zset => {
                 // WITHSCORES 返回扁平 [member, score, ...]，元组 FromRedisValue
                 // 只认嵌套数组，需手动配对（与 Go 侧 ZRangeWithScores 对齐）。
-                let flat: Vec<String> = redis::cmd("ZRANGE")
-                    .arg(key)
-                    .arg(0)
-                    .arg(-1)
-                    .arg("WITHSCORES")
-                    .query(conn)
-                    .map_err(Self::err)?;
+                let zset_key = owned.clone();
+                let flat: Vec<String> = self
+                    .with_conn(move |conn| {
+                        redis::cmd("ZRANGE")
+                            .arg(zset_key)
+                            .arg(0)
+                            .arg(-1)
+                            .arg("WITHSCORES")
+                            .query(conn)
+                            .map_err(Self::err)
+                    })
+                    .await?;
                 let mut members = Vec::with_capacity(flat.len() / 2);
                 let mut it = flat.into_iter();
                 while let (Some(member), Some(score)) = (it.next(), it.next()) {
@@ -235,75 +278,84 @@ impl KvDriver for RedisConn {
             RedisKeyType::Hash => {
                 // HGETALL 返回扁平 [field, value, ...]，HashMap 的 FromRedisValue
                 // 通过 as_map_iter 配对连续元素。
-                let v: HashMap<String, String> = redis::cmd("HGETALL")
-                    .arg(key)
-                    .query(conn)
-                    .map_err(Self::err)?;
+                let hash_key = owned.clone();
+                let v: HashMap<String, String> = self
+                    .with_conn(move |conn| {
+                        redis::cmd("HGETALL").arg(hash_key).query(conn).map_err(Self::err)
+                    })
+                    .await?;
                 Ok(RedisValue::Hash(v))
             }
             RedisKeyType::Stream => {
                 // XRANGE 每项为 [id, [field, value, ...]]，元组 + HashMap 直接解析。
-                let v: Vec<(String, HashMap<String, String>)> = redis::cmd("XRANGE")
-                    .arg(key)
-                    .arg("-")
-                    .arg("+")
-                    .arg("COUNT")
-                    .arg(100)
-                    .query(conn)
-                    .map_err(Self::err)?;
+                let stream_key = owned.clone();
+                let v: Vec<(String, HashMap<String, String>)> = self
+                    .with_conn(move |conn| {
+                        redis::cmd("XRANGE")
+                            .arg(stream_key)
+                            .arg("-")
+                            .arg("+")
+                            .arg("COUNT")
+                            .arg(100)
+                            .query(conn)
+                            .map_err(Self::err)
+                    })
+                    .await?;
                 Ok(RedisValue::Stream(serialize_stream(&v)))
             }
         }
     }
 
     async fn set_value(&self, key: &str, value: RedisValue) -> CoreResult<()> {
-        let mut guard = self.conn.lock();
-        let conn = guard.as_mut().ok_or_else(Self::closed)?;
-        match &value {
-            RedisValue::String(s) => redis::cmd("SET")
-                .arg(key)
-                .arg(s)
-                .query::<()>(conn)
-                .map_err(Self::err)?,
-            RedisValue::List(items) => {
-                set_and_expire(conn, key, |c| {
-                    redis::cmd("RPUSH").arg(key).arg(items).query::<()>(c)
-                })?;
-            }
-            RedisValue::Set(items) => {
-                set_and_expire(conn, key, |c| {
-                    redis::cmd("SADD").arg(key).arg(items).query::<()>(c)
-                })?;
-            }
-            RedisValue::Zset(members) => {
-                let pairs: Vec<(f64, &str)> = members
-                    .iter()
-                    .map(|m| (m.score, m.member.as_str()))
-                    .collect();
-                set_and_expire(conn, key, |c| {
-                    redis::cmd("ZADD").arg(key).arg(&pairs).query::<()>(c)
-                })?;
-            }
-            RedisValue::Hash(fields) => {
-                let items: Vec<(&str, &str)> = fields
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), v.as_str()))
-                    .collect();
-                set_and_expire(conn, key, |c| {
-                    redis::cmd("HSET").arg(key).arg(&items).query::<()>(c)
-                })?;
-            }
-            RedisValue::Stream(s) => {
-                redis::cmd("XADD")
-                    .arg(key)
-                    .arg("*")
-                    .arg("data")
+        let key = key.to_string();
+        self.with_conn(move |conn| {
+            match &value {
+                RedisValue::String(s) => redis::cmd("SET")
+                    .arg(&key)
                     .arg(s)
                     .query::<()>(conn)
-                    .map_err(Self::err)?;
+                    .map_err(Self::err)?,
+                RedisValue::List(items) => {
+                    set_and_expire(conn, &key, |c| {
+                        redis::cmd("RPUSH").arg(&key).arg(items).query::<()>(c)
+                    })?;
+                }
+                RedisValue::Set(items) => {
+                    set_and_expire(conn, &key, |c| {
+                        redis::cmd("SADD").arg(&key).arg(items).query::<()>(c)
+                    })?;
+                }
+                RedisValue::Zset(members) => {
+                    let pairs: Vec<(f64, &str)> = members
+                        .iter()
+                        .map(|m| (m.score, m.member.as_str()))
+                        .collect();
+                    set_and_expire(conn, &key, |c| {
+                        redis::cmd("ZADD").arg(&key).arg(&pairs).query::<()>(c)
+                    })?;
+                }
+                RedisValue::Hash(fields) => {
+                    let items: Vec<(&str, &str)> = fields
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), v.as_str()))
+                        .collect();
+                    set_and_expire(conn, &key, |c| {
+                        redis::cmd("HSET").arg(&key).arg(&items).query::<()>(c)
+                    })?;
+                }
+                RedisValue::Stream(s) => {
+                    redis::cmd("XADD")
+                        .arg(&key)
+                        .arg("*")
+                        .arg("data")
+                        .arg(s)
+                        .query::<()>(conn)
+                        .map_err(Self::err)?;
+                }
             }
-        }
-        Ok(())
+            Ok(())
+        })
+        .await
     }
 
     async fn exec_command(&self, args: &[String]) -> CoreResult<RedisReply> {
@@ -313,13 +365,16 @@ impl KvDriver for RedisConn {
                 value: Some(RedisReplyValue::String("empty command".into())),
             });
         }
-        let mut guard = self.conn.lock();
-        let conn = guard.as_mut().ok_or_else(Self::closed)?;
-        let mut cmd = redis::cmd(&args[0]);
-        for a in &args[1..] {
-            cmd.arg(a);
-        }
-        let v: RValue = cmd.query(conn).map_err(Self::err)?;
+        let args = args.to_vec();
+        let v: RValue = self
+            .with_conn(move |conn| {
+                let mut cmd = redis::cmd(&args[0]);
+                for a in &args[1..] {
+                    cmd.arg(a);
+                }
+                cmd.query(conn).map_err(Self::err)
+            })
+            .await?;
         Ok(reply_of(&v))
     }
 }
