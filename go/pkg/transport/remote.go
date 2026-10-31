@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/vmihailenco/msgpack/v5"
 
@@ -149,12 +150,20 @@ func (r *Remote) IsConnected(id string) bool {
 }
 
 // ─── 连接 CRUD ─────────────────────────────────────────────
+// metaDo runs one connection-registry round-trip under a bounded timeout.
+// These calls used context.Background(): a hung server left the metadata call
+// returning never, and unlike queries there is no cancel path for them.
+func (r *Remote) metaDo(method, path string, body any, out any) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	return r.do(ctx, method, path, body, out)
+}
 
 // 以下 CRUD 方法在 Client 接口里没有 ctx 参数（元数据面，非在途查询），
 // 统一用 Background()；查询/事务/浏览等会挂起的方法各自透传自己的 ctx。
 func (r *Remote) ListConnections() ([]protocol.ConnectionInfo, error) {
 	var out []protocol.ConnectionInfo
-	if err := r.do(context.Background(), http.MethodGet, "/api/connections", nil, &out); err != nil {
+	if err := r.metaDo(http.MethodGet, "/api/connections", nil, &out); err != nil {
 		return nil, err
 	}
 	if out == nil {
@@ -165,24 +174,24 @@ func (r *Remote) ListConnections() ([]protocol.ConnectionInfo, error) {
 
 func (r *Remote) GetConnection(id string) (protocol.ConnectionInfo, error) {
 	var out protocol.ConnectionInfo
-	err := r.do(context.Background(), http.MethodGet, "/api/connections/"+url.PathEscape(id), nil, &out)
+	err := r.metaDo(http.MethodGet, "/api/connections/"+url.PathEscape(id), nil, &out)
 	return out, err
 }
 
 func (r *Remote) CreateConnection(req *protocol.CreateConnectionRequest) (protocol.ConnectionInfo, error) {
 	var out protocol.ConnectionInfo
-	err := r.do(context.Background(), http.MethodPost, "/api/connections", req, &out)
+	err := r.metaDo(http.MethodPost, "/api/connections", req, &out)
 	return out, err
 }
 
 func (r *Remote) UpdateConnection(id string, req *protocol.UpdateConnectionRequest) (protocol.ConnectionInfo, error) {
 	var out protocol.ConnectionInfo
-	err := r.do(context.Background(), http.MethodPut, "/api/connections/"+url.PathEscape(id), req, &out)
+	err := r.metaDo(http.MethodPut, "/api/connections/"+url.PathEscape(id), req, &out)
 	return out, err
 }
 
 func (r *Remote) DeleteConnection(id string) (bool, error) {
-	err := r.do(context.Background(), http.MethodDelete, "/api/connections/"+url.PathEscape(id), nil, nil)
+	err := r.metaDo(http.MethodDelete, "/api/connections/"+url.PathEscape(id), nil, nil)
 	if err != nil {
 		return false, err
 	}
