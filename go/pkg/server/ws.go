@@ -115,8 +115,40 @@ func (s *wsSession) send(msg *protocol.ServerMessage) {
 }
 
 func (s *wsSession) runInbound() {
+	// Half-open TCP: a client that vanished without FIN leaves ReadMessage
+	// blocked forever, and the session — with its in-flight queries and
+	// server-side resources — lingers until process exit. A read deadline
+	// refreshed by any inbound traffic (incl. the pong our ping elicits)
+	// reaps such sessions; healthy clients answer within a tick.
+	const readIdle = 60 * time.Second
+	const pingEvery = 25 * time.Second
+	refreshDeadline := func() {
+		_ = s.conn.SetReadDeadline(time.Now().Add(readIdle))
+	}
+	s.conn.SetPongHandler(func(string) error {
+		refreshDeadline()
+		return nil
+	})
+	refreshDeadline()
+	go func() {
+		t := time.NewTicker(pingEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				_ = s.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				if err := s.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+					s.stop()
+					return
+				}
+			case <-s.shutdown:
+				return
+			}
+		}
+	}()
 	for {
 		_, data, err := s.conn.ReadMessage()
+		refreshDeadline()
 		if err != nil {
 			s.stop()
 			return

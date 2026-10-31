@@ -28,7 +28,14 @@ use polydb_core::error_classify::driver_error;
 // tiberius 0.12 无内置连接/查询超时；不可达主机（防火墙丢包）会让 TCP 握手
 // 挂到系统超时（本机实测 ~4s/地址，tokio 会串行尝试多个地址）。所有 block_on
 // 一律套超时，保证契约测试中无服务时快速失败而非挂死 tokio worker。
-const IO_TIMEOUT: Duration = Duration::from_secs(6);
+// Connect/login bound: a black-holed address fails here instead of hanging
+// the worker until the OS gives up.
+const IO_TIMEOUT: Duration = Duration::from_secs(10);
+// Statement backstop: 6s used to cap query/execute directly, so any
+// legitimate analytical query died with "timeout after 6s". Real cancellation
+// is the caller's ctx (select+retire); this only stops a wedged driver from
+// pinning the worker forever.
+const STATEMENT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// tiberius 没有 NULL 的 ToSql 实现：ColumnData 的各变体以 Option 承载，
 /// None 即 SQL NULL（选 I64 只承载可空性；TDS 参数无绑定类型强约束）。
@@ -97,6 +104,13 @@ fn timed<T, E>(what: &str, fut: impl Future<Output = Result<T, E>>) -> CoreResul
 where
     E: std::fmt::Display,
 {
+    timed_within(what, IO_TIMEOUT, fut)
+}
+
+fn timed_within<T, E>(what: &str, limit: Duration, fut: impl Future<Output = Result<T, E>>) -> CoreResult<T>
+where
+    E: std::fmt::Display,
+{
     enum Out<T, E> {
         Done(Result<T, E>),
         TimedOut,
@@ -104,7 +118,7 @@ where
     let out = polydb_rt::block_on(async {
         tokio::select! {
             out = fut => Out::Done(out),
-            _ = tokio::time::sleep(IO_TIMEOUT) => Out::TimedOut,
+            _ = tokio::time::sleep(limit) => Out::TimedOut,
         }
     });
     match out {
@@ -259,8 +273,8 @@ impl MssqlConn {
 
     fn query_rows(&self, sql: &str, refs: &[&dyn ToSql], what: &str) -> CoreResult<Vec<Row>> {
         let mut client = self.client.lock();
-        let stream = timed(what, client.as_mut().unwrap().query(sql, refs))?;
-        timed(what, stream.into_first_result())
+        let stream = timed_within(what, STATEMENT_TIMEOUT, client.as_mut().unwrap().query(sql, refs))?;
+        timed_within(what, STATEMENT_TIMEOUT, stream.into_first_result())
     }
 }
 
@@ -311,8 +325,8 @@ impl MssqlConn {
 
     fn run_batch(&self, sql: &str, what: &str) -> CoreResult<()> {
         let mut client = self.client.lock();
-        let stream = timed(what, client.as_mut().unwrap().simple_query(sql))?;
-        timed(what, stream.into_first_result())?;
+        let stream = timed_within(what, STATEMENT_TIMEOUT, client.as_mut().unwrap().simple_query(sql))?;
+        timed_within(what, STATEMENT_TIMEOUT, stream.into_first_result())?;
         Ok(())
     }
 
@@ -365,8 +379,9 @@ impl MssqlConn {
             })
         } else {
             let mut client = self.client.lock();
-            let result = timed(
+            let result = timed_within(
                 "execute failed",
+                STATEMENT_TIMEOUT,
                 client.as_mut().unwrap().execute(sql, &refs),
             )?;
             let affected = result.rows_affected().first().copied().unwrap_or(0);
@@ -505,8 +520,9 @@ impl SqlDriver for MssqlConn {
             })
         } else {
             let mut client = self.client.lock();
-            let result = timed(
+            let result = timed_within(
                 "execute failed",
+                STATEMENT_TIMEOUT,
                 client.as_mut().unwrap().execute(sql, &refs),
             )?;
             let affected = result.rows_affected().first().copied().unwrap_or(0);

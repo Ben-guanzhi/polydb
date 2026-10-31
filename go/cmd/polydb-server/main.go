@@ -56,6 +56,11 @@ func main() {
 		Addr:              addr,
 		Handler:           server.NewWithToken(app, token).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		// IdleTimeout reaps connections parked between requests. Deliberately
+		// no blanket Read/WriteTimeout: WebSocket connections and streaming
+		// queries are long-lived by design, and Go's server timeouts apply
+		// until the handler returns — the WS layer manages its own deadlines.
+		IdleTimeout: 120 * time.Second,
 	}
 
 	logger.Info("polydb-server listening", "addr", addr, "data_dir", dataDir, "auth", token != "")
