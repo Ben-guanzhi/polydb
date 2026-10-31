@@ -338,13 +338,36 @@ func (a *AppCore) isReadOnly(id string) bool {
 	return info.ReadOnly != nil && *info.ReadOnly
 }
 
+// connectionKind 返回连接的方言，用于挑选词法剖面。
+//
+// 已连接时取驱动上报的 kind（唯一权威）；未连接时取存储配置里的 kind——
+// 懒连接路径（ensure 之前）也要能判定方言，否则只读闸门会在未知方言下
+// 退化成「取各剖面并集」，把合法的只读查询也误拦。
+func (a *AppCore) connectionKind(id string) protocol.DatabaseKind {
+	a.mu.RLock()
+	c, ok := a.connections[id]
+	a.mu.RUnlock()
+	if ok {
+		return c.Kind()
+	}
+	info, err := a.repo.Get(id)
+	if err != nil {
+		return ""
+	}
+	return info.Kind
+}
+
 // rejectWriteOnReadOnly 按 behavior.md §12.3 拦截只读连接上的写语句：
 // 对整条语句（含 WITH 子树与多语句）做变更关键字扫描（dbcore.MutatesData），
 // 命中即返回 POLYDB_ERR_READ_ONLY。不再复用 DetectStatementType 的判型——
 // 数据修改 CTE（WITH…DELETE/UPDATE/INSERT）与 TRUNCATE/GRANT/CALL 等会被
 // 判成 select/other 而漏拦。
-func rejectWriteOnReadOnly(sqlText string) error {
-	if dbcore.MutatesData(sqlText) {
+//
+// kind 是连接的方言：词法差异（'#' 行注释、反斜杠转义、PG 的 dollar-quote、
+// Oracle 的 q'…'、MySQL 的 /*! … */）决定「字面量在哪结束」。认错方言会把
+// 后面的写语句当成字面量吞掉——那是 fail-open，直接丢数据。
+func rejectWriteOnReadOnly(sqlText string, kind protocol.DatabaseKind) error {
+	if dbcore.MutatesData(sqlText, kind) {
 		return &protocol.PolyDBError{Code: protocol.ErrReadOnly, Message: "connection is read-only: write statements are rejected"}
 	}
 	return nil
@@ -467,7 +490,7 @@ func (a *AppCore) sqlDriver(ctx context.Context, id string) (dbcore.SQLDriver, e
 
 func (a *AppCore) Execute(ctx context.Context, id, sql string, args ...protocol.Value) (*protocol.QueryResult, error) {
 	if a.isReadOnly(id) {
-		if err := rejectWriteOnReadOnly(sql); err != nil {
+		if err := rejectWriteOnReadOnly(sql, a.connectionKind(id)); err != nil {
 			return nil, err
 		}
 	}
@@ -637,8 +660,9 @@ func (a *AppCore) ExecuteInTx(ctx context.Context, txID, sql string, args ...pro
 	if err != nil {
 		return nil, err
 	}
+	kind := a.connectionKind(meta.connID)
 	if a.isReadOnly(meta.connID) {
-		if err := rejectWriteOnReadOnly(sql); err != nil {
+		if err := rejectWriteOnReadOnly(sql, kind); err != nil {
 			return nil, err
 		}
 	}
@@ -657,7 +681,7 @@ func (a *AppCore) ExecuteInTx(ctx context.Context, txID, sql string, args ...pro
 	out := bridge.QueryResultFromDB(res)
 	// 内核 QueryResult 不承载线语义字段，边界补齐（与各驱动 protocol 管线一致）。
 	out.ExecutionTimeMs = float64(time.Since(start).Microseconds()) / 1000.0
-	out.StatementType = dbcore.DetectStatementType(sql)
+	out.StatementType = dbcore.DetectStatementType(sql, kind)
 	return out, nil
 }
 

@@ -3,7 +3,6 @@ package mcp
 import (
 	"context"
 	"encoding/json"
-	"strings"
 
 	"github.com/polydb/polydb/pkg/dbcore"
 	"github.com/polydb/polydb/pkg/protocol"
@@ -51,7 +50,7 @@ func (s *Server) toolList() []ToolDef {
 		},
 		{
 			Name:        "run_readonly_query",
-			Description: "执行只读 SQL（仅 SELECT / EXPLAIN / WITH），返回结果集。写语句被拒绝。",
+			Description: "执行只读 SQL（首关键字限 SELECT / WITH / EXPLAIN / SHOW / DESCRIBE / DESC，且整条语句不含任何变更关键字），返回结果集。写语句被拒绝；多语句脚本逐条判定。",
 			InputSchema: strSchema(map[string]any{
 				"connection_id": connID,
 				"sql":           map[string]any{"type": "string", "description": "要执行的只读 SQL"},
@@ -121,7 +120,13 @@ func (s *Server) callTool(ctx context.Context, params json.RawMessage) (string, 
 		return jsonText(out), false
 	case "run_readonly_query":
 		id, sql := argStr(args, "connection_id"), argStr(args, "sql")
-		if err := assertReadOnly(sql); err != nil {
+		// 方言决定词法剖面（'#' 行注释、反斜杠转义、dollar-quote…）。
+		// 连接不存在时 kind 为空 → 闸门取各剖面并集（更严）。
+		kind := protocol.DatabaseKind("")
+		if info, err := s.app.GetConnection(id); err == nil {
+			kind = info.Kind
+		}
+		if err := assertReadOnly(sql, kind); err != nil {
 			return err.Error(), true
 		}
 		var pvals []protocol.Value
@@ -150,16 +155,51 @@ func jsonText(v any) string {
 	return string(b)
 }
 
-// assertReadOnly 只放行 SELECT / EXPLAIN / WITH（只读红线）。
-func assertReadOnly(sql string) error {
-	t := strings.ToUpper(strings.TrimSpace(sql))
-	switch {
-	case strings.HasPrefix(t, "SELECT"), strings.HasPrefix(t, "WITH"), strings.HasPrefix(t, "EXPLAIN"), strings.HasPrefix(t, "SHOW"), strings.HasPrefix(t, "DESCRIBE"), strings.HasPrefix(t, "DESC "):
-		return nil
-	default:
-		if dbcore.DetectStatementType(sql) != protocol.StatementTypeSelect {
-			return &protocol.PolyDBError{Code: protocol.ErrReadOnly, Message: "MCP 仅支持只读查询（SELECT/EXPLAIN/WITH），写语句被拒绝"}
-		}
-		return nil
+// readOnlyLeadingKeywords 是 MCP 只读闸门放行的**首关键字**白名单。
+//
+// 判型按整词而非前缀：前缀匹配挡不住 `SELECTED` 这类假阳性，也挡不住
+// 「首关键字不在白名单、但整句看起来像查询」的语句。
+var readOnlyLeadingKeywords = map[string]bool{
+	"SELECT":   true,
+	"WITH":     true,
+	"EXPLAIN":  true,
+	"SHOW":     true,
+	"DESCRIBE": true,
+	"DESC":     true,
+}
+
+// assertReadOnly 是 MCP 侧只读红线（behavior.md §12.3）：**逐语句**判定。
+//
+// 旧实现是「前缀白名单」（HasPrefix "SELECT"），实测三条绕过：
+//
+//	SELECT 1; DROP TABLE t                                   —— 多语句，后半段被放行
+//	WITH d AS (DELETE FROM users RETURNING *) SELECT * FROM d —— 数据修改 CTE
+//	EXPLAIN ANALYZE DELETE FROM users                       —— PG 上 EXPLAIN ANALYZE 真执行
+//
+// 其中第一条已端到端证实：经 app.Execute 执行后目标表真的被删。
+//
+// 现在用方言感知的切分器把脚本拆成语句，逐条要求：
+//   - 首关键字落在 readOnlyLeadingKeywords 里（挡住 DELETE/UPDATE/CALL 等）；
+//   - 整条语句不含变更关键字（挡住 EXPLAIN ANALYZE DELETE、数据修改 CTE）。
+//
+// 两个条件缺一不可：只看首关键字会漏掉 EXPLAIN ANALYZE 与数据修改 CTE；
+// 只看关键字扫描会漏掉首关键字不在白名单的语句。
+func assertReadOnly(sql string, kind protocol.DatabaseKind) error {
+	stmts := dbcore.SplitStatements(sql, kind)
+	if len(stmts) == 0 {
+		return readOnlyRejected()
 	}
+	for _, stmt := range stmts {
+		if !readOnlyLeadingKeywords[dbcore.LeadingKeyword(stmt, kind)] {
+			return readOnlyRejected()
+		}
+		if dbcore.MutatesData(stmt, kind) {
+			return readOnlyRejected()
+		}
+	}
+	return nil
+}
+
+func readOnlyRejected() error {
+	return &protocol.PolyDBError{Code: protocol.ErrReadOnly, Message: "MCP 仅支持只读查询（SELECT/WITH/EXPLAIN/SHOW/DESCRIBE），写语句被拒绝"}
 }

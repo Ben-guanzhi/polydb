@@ -3,6 +3,7 @@ pub mod browse;
 pub mod connection;
 pub mod detect;
 pub mod driver;
+pub mod scan;
 pub mod tx;
 
 pub use blobsink::{blob_value, clear_blob_sink, set_blob_sink, BlobSink};
@@ -13,6 +14,9 @@ pub use browse::{
     DIALECT_MSSQL, DIALECT_MYSQL, DIALECT_ORACLE, DIALECT_SQLITE,
 };
 pub use connection::*;
-pub use detect::{detect_statement_type, mutates_data, strip_leading_comments};
+pub use detect::{
+    detect_statement_type, leading_keyword, mutates_data, split_statements, strip_leading_comments,
+};
 pub use driver::*;
+pub use scan::{profiles_for, scan_tokens, LexProfile, Token, TokenKind};
 pub use tx::*;

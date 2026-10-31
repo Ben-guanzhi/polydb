@@ -2,9 +2,10 @@
 // 工具，供 Cursor / Claude Desktop 等 MCP 客户端直连。
 //
 // 传输：stdio，newline-delimited JSON-RPC 2.0（MCP 默认 stdio 帧）。
-// 只读红线：唯一能执行 SQL 的工具 run_readonly_query 只放行 SELECT / EXPLAIN
-// （经 dbcore.DetectStatementType 判定），写语句一律拒绝——MCP 侧不暴露任何写能力。
-// 连接与凭据归属本进程（app-core + keyring），与 polydb-server 相同装配。
+// 只读红线：唯一能执行 SQL 的工具 run_readonly_query 用**逐语句**判定放行
+// SELECT / WITH / EXPLAIN / SHOW / DESCRIBE（经 dbcore.SplitStatements +
+// LeadingKeyword + MutatesData，方言感知），写语句一律拒绝——MCP 侧不暴露
+// 任何写能力。连接与凭据归属本进程（app-core + keyring），与 polydb-server 相同装配。
 package mcp
 
 import (

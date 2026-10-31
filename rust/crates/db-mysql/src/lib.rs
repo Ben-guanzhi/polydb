@@ -122,21 +122,12 @@ impl MySqlConn {
         Value::String(format!("<{}>", raw.type_info().name()))
     }
 
+    /// 语句类型判定（收敛到 db-core 公共版，方言固定为 MySQL）。
+    ///
+    /// 公共版按 token 类别判型（整词而非前缀），并认 MySQL 的方言词法：
+    /// '#' 行注释、'--' 需跟空白、反斜杠转义、/*! … */ 可执行注释。
     pub fn detect_statement_type(sql: &str) -> StatementType {
-        let t = strip_leading_comments(sql).trim().to_uppercase();
-        if t.starts_with("SELECT") || t.starts_with("WITH") {
-            StatementType::Select
-        } else if t.starts_with("INSERT") {
-            StatementType::Insert
-        } else if t.starts_with("UPDATE") {
-            StatementType::Update
-        } else if t.starts_with("DELETE") {
-            StatementType::Delete
-        } else if t.starts_with("CREATE") || t.starts_with("ALTER") || t.starts_with("DROP") {
-            StatementType::Ddl
-        } else {
-            StatementType::Other
-        }
+        polydb_db_core::detect_statement_type(sql, Some(DatabaseKind::MySql))
     }
 
     fn columns_of(rows: &[MySqlRow]) -> Vec<ResultColumn> {
@@ -270,24 +261,10 @@ impl MySqlConn {
     }
 }
 
+/// 剥离 SQL 开头的前导注释（收敛到 db-core 公共版，方言固定为 MySQL）。
+/// 公共版认 MySQL 的 '#' 行注释（旧副本只认 '--' 与 '/* */'）。
 pub fn strip_leading_comments(sql: &str) -> &str {
-    let mut s = sql;
-    loop {
-        s = s.trim_start();
-        if let Some(rest) = s.strip_prefix("--") {
-            s = match rest.find('\n') {
-                Some(i) => &rest[i + 1..],
-                None => return "",
-            };
-        } else if let Some(rest) = s.strip_prefix("/*") {
-            s = match rest.find("*/") {
-                Some(i) => &rest[i + 2..],
-                None => return "",
-            };
-        } else {
-            return s;
-        }
-    }
+    polydb_db_core::strip_leading_comments(sql, Some(DatabaseKind::MySql))
 }
 
 #[async_trait]

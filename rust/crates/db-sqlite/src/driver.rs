@@ -124,48 +124,13 @@ impl SqliteConn {
         Ok(values)
     }
 
-    /// 剥离 SQL 开头的前导注释（-- 行注释与 /* */ 块注释），
-    /// 使带注释的 SQL 仍能命中语句类型检测（与 Go 实现一致）。
-    fn strip_leading_comments(sql: &str) -> &str {
-        let mut s = sql;
-        loop {
-            s = s.trim_start();
-            if let Some(rest) = s.strip_prefix("--") {
-                s = match rest.find('\n') {
-                    Some(i) => &rest[i + 1..],
-                    None => return "",
-                };
-            } else if let Some(rest) = s.strip_prefix("/*") {
-                s = match rest.find("*/") {
-                    Some(i) => &rest[i + 2..],
-                    None => return "",
-                };
-            } else {
-                return s;
-            }
-        }
-    }
-
+    /// 语句类型判定（收敛到 db-core 公共版，方言固定为 SQLite）。
+    ///
+    /// WITH 前缀统一判 select（与 Go 侧 dbcore.DetectStatementType 规则一致，
+    /// 双实现行为约定见 spec/behavior.md §11）：包括 `WITH ... INSERT` 形态。
+    /// 公共版按 token 类别判型（整词而非前缀）。
     fn detect_statement_type(sql: &str) -> StatementType {
-        let trimmed = Self::strip_leading_comments(sql).trim().to_uppercase();
-        // WITH 前缀统一判 select（与 Go 侧 dbcore.DetectStatementType 规则一致，
-        // 双实现行为约定见 spec/behavior.md §11）：包括 `WITH ... INSERT` 形态。
-        if trimmed.starts_with("SELECT") || trimmed.starts_with("WITH") {
-            StatementType::Select
-        } else if trimmed.starts_with("INSERT") {
-            StatementType::Insert
-        } else if trimmed.starts_with("UPDATE") {
-            StatementType::Update
-        } else if trimmed.starts_with("DELETE") {
-            StatementType::Delete
-        } else if trimmed.starts_with("CREATE")
-            || trimmed.starts_with("ALTER")
-            || trimmed.starts_with("DROP")
-        {
-            StatementType::Ddl
-        } else {
-            StatementType::Other
-        }
+        polydb_db_core::detect_statement_type(sql, Some(DatabaseKind::Sqlite))
     }
 
     /// 在给定 rusqlite::Connection 上跑一条 SQL。事务内外通用；

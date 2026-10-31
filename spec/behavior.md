@@ -279,11 +279,10 @@
 - `ConnectionConfig.read_only = true`（默认 false）的连接，服务端在 **app-core 执行层**拒绝写操作
   （UI 禁用只是第一道，服务端拦截才是保证）：
   - SQL：`execute` / `execute_in_transaction` / batch 中语句做**整句变更关键字扫描**
-    （不再复用 §11 判型）：剥离 `--` / `/* */` 注释与 `'…'` / `"…"` / `` `…` `` / `[…]`
-    字面量后，整词命中 `INSERT` / `UPDATE` / `DELETE` / `MERGE` / `REPLACE` / `TRUNCATE` /
-    `GRANT` / `REVOKE` / `CREATE` / `ALTER` / `DROP` / `CALL` / `EXEC` / `EXECUTE` / `COPY` /
-    `VACUUM` / `REINDEX` / `CLUSTER` / `LOCK` / `COMMENT` / `SETVAL` / `REFRESH` / `INTO` /
-    `LOAD` / `DO` / `OPTIMIZE` 即返回 **409** `POLYDB_ERR_READ_ONLY`。
+    （不再复用 §11 判型），命中 `INSERT` / `UPDATE` / `DELETE` / `MERGE` / `REPLACE` /
+    `TRUNCATE` / `GRANT` / `REVOKE` / `CREATE` / `ALTER` / `DROP` / `CALL` / `EXEC` /
+    `EXECUTE` / `COPY` / `VACUUM` / `REINDEX` / `CLUSTER` / `LOCK` / `COMMENT` / `SETVAL` /
+    `REFRESH` / `INTO` / `LOAD` / `DO` / `OPTIMIZE` 即返回 **409** `POLYDB_ERR_READ_ONLY`。
     扫整句使数据修改 CTE（`WITH … DELETE/UPDATE/INSERT`）与 `TRUNCATE` / `GRANT` / `CALL`
     等此前归入 `select` / `other` 的写型语句同样被拦；注释/字符串中的同名词不误判
     （`'delete'`、列名 `inserted_events` 均放行）。
@@ -294,6 +293,37 @@
     `LOAD DATA INFILE` / `LOAD XML`、`DO $$ … $$` 匿名块（可任意写）、`OPTIMIZE TABLE`。
     代价是 fail-closed 的误拦：`LOAD TABLE … INTO OUTFILE` 虽是读路径也会被拦；
     命中判定为整词，`setval_log` / `load_status` / `do_count` 等列名不受影响。
+  - **扫描方式是方言感知的 token 词法扫描**（Go `pkg/dbcore/scan.go` 与 Rust
+    `crates/db-core/src/scan.rs` 逐字镜像）：一次左到右扫描把输入分类成 token
+    （裸词 / 引号标识符 / 字面量 / 注释 / 分号 / 其他），命中判定只读**裸词** token 的
+    整词命中，绝不在「清洗过的文本」上做子串搜索。
+    关键在于**「字面量 / 注释在哪结束」由方言决定**——认错方言就会把后面的写语句当成
+    字面量吞掉（fail-open，直接丢数据）。因此扫描按连接的 `DatabaseKind` 取剖面：
+    | 规则 | MySQL/MariaDB | PostgreSQL | Oracle | SQLite / SQL Server |
+    |---|---|---|---|---|
+    | `#` 是行注释 | 是 | 否（位异或运算符） | 否 | 否 |
+    | `--` 需跟空白才是注释 | 是 | 否 | 否 | 否 |
+    | `'…'` 里 `\` 是转义 | 是 | 仅 `E'…'` / `U&'…'` | 否 | 否 |
+    | `$$…$$` / `$tag$…$tag$` 是字面量 | 否 | 是 | 否 | 否 |
+    | `q'…'` 是字面量 | 否 | 否 | 是 | 否 |
+    | `/*! … */` 会被服务端执行 | 是（当代码扫） | 否（普通注释） | 否 | 否 |
+    方言未知时取各剖面**并集**（任一剖面认为写了就算写了）。
+    反斜杠转义语义由**服务端**设置决定（MySQL 的 `NO_BACKSLASH_ESCAPES`、
+    PostgreSQL 的 `standard_conforming_strings`），连接配置里看不到，故这两种方言各扫
+    两个变体、判写取并集。代价是 fail-closed 的误拦：服务端用默认设置时
+    `SELECT 'a\'; …` 这类写法会被判为写语句。
+  - **MCP 侧（`run_readonly_query`）逐语句判定**，不做前缀匹配：按方言感知的切分器把脚本
+    拆成语句，逐条要求「首关键字落在 `SELECT` / `WITH` / `EXPLAIN` / `SHOW` / `DESCRIBE` /
+    `DESC` 白名单内」**且**「整条语句不含变更关键字」。两个条件缺一不可：只看首关键字会漏掉
+    `EXPLAIN ANALYZE DELETE`（PostgreSQL 上 `EXPLAIN ANALYZE` 真执行）与数据修改 CTE；
+    只看关键字扫描会漏掉首关键字不在白名单的语句。前缀匹配（`HasPrefix "SELECT"`）已被
+    实测绕过并移除：`SELECT 1; DROP TABLE t`（多语句）、`WITH d AS (DELETE …) SELECT …`
+    （数据修改 CTE）、`EXPLAIN ANALYZE DELETE …` 三条都能绕过旧闸门，其中第一条已端到端
+    证实表被真删。
+  - **只读红线纯在应用层**：两端均未下发 `SET TRANSACTION READ ONLY` /
+    `default_transaction_read_only`，没有数据库层的第二道防线。因此闸门一律按 fail-closed
+    收口——判错方向的代价不对称（多问一次只是烦，放过去就是丢数据），任何不确定的输入
+    （未识别的引号形式、未知方言、转义语义不明）都往「判定为危险」倒。
   - **已知漏网（如实标注，未拦截）**：会话/实例级语句 `SET`（含 `SET GLOBAL` /
     `SET PERSIST` / `SET PASSWORD`）、`FLUSH`、`RESET`、`KILL`、`NOTIFY`、以及写型
     `PRAGMA`（如 `PRAGMA wal_checkpoint`）。这些不触及业务数据行，但可改写会话或实例

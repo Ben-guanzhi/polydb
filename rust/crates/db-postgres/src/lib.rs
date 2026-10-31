@@ -127,22 +127,12 @@ impl PostgresConn {
         Value::String(format!("<{}>", raw.type_info().name()))
     }
 
-    /// 与 Go 侧 dbcore.DetectStatementType 对齐的语句类型检测（含注释剥离与 WITH）。
+    /// 与 Go 侧 dbcore.DetectStatementType 对齐的语句类型检测。
+    ///
+    /// 收敛到 db-core 公共版（方言固定为 PostgreSQL）：公共版按 token 类别
+    /// 判型（整词而非前缀），并认 PG 的方言词法（dollar-quote、E'…' 转义）。
     fn detect_statement_type(sql: &str) -> StatementType {
-        let t = strip_leading_comments(sql).trim().to_uppercase();
-        if t.starts_with("SELECT") || t.starts_with("WITH") {
-            StatementType::Select
-        } else if t.starts_with("INSERT") {
-            StatementType::Insert
-        } else if t.starts_with("UPDATE") {
-            StatementType::Update
-        } else if t.starts_with("DELETE") {
-            StatementType::Delete
-        } else if t.starts_with("CREATE") || t.starts_with("ALTER") || t.starts_with("DROP") {
-            StatementType::Ddl
-        } else {
-            StatementType::Other
-        }
+        polydb_db_core::detect_statement_type(sql, Some(DatabaseKind::Postgres))
     }
 
     fn columns_of(rows: &[PgRow]) -> Vec<ResultColumn> {
@@ -259,26 +249,6 @@ impl PostgresConn {
         params: &[Value],
     ) -> CoreResult<QueryResult> {
         Self::execute_on(tx.0.as_mut(), sql, params).await
-    }
-}
-
-fn strip_leading_comments(sql: &str) -> &str {
-    let mut s = sql;
-    loop {
-        s = s.trim_start();
-        if let Some(rest) = s.strip_prefix("--") {
-            s = match rest.find('\n') {
-                Some(i) => &rest[i + 1..],
-                None => return "",
-            };
-        } else if let Some(rest) = s.strip_prefix("/*") {
-            s = match rest.find("*/") {
-                Some(i) => &rest[i + 2..],
-                None => return "",
-            };
-        } else {
-            return s;
-        }
     }
 }
 

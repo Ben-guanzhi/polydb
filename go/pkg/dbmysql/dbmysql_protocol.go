@@ -94,7 +94,7 @@ func (c *Conn) execInP(exec pdb.SQLTx, ctx context.Context, sql string, args ...
 
 func (c *Conn) executeInP(ctx context.Context, exec pdb.SQLTx, sql string, args []protocol.Value) (*protocol.QueryResult, error) {
 	start := timeNowMs()
-	stmtType := pdb.DetectStatementType(sql)
+	stmtType := pdb.DetectStatementType(sql, protocol.DatabaseKindMySQL)
 
 	if stmtType == protocol.StatementTypeSelect || stmtType == protocol.StatementTypeOther {
 		rows, err := exec.QueryContext(ctx, sql, pdb.ValueArgs(args)...)

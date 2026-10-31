@@ -125,41 +125,12 @@ impl OracleConn {
         Value::Null
     }
 
+    /// 语句类型判定（收敛到 db-core 公共版，方言固定为 Oracle）。
+    ///
+    /// 公共版按 token 类别判型（整词而非前缀），并认 Oracle 的 q'…' 备选引用
+    /// （正文里可以含引号，不认它会把后面的写语句吞掉）。
     fn detect_statement_type(sql: &str) -> StatementType {
-        let t = strip_leading_comments(sql).trim().to_uppercase();
-        if t.starts_with("SELECT") || t.starts_with("WITH") {
-            StatementType::Select
-        } else if t.starts_with("INSERT") {
-            StatementType::Insert
-        } else if t.starts_with("UPDATE") {
-            StatementType::Update
-        } else if t.starts_with("DELETE") {
-            StatementType::Delete
-        } else if t.starts_with("CREATE") || t.starts_with("ALTER") || t.starts_with("DROP") {
-            StatementType::Ddl
-        } else {
-            StatementType::Other
-        }
-    }
-}
-
-fn strip_leading_comments(sql: &str) -> &str {
-    let mut s = sql;
-    loop {
-        s = s.trim_start();
-        if let Some(rest) = s.strip_prefix("--") {
-            s = match rest.find('\n') {
-                Some(i) => &rest[i + 1..],
-                None => return "",
-            };
-        } else if let Some(rest) = s.strip_prefix("/*") {
-            s = match rest.find("*/") {
-                Some(i) => &rest[i + 2..],
-                None => return "",
-            };
-        } else {
-            return s;
-        }
+        polydb_db_core::detect_statement_type(sql, Some(DatabaseKind::Oracle))
     }
 }
 
