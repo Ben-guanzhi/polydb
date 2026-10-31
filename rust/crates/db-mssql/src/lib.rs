@@ -125,7 +125,7 @@ where
         Out::Done(Ok(v)) => Ok(v),
         Out::Done(Err(e)) => Err(driver_error(None, None, None, &format!("{what}: {e}"))),
         Out::TimedOut => Err(CoreError::Driver(format!(
-            "{what}: timeout after {IO_TIMEOUT:?}"
+            "{what}: timeout after {limit:?}"
         ))),
     }
 }

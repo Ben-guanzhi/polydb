@@ -351,7 +351,12 @@ impl AppCore {
                 }
             })
         } else {
-            self.connect(*id).map_err(|e| e.to_string())
+            // The sync arm carries the same publish guarantee: a panic here
+            // must not leave followers blocked on a never-set flight.
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.connect(*id))) {
+                Ok(r) => r.map_err(|e| e.to_string()),
+                Err(p) => Err(format!("connect panicked: {p:?}")),
+            }
         };
         // 发布裁决（String 承载错误；CoreError 不可 Clone）并把本连接的
         // 结果翻译回 CoreResult 返回。

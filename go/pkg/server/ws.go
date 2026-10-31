@@ -136,8 +136,11 @@ func (s *wsSession) runInbound() {
 		for {
 			select {
 			case <-t.C:
-				_ = s.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-				if err := s.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				// WriteControl is the only write documented as safe
+				// concurrently with the outbound writer — WriteMessage here
+				// raced runInbound's frame writes (gorilla panics on
+				// concurrent writers) and could corrupt the stream.
+				if err := s.conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(10*time.Second)); err != nil {
 					s.stop()
 					return
 				}
@@ -318,8 +321,14 @@ func (s *wsSession) runQuery(msg protocol.ClientMessage, connID string) {
 	ctx, cancelFn := context.WithCancel(context.Background())
 	defer cancelFn()
 	go func() {
+		cancel, ok := s.cancelChanFor(msg.QueryID)
+		if !ok {
+			// 快查询在 watcher 被调度前已完成并注销（nil 通道永不触发，
+			// 否则该 goroutine 要挂到会话关闭——高频短查询下持续累积）。
+			return
+		}
 		select {
-		case <-s.cancelChanFor(msg.QueryID):
+		case <-cancel:
 			cancelFn()
 		case <-s.shutdown:
 			cancelFn()
@@ -392,14 +401,14 @@ func (s *wsSession) runQuery(msg protocol.ClientMessage, connID string) {
 // may complete between registration and the watcher's read; a missing entry
 // yields nil, whose receive never fires — the watcher then just waits for
 // shutdown.
-func (s *wsSession) cancelChanFor(id string) <-chan struct{} {
+func (s *wsSession) cancelChanFor(id string) (<-chan struct{}, bool) {
 	s.inFlightMu.Lock()
 	defer s.inFlightMu.Unlock()
 	cancel, ok := s.inFlight[id]
 	if !ok {
-		return nil
+		return nil, false
 	}
-	return cancel
+	return cancel, true
 }
 
 func (s *wsSession) handleCancel(msg protocol.ClientMessage) {
