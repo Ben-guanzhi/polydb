@@ -226,6 +226,9 @@ impl BlobSink for StoreSink {
     }
 }
 
+/// 一个懒连接的并发归并flight：leader 发布裁决，follower 等待共享。
+type ConnectFlight = Arc<std::sync::OnceLock<Result<(), String>>>;
+
 pub struct AppCore {
     storage: Storage,
     /// 旁路大字段存储（spec/encoding.md §5.2）；目录跟随库文件所在目录。
@@ -239,6 +242,12 @@ pub struct AppCore {
     txs: Arc<Mutex<HashMap<String, TxEntry>>>,
     // 已打开连接的只读标志快照（behavior.md §12.3）；disconnect 时移除。
     read_only: RwLock<std::collections::HashSet<ConnectionId>>,
+    // 懒连接并发归并（Go 侧 connectSF 同款）：同一 id 的并发首次使用只拨
+    // 一次，其余等待并共享其裁决。没有归并时两个并发冷连各拨一次，落败
+    // 方的 Connection 与 SSH 隧道被 insert 覆盖丢弃——隧道监听端口泄漏。
+    // 裁决以 String 承载错误：CoreError 含 Box<dyn Error> 不可 Clone，
+    // follower 把串重构为 Driver 错误（并发冷连是罕见路径，保真损失可接受）。
+    connect_flights: Mutex<HashMap<ConnectionId, ConnectFlight>>,
 }
 
 impl AppCore {
@@ -271,6 +280,7 @@ impl AppCore {
             kr,
             connections: RwLock::new(HashMap::new()),
             user_disconnected: RwLock::new(std::collections::HashSet::new()),
+            connect_flights: Mutex::new(HashMap::new()),
             tunnels: RwLock::new(HashMap::new()),
             txs: Arc::new(Mutex::new(HashMap::new())),
             read_only: RwLock::new(std::collections::HashSet::new()),
@@ -309,14 +319,47 @@ impl AppCore {
         if self.connections.read().contains_key(id) {
             return Ok(());
         }
+        // 归并登记：返回 (flight, 是否为 leader)。leader 真正拨号并把裁决
+        // 发布到 OnceLock；follower 等待并共享同一结果。
+        let (flight, leader) = {
+            let mut flights = self.connect_flights.lock();
+            match flights.get(id) {
+                Some(f) => (Arc::clone(f), false),
+                None => {
+                    let f = Arc::new(std::sync::OnceLock::new());
+                    flights.insert(*id, Arc::clone(&f));
+                    (f, true)
+                }
+            }
+        };
+        if !leader {
+            // wait() 阻塞至 leader 发布裁决——leader 侧 catch_unwind 保证
+            // 恐慌也会发布（否则 follower 会永久挂在 wait 上）。
+            return match flight.wait() {
+                Ok(()) => Ok(()),
+                Err(msg) => Err(CoreError::Driver(msg.clone())),
+            };
+        }
         // 拨号本身是阻塞的（SSH 隧道、ODPI-C connect，冷路径可达数十秒）：
         // 在 async 上下文里用 block_in_place 让出 worker（execute 的
         // spawn_blocking 同理）；runtime 之外直呼，同步路径不受影响。
-        if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::task::block_in_place(|| self.connect(*id))
+        let outcome: Result<(), String> = if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::task::block_in_place(|| {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.connect(*id))) {
+                    Ok(r) => r.map_err(|e| e.to_string()),
+                    Err(p) => Err(format!("connect panicked: {p:?}")),
+                }
+            })
         } else {
-            self.connect(*id)
-        }
+            self.connect(*id).map_err(|e| e.to_string())
+        };
+        // 发布裁决（String 承载错误；CoreError 不可 Clone）并把本连接的
+        // 结果翻译回 CoreResult 返回。
+        flight
+            .set(outcome.clone())
+            .ok();
+        self.connect_flights.lock().remove(id);
+        outcome.map_err(CoreError::Driver)
     }
 
     pub fn create_connection(&self, req: &CreateConnectionRequest) -> CoreResult<ConnectionInfo> {
@@ -436,13 +479,34 @@ impl AppCore {
             .unwrap_or(false)
     }
 
+    /// 连接的方言（用于挑选词法剖面）。
+    ///
+    /// 已连接时取驱动上报的 kind（唯一权威）；未连接时取存储配置里的 kind——
+    /// 懒连接路径（ensure 之前）也要能判定方言，否则只读闸门会退化成
+    /// 「取各剖面并集」，把合法的只读查询也误拦。
+    fn connection_kind(&self, id: &ConnectionId) -> Option<DatabaseKind> {
+        if let Some(c) = self.connections.read().get(id) {
+            return Some(c.kind());
+        }
+        self.storage
+            .connections()
+            .get(*id)
+            .ok()
+            .flatten()
+            .map(|info| info.kind)
+    }
+
     /// 只读连接上的写语句拦截：对整条语句（含 WITH 子树与多语句）做变更关键字
     /// 扫描（db_core::mutates_data），命中返回 POLYDB_ERR_READ_ONLY。不复用
     /// detect_statement_type——数据修改 CTE（WITH…DELETE/UPDATE/INSERT）与
     /// TRUNCATE/GRANT/CALL 等会被判成 select/other 而漏拦。
+    ///
+    /// 方言由连接决定：词法差异（'#' 行注释、反斜杠转义、PG 的 dollar-quote、
+    /// Oracle 的 q'…'、MySQL 的 /*! … */）决定「字面量在哪结束」。认错方言会
+    /// 把后面的写语句当成字面量吞掉——那是 fail-open，直接丢数据。
     fn reject_write_on_read_only(&self, id: &ConnectionId, sql: &str) -> CoreResult<()> {
         use polydb_db_core::mutates_data;
-        if self.is_read_only(id) && mutates_data(sql) {
+        if self.is_read_only(id) && mutates_data(sql, self.connection_kind(id)) {
             return Err(polydb_protocol::PolyDBError::new(
                 polydb_protocol::error::codes::READ_ONLY,
                 "connection is read-only: write statements are rejected",

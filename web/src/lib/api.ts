@@ -78,6 +78,10 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   const isMsgpack = (res.headers.get('content-type') ?? '').includes(MSGPACK);
   let data: unknown = null;
   if (raw.byteLength > 0) {
+    // Deliberately NOT useBigInt64: it would turn every int64 into BigInt
+    // and break arithmetic/rendering across the UI. Values beyond 2^53
+    // (rows_affected, Redis integers of that magnitude) distort silently —
+    // recorded, needs a UI-wide pass, not a flag flip.
     data = isMsgpack ? decode(raw as ArrayBuffer) : res.status === 204 ? null : decodeJson(raw);
   }
   if (!res.ok) {
