@@ -12,6 +12,14 @@ use polydb_core::{
 use polydb_db_core::{DatabaseDriver, SqlDriver, TxMode};
 use polydb_core::error_classify::driver_error;
 
+// Quote an identifier for interpolation into a PRAGMA statement. PRAGMA has no
+// bound-parameter form for its identifier argument, so the name goes in as
+// text — and a name containing `"` must have its quotes doubled, or the
+// statement is a syntax error (e.g. a table literally named `my"table`).
+fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
 pub struct SqliteConn {
     conn: Arc<Mutex<RusqliteConnection>>,
     _path: String,
@@ -206,35 +214,65 @@ impl SqliteConn {
 
     /// 开启事务：BEGIN IMMEDIATE。SQLite 不支持任意隔离级别，ReadCommitted
     /// 与驱动默认行为一致（IMMEDIATE 事务），其他级别同样映射到 IMMEDIATE。
-    pub fn begin_tx_impl(&self) -> CoreResult<SqliteTxHandle> {
-        let conn = self.conn.lock();
-        conn.execute_batch("BEGIN IMMEDIATE")
-            .map_err(|e| CoreError::Driver(format!("begin tx failed: {e}")))?;
-        Ok(SqliteTxHandle)
+    // Transaction primitives: rusqlite is synchronous, so each one runs in
+    // spawn_blocking — the same discipline as execute. Running BEGIN/COMMIT
+    // on a runtime worker blocks it for the whole statement, starving the
+    // WS cancel/timeout timers (the non-tx execute already moved off-worker;
+    // these were the last holdouts).
+    pub async fn begin_tx_impl(&self) -> CoreResult<SqliteTxHandle> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let guard = conn.lock();
+            guard
+                .execute_batch("BEGIN IMMEDIATE")
+                .map_err(|e| CoreError::Driver(format!("begin tx failed: {e}")))?;
+            Ok(SqliteTxHandle)
+        })
+        .await
+        .map_err(|e| CoreError::Internal(format!("sqlite task join: {e}")))?
     }
 
-    pub fn execute_in_tx_impl(
+    pub async fn execute_in_tx_impl(
         &self,
         _tx: &mut SqliteTxHandle,
         sql: &str,
         params: &[Value],
     ) -> CoreResult<QueryResult> {
-        let conn = self.conn.lock();
-        Self::execute_on(&conn, sql, params)
+        let conn = Arc::clone(&self.conn);
+        let sql = sql.to_string();
+        let params = params.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let guard = conn.lock();
+            Self::execute_on(&guard, &sql, &params)
+        })
+        .await
+        .map_err(|e| CoreError::Internal(format!("sqlite task join: {e}")))?
     }
 
-    pub fn commit_impl(&self, _tx: &mut SqliteTxHandle) -> CoreResult<()> {
-        let conn = self.conn.lock();
-        conn.execute_batch("COMMIT")
-            .map_err(|e| CoreError::Driver(format!("commit failed: {e}")))?;
-        Ok(())
+    pub async fn commit_impl(&self, _tx: &mut SqliteTxHandle) -> CoreResult<()> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let guard = conn.lock();
+            guard
+                .execute_batch("COMMIT")
+                .map_err(|e| CoreError::Driver(format!("commit failed: {e}")))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| CoreError::Internal(format!("sqlite task join: {e}")))?
     }
 
-    pub fn rollback_impl(&self, _tx: &mut SqliteTxHandle) -> CoreResult<()> {
-        let conn = self.conn.lock();
-        conn.execute_batch("ROLLBACK")
-            .map_err(|e| CoreError::Driver(format!("rollback failed: {e}")))?;
-        Ok(())
+    pub async fn rollback_impl(&self, _tx: &mut SqliteTxHandle) -> CoreResult<()> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let guard = conn.lock();
+            guard
+                .execute_batch("ROLLBACK")
+                .map_err(|e| CoreError::Driver(format!("rollback failed: {e}")))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| CoreError::Internal(format!("sqlite task join: {e}")))?
     }
 }
 
@@ -245,10 +283,16 @@ impl DatabaseDriver for SqliteConn {
     }
 
     async fn ping(&self) -> CoreResult<()> {
-        let conn = self.conn.lock();
-        conn.execute_batch("SELECT 1")
-            .map_err(|e| CoreError::Driver(format!("ping failed: {e}")))?;
-        Ok(())
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let guard = conn.lock();
+            guard
+                .execute_batch("SELECT 1")
+                .map_err(|e| CoreError::Driver(format!("ping failed: {e}")))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| CoreError::Internal(format!("sqlite task join: {e}")))?
     }
 
     async fn close(&self) -> CoreResult<()> {
@@ -300,7 +344,7 @@ impl SqlDriver for SqliteConn {
     }
 
     async fn begin_tx(&self, _mode: TxMode) -> CoreResult<Box<dyn Any + Send>> {
-        Ok(Box::new(self.begin_tx_impl()?))
+        Ok(Box::new(self.begin_tx_impl().await?))
     }
 
     async fn execute_in_tx(
@@ -312,21 +356,21 @@ impl SqlDriver for SqliteConn {
         let h = tx
             .downcast_mut::<SqliteTxHandle>()
             .ok_or_else(|| CoreError::Internal("tx handle downcast failed".into()))?;
-        self.execute_in_tx_impl(h, sql, params)
+        self.execute_in_tx_impl(h, sql, params).await
     }
 
     async fn commit(&self, tx: Box<dyn Any + Send>) -> CoreResult<()> {
         let mut h = tx
             .downcast::<SqliteTxHandle>()
             .map_err(|_| CoreError::Internal("tx handle downcast failed".into()))?;
-        self.commit_impl(&mut h)
+        self.commit_impl(&mut h).await
     }
 
     async fn rollback(&self, tx: Box<dyn Any + Send>) -> CoreResult<()> {
         let mut h = tx
             .downcast::<SqliteTxHandle>()
             .map_err(|_| CoreError::Internal("tx handle downcast failed".into()))?;
-        self.rollback_impl(&mut h)
+        self.rollback_impl(&mut h).await
     }
 
     async fn execute(&self, sql: &str, params: &[Value]) -> CoreResult<QueryResult> {
@@ -356,127 +400,154 @@ impl SqlDriver for SqliteConn {
     }
 
     async fn list_tables(&self, _schema: &str) -> CoreResult<Vec<TableInfo>> {
-        let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name"
-        ).map_err(|e| CoreError::Driver(format!("list_tables prepare: {e}")))?;
+        // Metadata introspection is synchronous rusqlite work: on a runtime
+        // worker it blocks the thread (and the WS cancel/timeout timers that
+        // depend on it). Same spawn_blocking discipline as execute.
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let guard = conn.lock();
+            let mut stmt = guard.prepare(
+                "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name"
+            ).map_err(|e| CoreError::Driver(format!("list_tables prepare: {e}")))?;
 
-        let tables = stmt
-            .query_map([], |row| {
-                let name: String = row.get(0)?;
-                let type_str: String = row.get(1)?;
-                Ok((name, type_str))
-            })
-            .map_err(|e| CoreError::Driver(format!("list_tables query: {e}")))?;
+            let tables = stmt
+                .query_map([], |row| {
+                    let name: String = row.get(0)?;
+                    let type_str: String = row.get(1)?;
+                    Ok((name, type_str))
+                })
+                .map_err(|e| CoreError::Driver(format!("list_tables query: {e}")))?;
 
-        let mut result = Vec::new();
-        for t in tables {
-            let (name, type_str) = t.map_err(|e| CoreError::Driver(format!("row: {e}")))?;
-            result.push(TableInfo {
-                name,
-                schema: "main".to_string(),
-                table_type: if type_str == "view" {
-                    TableType::View
-                } else {
-                    TableType::Table
-                },
-                row_count: None,
-                comment: None,
-            });
-        }
-        Ok(result)
+            let mut result = Vec::new();
+            for t in tables {
+                let (name, type_str) = t.map_err(|e| CoreError::Driver(format!("row: {e}")))?;
+                result.push(TableInfo {
+                    name,
+                    schema: "main".to_string(),
+                    table_type: if type_str == "view" {
+                        TableType::View
+                    } else {
+                        TableType::Table
+                    },
+                    row_count: None,
+                    comment: None,
+                });
+            }
+            Ok(result)
+        })
+        .await
+        .map_err(|e| CoreError::Internal(format!("sqlite task join: {e}")))?
     }
 
     async fn list_columns(&self, _schema: &str, table: &str) -> CoreResult<Vec<ColumnInfo>> {
-        let conn = self.conn.lock();
-        let mut stmt = conn
-            .prepare(&format!("PRAGMA table_info(\"{table}\")"))
-            .map_err(|e| CoreError::Driver(format!("list_columns prepare: {e}")))?;
+        // Metadata introspection is synchronous rusqlite work: on a runtime
+        // worker it blocks the thread (and the WS cancel/timeout timers that
+        // depend on it). Same spawn_blocking discipline as execute.
+        let conn = Arc::clone(&self.conn);
+        let table = table.to_string();
+        tokio::task::spawn_blocking(move || {
+            let guard = conn.lock();
+            let mut stmt = guard
+                .prepare(&format!("PRAGMA table_info({})", quote_ident(&table)))
+                .map_err(|e| CoreError::Driver(format!("list_columns prepare: {e}")))?;
 
-        let cols = stmt
-            .query_map([], |row| {
-                let cid: i32 = row.get(0)?;
-                let name: String = row.get(1)?;
-                let data_type: String = row.get(2)?;
-                let notnull: bool = row.get(3)?;
-                let default: Option<String> = row.get(4)?;
-                let pk: bool = row.get(5)?;
-                Ok((cid, name, data_type, notnull, default, pk))
-            })
-            .map_err(|e| CoreError::Driver(format!("list_columns query: {e}")))?;
+            let cols = stmt
+                .query_map([], |row| {
+                    let cid: i32 = row.get(0)?;
+                    let name: String = row.get(1)?;
+                    let data_type: String = row.get(2)?;
+                    let notnull: bool = row.get(3)?;
+                    let default: Option<String> = row.get(4)?;
+                    let pk: bool = row.get(5)?;
+                    Ok((cid, name, data_type, notnull, default, pk))
+                })
+                .map_err(|e| CoreError::Driver(format!("list_columns query: {e}")))?;
 
-        let mut result = Vec::new();
-        for c in cols {
-            let (cid, name, data_type, notnull, default, pk) =
-                c.map_err(|e| CoreError::Driver(format!("row: {e}")))?;
-            result.push(ColumnInfo {
-                name,
-                data_type: data_type.clone(),
-                generic_type: None,
-                nullable: !notnull,
-                default_value: default,
-                max_length: None,
-                precision: None,
-                scale: None,
-                is_primary_key: pk,
-                is_auto_increment: false,
-                comment: None,
-                ordinal_position: cid + 1,
-            });
-        }
-        Ok(result)
+            let mut result = Vec::new();
+            for c in cols {
+                let (cid, name, data_type, notnull, default, pk) =
+                    c.map_err(|e| CoreError::Driver(format!("row: {e}")))?;
+                result.push(ColumnInfo {
+                    name,
+                    data_type: data_type.clone(),
+                    generic_type: None,
+                    nullable: !notnull,
+                    default_value: default,
+                    max_length: None,
+                    precision: None,
+                    scale: None,
+                    is_primary_key: pk,
+                    is_auto_increment: false,
+                    comment: None,
+                    ordinal_position: cid + 1,
+                });
+            }
+            Ok(result)
+        })
+        .await
+        .map_err(|e| CoreError::Internal(format!("sqlite task join: {e}")))?
     }
 
     async fn list_indexes(&self, _schema: &str, table: &str) -> CoreResult<Vec<IndexInfo>> {
-        let conn = self.conn.lock();
-        let mut stmt = conn
-            .prepare(&format!("PRAGMA index_list(\"{table}\")"))
-            .map_err(|e| CoreError::Driver(format!("list_indexes prepare: {e}")))?;
+        // Metadata introspection is synchronous rusqlite work: on a runtime
+        // worker it blocks the thread (and the WS cancel/timeout timers that
+        // depend on it). Same spawn_blocking discipline as execute.
+        let conn = Arc::clone(&self.conn);
+        let table = table.to_string();
+        tokio::task::spawn_blocking(move || {
+            let guard = conn.lock();
+            let mut stmt = guard
+                .prepare(&format!("PRAGMA index_list({})", quote_ident(&table)))
+                .map_err(|e| CoreError::Driver(format!("list_indexes prepare: {e}")))?;
 
-        let indexes = stmt
-            .query_map([], |row| {
-                let name: String = row.get(1)?;
-                let unique: bool = row.get(2)?;
-                // origin：'pk' 主键隐式索引 / 'u' UNIQUE 约束 / 'c' CREATE INDEX。
-                let origin: Option<String> = row.get(3).ok();
-                Ok((name, unique, origin))
-            })
-            .map_err(|e| CoreError::Driver(format!("list_indexes query: {e}")))?;
-
-        let mut result = Vec::new();
-        for idx in indexes {
-            let (name, unique, origin) = idx.map_err(|e| CoreError::Driver(format!("row: {e}")))?;
-            let mut info_stmt = conn
-                .prepare(&format!("PRAGMA index_info(\"{name}\")"))
-                .map_err(|e| CoreError::Driver(format!("index_info prepare: {e}")))?;
-            let columns = info_stmt
+            let indexes = stmt
                 .query_map([], |row| {
-                    let col_name: String = row.get(2)?;
-                    Ok(col_name)
+                    let name: String = row.get(1)?;
+                    let unique: bool = row.get(2)?;
+                    // origin：'pk' 主键隐式索引 / 'u' UNIQUE 约束 / 'c' CREATE INDEX。
+                    let origin: Option<String> = row.get(3).ok();
+                    Ok((name, unique, origin))
                 })
-                .map_err(|e| CoreError::Driver(format!("index_info query: {e}")))?;
+                .map_err(|e| CoreError::Driver(format!("list_indexes query: {e}")))?;
 
-            let mut idx_cols = Vec::new();
-            for (i, col) in columns.enumerate() {
-                let col_name = col.map_err(|e| CoreError::Driver(format!("row: {e}")))?;
-                idx_cols.push(polydb_core::IndexColumn {
-                    name: col_name,
-                    position: (i + 1) as i32,
-                    order: None,
-                    prefix_length: None,
+            let mut result = Vec::new();
+            for idx in indexes {
+                let (name, unique, origin) =
+                    idx.map_err(|e| CoreError::Driver(format!("row: {e}")))?;
+                let mut info_stmt = guard
+                    .prepare(&format!("PRAGMA index_info({})", quote_ident(&name)))
+                    .map_err(|e| CoreError::Driver(format!("index_info prepare: {e}")))?;
+                let columns = info_stmt
+                    .query_map([], |row| {
+                        let col_name: String = row.get(2)?;
+                        Ok(col_name)
+                    })
+                    .map_err(|e| CoreError::Driver(format!("index_info query: {e}")))?;
+
+                let mut idx_cols = Vec::new();
+                for (i, col) in columns.enumerate() {
+                    let col_name = col.map_err(|e| CoreError::Driver(format!("row: {e}")))?;
+                    idx_cols.push(polydb_core::IndexColumn {
+                        name: col_name,
+                        position: (i + 1) as i32,
+                        order: None,
+                        prefix_length: None,
+                    });
+                }
+
+                result.push(IndexInfo {
+                    name,
+                    unique,
+                    primary: origin.as_deref() == Some("pk"),
+                    index_type: None,
+                    columns: idx_cols,
+                    comment: None,
                 });
             }
-
-            result.push(IndexInfo {
-                name,
-                unique,
-                primary: origin.as_deref() == Some("pk"),
-                index_type: None,
-                columns: idx_cols,
-                comment: None,
-            });
-        }
-        Ok(result)
+            Ok(result)
+        })
+        .await
+        .map_err(|e| CoreError::Internal(format!("sqlite task join: {e}")))?
     }
 
     async fn list_foreign_keys(
@@ -484,71 +555,86 @@ impl SqlDriver for SqliteConn {
         _schema: &str,
         table: &str,
     ) -> CoreResult<Vec<ForeignKeyInfo>> {
-        let conn = self.conn.lock();
-        let mut stmt = conn
-            .prepare(&format!("PRAGMA foreign_key_list(\"{table}\")"))
-            .map_err(|e| CoreError::Driver(format!("fk prepare: {e}")))?;
+        // Metadata introspection is synchronous rusqlite work: on a runtime
+        // worker it blocks the thread (and the WS cancel/timeout timers that
+        // depend on it). Same spawn_blocking discipline as execute.
+        let conn = Arc::clone(&self.conn);
+        let table = table.to_string();
+        tokio::task::spawn_blocking(move || {
+            let guard = conn.lock();
+            let mut stmt = guard
+                .prepare(&format!("PRAGMA foreign_key_list({})", quote_ident(&table)))
+                .map_err(|e| CoreError::Driver(format!("fk prepare: {e}")))?;
 
-        let fks = stmt
-            .query_map([], |row| {
-                let id: i32 = row.get(0)?;
-                let seq: i32 = row.get(1)?;
-                let ref_table: String = row.get(2)?;
-                let from: String = row.get(3)?;
-                let to: String = row.get(4)?;
-                let on_update: String = row.get(5)?;
-                let on_delete: String = row.get(6)?;
-                Ok((id, seq, ref_table, from, to, on_update, on_delete))
-            })
-            .map_err(|e| CoreError::Driver(format!("fk query: {e}")))?;
+            let fks = stmt
+                .query_map([], |row| {
+                    let id: i32 = row.get(0)?;
+                    let seq: i32 = row.get(1)?;
+                    let ref_table: String = row.get(2)?;
+                    let from: String = row.get(3)?;
+                    let to: String = row.get(4)?;
+                    let on_update: String = row.get(5)?;
+                    let on_delete: String = row.get(6)?;
+                    Ok((id, seq, ref_table, from, to, on_update, on_delete))
+                })
+                .map_err(|e| CoreError::Driver(format!("fk query: {e}")))?;
 
-        use std::collections::BTreeMap;
-        // PRAGMA 的 id 是外键约束在表定义中的序号、seq 是多列内的次序，两者都必须按数值排。
-        // 原先用 HashMap 收集，同一次 DDL 的两次采集可能拿到不同的 fk_i 命名，
-        // 于是比对凭空产出一对 drop/add 外键（E2.0 真快照复核抓到）。
-        let mut agg: BTreeMap<i32, (String, Vec<(i32, String, String)>, String, String)> =
-            BTreeMap::new();
-        for fk in fks {
-            let (id, seq, ref_table, from, to, on_update, on_delete) =
-                fk.map_err(|e| CoreError::Driver(format!("row: {e}")))?;
-            let entry = agg
-                .entry(id)
-                .or_insert_with(|| (ref_table, Vec::new(), on_update, on_delete));
-            entry.1.push((seq, from, to));
-        }
+            use std::collections::BTreeMap;
+            // PRAGMA 的 id 是外键约束在表定义中的序号、seq 是多列内的次序，两者都必须按数值排。
+            // 原先用 HashMap 收集，同一次 DDL 的两次采集可能拿到不同的 fk_i 命名，
+            // 于是比对凭空产出一对 drop/add 外键（E2.0 真快照复核抓到）。
+            let mut agg: BTreeMap<i32, (String, Vec<(i32, String, String)>, String, String)> =
+                BTreeMap::new();
+            for fk in fks {
+                let (id, seq, ref_table, from, to, on_update, on_delete) =
+                    fk.map_err(|e| CoreError::Driver(format!("row: {e}")))?;
+                let entry = agg
+                    .entry(id)
+                    .or_insert_with(|| (ref_table, Vec::new(), on_update, on_delete));
+                entry.1.push((seq, from, to));
+            }
 
-        let result = agg
-            .into_iter()
-            .map(|(_id, (ref_table, mut pairs, on_update, on_delete))| {
-                pairs.sort_by_key(|(seq, _, _)| *seq);
-                ForeignKeyInfo {
-                    // SQLite 的外键约束本来就没有名字（PRAGMA foreign_key_list 也不返回名字）。
-                    // 填任何合成名都会让「新增一条外键」把其余外键的编号整体错位，
-                    // 于是凭空产出一堆 drop/add 对。留空，由 diff 按内容配对。
-                    name: String::new(),
-                    columns: pairs.iter().map(|(_, from, _)| from.clone()).collect(),
-                    referenced_schema: "main".to_string(),
-                    referenced_table: ref_table,
-                    referenced_columns: pairs.iter().map(|(_, _, to)| to.clone()).collect(),
-                    on_update: fk_action(&on_update),
-                    on_delete: fk_action(&on_delete),
-                }
-            })
-            .collect();
+            let result = agg
+                .into_iter()
+                .map(|(_id, (ref_table, mut pairs, on_update, on_delete))| {
+                    pairs.sort_by_key(|(seq, _, _)| *seq);
+                    ForeignKeyInfo {
+                        // SQLite 的外键约束本来就没有名字（PRAGMA foreign_key_list 也不返回名字）。
+                        // 填任何合成名都会让「新增一条外键」把其余外键的编号整体错位，
+                        // 于是凭空产出一堆 drop/add 对。留空，由 diff 按内容配对。
+                        name: String::new(),
+                        columns: pairs.iter().map(|(_, from, _)| from.clone()).collect(),
+                        referenced_schema: "main".to_string(),
+                        referenced_table: ref_table,
+                        referenced_columns: pairs.iter().map(|(_, _, to)| to.clone()).collect(),
+                        on_update: fk_action(&on_update),
+                        on_delete: fk_action(&on_delete),
+                    }
+                })
+                .collect();
 
-        Ok(result)
+            Ok(result)
+        })
+        .await
+        .map_err(|e| CoreError::Internal(format!("sqlite task join: {e}")))?
     }
 
     async fn create_table_sql(&self, _schema: &str, table: &str) -> CoreResult<String> {
-        let conn = self.conn.lock();
-        let sql: String = conn
-            .query_row(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
-                [table],
-                |row| row.get(0),
-            )
-            .map_err(|e| CoreError::Driver(format!("create_table_sql: {e}")))?;
-        Ok(sql)
+        let conn = Arc::clone(&self.conn);
+        let table = table.to_string();
+        tokio::task::spawn_blocking(move || {
+            let guard = conn.lock();
+            let sql: String = guard
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
+                    [&table],
+                    |row| row.get(0),
+                )
+                .map_err(|e| CoreError::Driver(format!("create_table_sql: {e}")))?;
+            Ok(sql)
+        })
+        .await
+        .map_err(|e| CoreError::Internal(format!("sqlite task join: {e}")))?
     }
 }
 
@@ -562,6 +648,35 @@ fn db_err<E: std::fmt::Display>(e: &E, what: &str) -> CoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn quote_ident_escapes_embedded_quotes() {
+        // A table literally named `my"table` must come back as a valid
+        // quoted identifier: the inner quote is doubled, or the PRAGMA
+        // statement that interpolates it is a syntax error.
+        assert_eq!(quote_ident("plain"), "\"plain\"");
+        assert_eq!(quote_ident("my\"table"), "\"my\"\"table\"");
+        assert_eq!(quote_ident("a\"b\"c"), "\"a\"\"b\"\"c\"");
+    }
+
+    #[test]
+    fn pragma_metadata_survives_quote_in_name() {
+        // End to end: a table with a quote in its name must still be
+        // introspectable through the PRAGMA paths that interpolate it.
+        let conn = SqliteConn::open(":memory:").unwrap();
+        let sql_driver: &dyn SqlDriver = conn.as_sql().unwrap();
+        polydb_rt::block_on(
+            sql_driver.execute(
+                "CREATE TABLE \"my\"\"table\" (id INTEGER PRIMARY KEY, x INTEGER)",
+                &[],
+            ),
+        )
+        .unwrap();
+        let cols = polydb_rt::block_on(sql_driver.list_columns("main", "my\"table")).unwrap();
+        assert_eq!(cols.len(), 2);
+        assert_eq!(cols[0].name, "id");
+        assert_eq!(cols[1].name, "x");
+    }
+
     use polydb_core::{FilterCondition, FilterOperator as Op, TableRowsRequest};
 
     fn cond(column: &str, op: Op, value: Value) -> FilterCondition {

@@ -569,8 +569,13 @@ impl SqlDriver for MySqlConn {
     }
 
     async fn create_table_sql(&self, schema: &str, table: &str) -> CoreResult<String> {
-        let row = sqlx::query("SHOW CREATE TABLE ??")
-            .bind(format!("{schema}.{table}"))
+        // Two identifier binds, not one `schema.table` string: sqlx's `??`
+        // escapes each bound value as a single SQL identifier, so binding
+        // "mydb.mytable" produced `` `mydb.mytable` `` — one identifier named
+        // literally "mydb.mytable", not a qualified schema.table reference.
+        let row = sqlx::query("SHOW CREATE TABLE ??.??")
+            .bind(schema)
+            .bind(table)
             .fetch_one(&self.pool)
             .await
             .map_err(|e| CoreError::Driver(format!("create_table_sql: {e}")))?;

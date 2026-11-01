@@ -191,16 +191,25 @@ impl OracleConn {
         sql: &str,
         params: &[Value],
     ) -> CoreResult<QueryResult> {
-        let start = std::time::Instant::now();
-        let stmt_type = Self::detect_statement_type(sql);
-        let boxes = Self::to_sql_params(params);
-        let refs = Self::param_refs(&boxes);
+        // Same spawn_blocking discipline as execute: the blocking ODPI-C call
+        // must not run on a runtime worker, or the WS cancel/timeout arms
+        // never get polled. OracleTxHandle is a unit struct — the `&mut`
+        // is never read — so the connection Arc is what moves into the
+        // closure, exactly as in the non-tx path.
+        let conn = Arc::clone(&self.conn);
+        let sql = sql.to_string();
+        let params = params.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let start = std::time::Instant::now();
+            let stmt_type = Self::detect_statement_type(&sql);
+            let boxes = Self::to_sql_params(&params);
+            let refs = Self::param_refs(&boxes);
 
-        let conn = self.conn.lock();
-        let mut stmt = conn
-            .statement(sql)
-            .build()
-            .map_err(|e| db_err(&e, "prepare failed"))?;
+            let guard = conn.lock();
+            let mut stmt = guard
+                .statement(&sql)
+                .build()
+                .map_err(|e| db_err(&e, "prepare failed"))?;
 
         if stmt_type == StatementType::Select || stmt_type == StatementType::Other {
             let mut rows = stmt
@@ -252,6 +261,9 @@ impl OracleConn {
                 statement_type: Some(stmt_type),
             })
         }
+        })
+        .await
+        .map_err(|e| CoreError::Internal(format!("oracle task join: {e}")))?
     }
 }
 
