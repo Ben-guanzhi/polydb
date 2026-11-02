@@ -31,8 +31,10 @@ func hungServer(t *testing.T, hold time.Duration) *httptest.Server {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
-	t.Cleanup(func() { close(release) })
+	// Cleanup is LIFO: close(release) must run BEFORE srv.Close, or Close
+	// waits out the full hold for the still-running handler.
 	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(release) })
 	return srv
 }
 
@@ -43,12 +45,14 @@ func TestRemoteBackstopBoundsHungServer(t *testing.T) {
 
 	start := time.Now()
 	_, err := r.ExecuteQuery(context.Background(), "", "c1", "SELECT 1")
+	t.Logf("ExecuteQuery returned after %v: %v", time.Since(start), err)
 	if err == nil {
 		t.Fatal("hung server must yield an error under the backstop")
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("want context.DeadlineExceeded, got %v", err)
 	}
+	t.Logf("assertions done after %v", time.Since(start))
 	if d := time.Since(start); d > 2*time.Second {
 		t.Fatalf("backstop did not fire in time: %v", d)
 	}
