@@ -18,18 +18,20 @@ import (
 
 func hungServer(t *testing.T, hold time.Duration) *httptest.Server {
 	t.Helper()
+	// The hold is released via a test signal, NOT r.Context().Done(): net/http
+	// only cancels a handler's context on client disconnect while it is
+	// background-reading the socket, and a handler that never reads the body
+	// (our black-hole server) may not notice the abort at all. Relying on
+	// context detection made the test wall time equal the hold time.
+	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
+		case <-release:
 		case <-time.After(hold):
-		case <-r.Context().Done():
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
-	// Force-close in-flight connections before Close: the handler holds for
-	// `hold`, and Server.Close waits for outstanding requests — without this
-	// the test wall time equals the hold time even though the assertion
-	// already returned at the 50ms backstop.
-	t.Cleanup(srv.CloseClientConnections)
+	t.Cleanup(func() { close(release) })
 	t.Cleanup(srv.Close)
 	return srv
 }
