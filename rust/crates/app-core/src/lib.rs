@@ -334,30 +334,47 @@ impl AppCore {
         };
         if !leader {
             // wait() 阻塞至 leader 发布裁决——leader 侧 catch_unwind 保证
-            // 恐慌也会发布（否则 follower 会永久挂在 wait 上）。
-            return match flight.wait() {
+            // 恐慌也会发布（否则 follower 会永久挂在 wait 上）。等待本身也
+            // 覆盖整个冷拨号（SSH 隧道、ODPI-C connect，数十秒）：多线程
+            // flavor 上 block_in_place 让出 worker——否则 N 个并发首触钉死
+            // N-1 个 worker，server 全域停摆。current-thread flavor 没有
+            // worker 池可让（block_in_place 会 panic——server 测试套件当场
+            // 抓住），直呼 park 是该模型下的唯一形态；runtime 之外同此。
+            let outcome: Result<(), String> = match tokio::runtime::Handle::try_current() {
+                Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                    tokio::task::block_in_place(|| flight.wait().clone())
+                }
+                _ => flight.wait().clone(),
+            };
+            return match outcome {
                 Ok(()) => Ok(()),
                 Err(msg) => Err(CoreError::Driver(msg.clone())),
             };
         }
-        // 拨号本身是阻塞的（SSH 隧道、ODPI-C connect，冷路径可达数十秒）：
-        // 在 async 上下文里用 block_in_place 让出 worker（execute 的
-        // spawn_blocking 同理）；runtime 之外直呼，同步路径不受影响。
-        let outcome: Result<(), String> = if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::task::block_in_place(|| {
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.connect(*id))) {
-                    Ok(r) => r.map_err(|e| e.to_string()),
-                    Err(p) => Err(format!("connect panicked: {p:?}")),
+            // 拨号本身是阻塞的（SSH 隧道、ODPI-C connect，冷路径可达数十秒）：
+            // 多线程 flavor 上用 block_in_place 让出 worker（execute 的
+            // spawn_blocking 同理）；current-thread flavor 没有 worker 池
+            // 可让（block_in_place 会 panic），直呼是唯一合法形态；runtime
+            // 之外直呼，同步路径不受影响。
+            let outcome: Result<(), String> = match tokio::runtime::Handle::try_current() {
+                Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                    tokio::task::block_in_place(|| {
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.connect(*id))) {
+                            Ok(r) => r.map_err(|e| e.to_string()),
+                            Err(p) => Err(format!("connect panicked: {p:?}")),
+                        }
+                    })
                 }
-            })
-        } else {
-            // The sync arm carries the same publish guarantee: a panic here
-            // must not leave followers blocked on a never-set flight.
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.connect(*id))) {
-                Ok(r) => r.map_err(|e| e.to_string()),
-                Err(p) => Err(format!("connect panicked: {p:?}")),
-            }
-        };
+                _ => {
+                    // The sync/current-thread arm carries the same publish
+                    // guarantee: a panic here must not leave followers blocked
+                    // on a never-set flight.
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.connect(*id))) {
+                        Ok(r) => r.map_err(|e| e.to_string()),
+                        Err(p) => Err(format!("connect panicked: {p:?}")),
+                    }
+                }
+            };
         // 发布裁决（String 承载错误；CoreError 不可 Clone）并把本连接的
         // 结果翻译回 CoreResult 返回。
         flight

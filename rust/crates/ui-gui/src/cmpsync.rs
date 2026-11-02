@@ -540,10 +540,14 @@ impl CompareState {
 
     /// ③ 步的状态行：已勾计数（含破坏性）+ 缺口提示。
     pub(crate) fn review_status(&self) -> String {
+        // 选择集是一次构建多次判定的典型：先建 HashSet（与下拉缺口检查的
+        // sel_set 同款，见上方 build 模式的注释），成员判定 O(1)，不再对每个
+        // 破坏性条目 Θ(k) 线性扫。
+        let sel_set: std::collections::HashSet<&String> = self.sel.iter().collect();
         let destruct = self
             .entries
             .iter()
-            .filter(|e| e.destructive && self.sel.iter().any(|s| s == &e.id))
+            .filter(|e| e.destructive && sel_set.contains(&e.id))
             .count();
         let mut s = format!(
             "共 {} 条变更 · 已勾 {} 条（其中破坏性 {}）",

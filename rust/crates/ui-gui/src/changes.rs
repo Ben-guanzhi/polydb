@@ -91,9 +91,21 @@ pub(crate) struct ChangeQueue {
     seq: i64,
 }
 
+/// undo 深度上限（vim 侧 MAX_UNDO=100 同款）：每次格编辑都入栈，长会话
+/// 无上界会滞留整个会话的编辑史；超出即淘汰最旧一条。
+const MAX_UNDO_OPS: usize = 100;
+
 impl ChangeQueue {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// undo 压栈（带上限淘汰，最旧先出）。
+    fn push_undo(&mut self, op: UndoOp) {
+        self.undo_stack.push(op);
+        if self.undo_stack.len() > MAX_UNDO_OPS {
+            self.undo_stack.remove(0);
+        }
     }
 
     pub(crate) fn size(&self) -> usize {
@@ -151,7 +163,7 @@ impl ChangeQueue {
             let mut nr = entry.new_row.clone().unwrap_or_default();
             row_set(&mut nr, column, new_value);
             entry.new_row = Some(nr);
-            self.undo_stack.push(UndoOp::Row {
+            self.push_undo(UndoOp::Row {
                 key: key_of(row_id, RowChangeType::Insert),
             });
             return;
@@ -174,32 +186,43 @@ impl ChangeQueue {
                 self.changes.len() - 1
             }
         };
-        let change = &mut self.changes[idx];
-        let orig = row_get(&change.original_row, column);
-        // 新值回到原值 → 移除该格（塌缩）；否则合并/追加。
-        if values_equal(&new_value, &orig) {
-            change.cell_changes.retain(|c| c.column != column);
-            self.undo_stack.push(UndoOp::Cell {
-                key: key.clone(),
-                column: column.to_string(),
-            });
-            if change.cell_changes.is_empty() {
-                self.remove_by_key(&key);
+        // undo 数据先收集（列名 + 是否塌缩），下面会按需重借 self：
+        // push_undo 要 &mut self，与 change 的借用不交叠。
+        let orig = {
+            let change = &mut self.changes[idx];
+            let orig = row_get(&change.original_row, column);
+            // 新值回到原值 → 移除该格（塌缩）；否则合并/追加。
+            if values_equal(&new_value, &orig) {
+                change.cell_changes.retain(|c| c.column != column);
+                if change.cell_changes.is_empty() {
+                    self.push_undo(UndoOp::Cell {
+                        key: key.clone(),
+                        column: column.to_string(),
+                    });
+                    self.remove_by_key(&key);
+                } else {
+                    self.push_undo(UndoOp::Cell {
+                        key: key.clone(),
+                        column: column.to_string(),
+                    });
+                }
+                return;
             }
-            return;
-        }
-        match change.cell_changes.iter_mut().find(|c| c.column == column) {
-            Some(prev) => prev.new_value = new_value,
-            None => change.cell_changes.push(CellChange {
-                column: column.to_string(),
-                old_value,
-                new_value,
-            }),
-        }
-        self.undo_stack.push(UndoOp::Cell {
+            match change.cell_changes.iter_mut().find(|c| c.column == column) {
+                Some(prev) => prev.new_value = new_value,
+                None => change.cell_changes.push(CellChange {
+                    column: column.to_string(),
+                    old_value,
+                    new_value,
+                }),
+            }
+            orig
+        };
+        self.push_undo(UndoOp::Cell {
             key: key.clone(),
             column: column.to_string(),
         });
+        let _ = orig;
     }
 
     #[allow(dead_code)]
@@ -214,7 +237,7 @@ impl ChangeQueue {
             new_row: Some(row),
             sequence: seq,
         });
-        self.undo_stack.push(UndoOp::Row {
+        self.push_undo(UndoOp::Row {
             key: key_of(&row_id, RowChangeType::Insert),
         });
     }
@@ -231,7 +254,7 @@ impl ChangeQueue {
             new_row: None,
             sequence: seq,
         });
-        self.undo_stack.push(UndoOp::Row {
+        self.push_undo(UndoOp::Row {
             key: key_of(&row_id, RowChangeType::Delete),
         });
     }

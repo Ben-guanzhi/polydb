@@ -472,7 +472,10 @@ fn assemble_tree(ids: &[i64], parents: &[i64], nodes: Vec<Node>) -> Vec<Node> {
         }
     }
     let mut out = Vec::with_capacity(roots.len());
-    let mut emitted: Vec<usize> = Vec::with_capacity(nodes.len());
+    // emitted 用定长标记数组而非 Vec<usize>：补环循环对每个节点 contains
+    // 一次，Vec 版是 O(n²)——计划树节点数不大，但这是白付的平方。
+    let mut emitted: Vec<bool> = vec![false; nodes.len()];
+    let mut emitted_ops = EmittedOps(&mut emitted);
     for r in &roots {
         out.push(build_node(
             *r,
@@ -480,23 +483,36 @@ fn assemble_tree(ids: &[i64], parents: &[i64], nodes: Vec<Node>) -> Vec<Node> {
             &kids,
             0,
             &mut Vec::new(),
-            &mut emitted,
+            &mut emitted_ops,
         ));
     }
     // 环（parent 互指）中的节点没有任何根可达：补为顶层，避免计划行凭空消失。
     for pos in 0..nodes.len() {
-        if !emitted.contains(&pos) {
+        if !emitted_ops.contains(pos) {
             out.push(build_node(
                 pos,
                 &nodes,
                 &kids,
                 0,
                 &mut Vec::new(),
-                &mut emitted,
+                &mut emitted_ops,
             ));
         }
     }
     out
+}
+
+/// emitted 的标记面：定长 bool 数组的薄包装，暴露 mark/contains 两个 O(1)
+/// 操作（原 Vec<usize> 的 contains 是 O(n)——补环循环逐节点查一次成平方）。
+struct EmittedOps<'a>(&'a mut [bool]);
+
+impl EmittedOps<'_> {
+    fn mark(&mut self, pos: usize) {
+        self.0[pos] = true;
+    }
+    fn contains(&self, pos: usize) -> bool {
+        self.0[pos]
+    }
 }
 
 fn build_node(
@@ -505,10 +521,10 @@ fn build_node(
     kids: &[Vec<usize>],
     depth: usize,
     on_path: &mut Vec<usize>,
-    emitted: &mut Vec<usize>,
+    emitted: &mut EmittedOps<'_>,
 ) -> Node {
     let mut n = nodes[pos].clone();
-    emitted.push(pos);
+    emitted.mark(pos);
     if depth >= MAX_DEPTH || on_path.contains(&pos) {
         n.detail.push_str(" …");
         return n;

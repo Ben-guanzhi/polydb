@@ -58,7 +58,7 @@ pub fn split_statements(sql: &str, kind: Option<DatabaseKind>) -> Vec<&str> {
 }
 
 /// 按给定词法剖面把 SQL 切成语句（跳过空片段）。
-fn split_under<'a>(sql: &'a str, p: LexProfile) -> Vec<&'a str> {
+fn split_under(sql: &str, p: LexProfile) -> Vec<&str> {
     let mut out: Vec<&str> = Vec::new();
     let mut start = 0usize;
     for t in scan::scan_tokens(sql, p) {

@@ -865,10 +865,12 @@ impl PolyDBApp {
                 if c.entries.is_empty() {
                     body.push(cmp_line("两侧结构一致，无需同步。", th.ok, 12.5).into_any_element());
                 } else {
+                    // sel_set O(1) 判定（cmpsync.review_status 同款）。
+                    let sel_set: std::collections::HashSet<&String> = c.sel.iter().collect();
                     let destruct = c
                         .entries
                         .iter()
-                        .filter(|e| e.destructive && c.sel.iter().any(|s| s == &e.id))
+                        .filter(|e| e.destructive && sel_set.contains(&e.id))
                         .count();
                     body.push(
                         cmp_line(
@@ -903,6 +905,9 @@ impl PolyDBApp {
                         .iter()
                         .map(|g| format!("── {}（相位 {}）──", g.label, g.phase))
                         .collect();
+                    // 渲染循环里每个条目都要判一次勾选：先建 sel_set（与
+                    // cmpsync.review_status 同款），行循环内 O(1)。
+                    let sel_set: std::collections::HashSet<&String> = c.sel.iter().collect();
                     let mut rows: Vec<CmpRow> = Vec::new();
                     let mut ix = 0usize;
                     for (gi, g) in groups.iter().enumerate() {
@@ -931,7 +936,7 @@ impl PolyDBApp {
                             CmpRow::Entry(ix) => {
                                 let e = &c.entries[*ix];
                                 let on = *ix == c.entry_cur;
-                                let checked = c.sel.iter().any(|s| s == &e.id);
+                                let checked = sel_set.contains(&e.id);
                                 let head = format!(
                                     "{} [{}] {} {}",
                                     if on { "▸" } else { " " },
