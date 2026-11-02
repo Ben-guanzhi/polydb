@@ -26,6 +26,16 @@ import (
 //   - IsConnected 是本地进程视角的标记，不代表服务端真实状态；
 //   - Ping 走 /test 端点（服务端 connect→ping→disconnect 后返回状态）。
 //
+// 超时分层（从紧到松）：
+//   - metaDo 15s：连接 CRUD（无 ctx 参数的元数据面）；
+//   - 调用方 ctx：查询/事务/浏览等在途操作的主取消通道（behavior.md §2.3，
+//     服务端另有 timeout_ms 缺省 30s，0 = 无超时）；
+//   - backstop（本结构）：调用方 ctx 不带 deadline 时的黑洞兜底——TCP 半开/
+//     服务端挂死时请求永不返回，而 timeout_ms=0 的合法长查询不能被一刀切
+//     的 http.Client.Timeout 误杀。默认 10 分钟（超过服务端一切现实语句
+//     上限：缺省 30s、mssql 驱动背停 300s），0 = 关闭。Rust 侧无 Remote
+//     transport（AGENTS §3），无对漂问题。
+//
 // 所有业务错误都以 *protocol.PolyDBError 返回（含 code），便于 errors.As 判断。
 type Remote struct {
 	base      string
@@ -33,7 +43,13 @@ type Remote struct {
 	hc        *http.Client
 	connected map[string]bool
 	mu        sync.Mutex
+	backstop  time.Duration
 }
+
+// defaultBackstop 是调用方 ctx 无 deadline 时的兜底上限。取值原则：大于
+// 服务端一切合法语句时长（behavior.md 缺省查询超时 30s、mssql 驱动背停
+// 300s），只拦"永不返回"，不拦慢查询。
+const defaultBackstop = 10 * time.Minute
 
 // NewRemote 构造指向 polydb-server 的远程客户端（如 http://127.0.0.1:8080）。
 func NewRemote(baseURL string) *Remote {
@@ -41,7 +57,24 @@ func NewRemote(baseURL string) *Remote {
 		base:      strings.TrimRight(baseURL, "/"),
 		hc:        &http.Client{},
 		connected: make(map[string]bool),
+		backstop:  defaultBackstop,
 	}
+}
+
+// SetRequestTimeout 调整黑洞兜底上限（作用于调用方 ctx 不带 deadline 的请求）。
+// d <= 0 关闭兜底——调用方需要"完全跟随自己的 ctx"时使用；合法长查询应由
+// 调用方 ctx 或服务端 timeout_ms 表达，而不是依赖关掉兜底。
+func (r *Remote) SetRequestTimeout(d time.Duration) { r.backstop = d }
+
+// bound 在调用方 ctx 不带 deadline 且兜底开启时包一层超时；否则原样返回。
+func (r *Remote) bound(ctx context.Context) (context.Context, context.CancelFunc) {
+	if r.backstop <= 0 {
+		return ctx, nil
+	}
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, nil // 调用方已自带上限：尊重它，不叠加
+	}
+	return context.WithTimeout(ctx, r.backstop)
 }
 
 // SetToken 设置 Bearer token（服务端启用 POLYDB_SERVER_TOKEN 时必需）。
@@ -53,6 +86,10 @@ func (r *Remote) SetToken(token string) { r.token = token }
 // ctx 必须一路透传到 http.Request（AGENTS.md §10：context 首参贯穿所有 IO），
 // 否则客户端取消/超时对在途 HTTP 请求完全无效，远程模式的「取消查询」无从实现。
 func (r *Remote) do(ctx context.Context, method, path string, body any, out any) error {
+	ctx, cancel := r.bound(ctx)
+	if cancel != nil {
+		defer cancel()
+	}
 	var reader io.Reader
 	if body != nil {
 		data, err := msgpack.Marshal(body)
@@ -106,6 +143,10 @@ func (r *Remote) do(ctx context.Context, method, path string, body any, out any)
 // 与 do 同路解码为 *protocol.PolyDBError，保持两端错误码一致。
 func (r *Remote) GetBlob(ctx context.Context, connID, blobID string) ([]byte, error) {
 	path := "/api/connections/" + url.PathEscape(connID) + "/blobs/" + url.PathEscape(blobID)
+	ctx, cancel := r.bound(ctx)
+	if cancel != nil {
+		defer cancel()
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.base+path, nil)
 	if err != nil {
 		return nil, err
