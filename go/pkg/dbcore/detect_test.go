@@ -169,7 +169,7 @@ func TestMutatesDataDialectDivergence(t *testing.T) {
 			name: "q-quote",
 			sql:  "SELECT q'[it's ok]' FROM dual; DROP TABLE t",
 			want: map[protocol.DatabaseKind]bool{
-				protocol.DatabaseKindOracle:   true,  // Oracle 认 q'…'
+				protocol.DatabaseKindOracle:   true, // Oracle 认 q'…'
 				protocol.DatabaseKindPostgres: false,
 				protocol.DatabaseKindMySQL:    false,
 			},
@@ -178,7 +178,7 @@ func TestMutatesDataDialectDivergence(t *testing.T) {
 			name: "exec-comment",
 			sql:  "/*!50000 DROP TABLE t */",
 			want: map[protocol.DatabaseKind]bool{
-				protocol.DatabaseKindMySQL:    true,  // MySQL 会执行注释体
+				protocol.DatabaseKindMySQL:    true, // MySQL 会执行注释体
 				protocol.DatabaseKindPostgres: false,
 				protocol.DatabaseKindSQLite:   false,
 			},

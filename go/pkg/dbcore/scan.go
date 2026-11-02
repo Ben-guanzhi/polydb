@@ -309,7 +309,7 @@ func lineEnd(sql string, start, limit int) int {
 }
 
 // skipQuoted 越过从 sql[start] 开始的引号区域，返回结束引号之后的下标。
-// 处理 ''（双写）；backslash 为真时还处理反斜杠转义。
+// 处理 ”（双写）；backslash 为真时还处理反斜杠转义。
 // [] 标识符只按 ] 结束。
 func skipQuoted(sql string, start int, quote byte, backslash bool, limit int) int {
 	i := start + 1
