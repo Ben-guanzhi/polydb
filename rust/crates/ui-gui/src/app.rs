@@ -115,6 +115,11 @@ pub(crate) struct GridData {
 
 pub(crate) const PAGE_SIZES: [u32; 3] = [50, 200, 1000];
 
+/// §57.4 #4：Redis 键列表累积上限。SCAN 翻页无限追加会让键列表随
+/// 库规模无界膨胀（渲染侧每帧克隆全列表）；到达上限即停追加、游标
+/// 归零，用户用 pattern 收窄后重新扫描。
+pub(crate) const REDIS_KEY_LIST_CAP: usize = 1000;
+
 pub(crate) struct BrowsePage {
     pub offset: u64,
     pub limit: u32,
@@ -1479,15 +1484,49 @@ impl PolyDBApp {
                 match out {
                     Ok(page) => {
                         this.redis_db = page.db.unwrap_or(this.redis_db);
-                        this.redis_scan_cursor = page.cursor;
-                        this.redis_keys.extend(page.keys);
-                        this.status = format!("累计 {} 键", this.redis_keys.len());
+                        // §57.4 #4：键列表有界累积——超限截断并停翻页
+                        // （游标归零让"更多"按钮消失，提示收窄 pattern）。
+                        let truncated = Self::capped_extend(
+                            &mut this.redis_keys,
+                            page.keys,
+                            REDIS_KEY_LIST_CAP,
+                        );
+                        if truncated {
+                            this.redis_scan_cursor = 0;
+                            this.status = format!(
+                                "已达键列表上限 {}，请用 pattern 收窄后重扫",
+                                REDIS_KEY_LIST_CAP
+                            );
+                        } else {
+                            this.redis_scan_cursor = page.cursor;
+                            this.status = format!("累计 {} 键", this.redis_keys.len());
+                        }
                     }
                     Err(e) => this.status = format!("翻页失败: {e}"),
                 }
                 cx.notify();
             },
         );
+    }
+
+    /// §57.4 #4：Redis 键列表有界累积——超过上限即截断本页并返回
+    /// truncated（调用方应停翻页），键列表因此有界（渲染侧每帧克隆）。
+    fn capped_extend(
+        keys: &mut Vec<RedisKeyInfo>,
+        page_keys: Vec<RedisKeyInfo>,
+        cap: usize,
+    ) -> bool {
+        if page_keys.is_empty() {
+            return false; // 空页 = SCAN 结束，非截断。
+        }
+        let room = cap.saturating_sub(keys.len());
+        if room == 0 {
+            return true;
+        }
+        let page_len = page_keys.len();
+        let take = room.min(page_len);
+        keys.extend(page_keys.into_iter().take(take));
+        take < page_len
     }
 
     /// 打开某个键读取值。
@@ -3782,7 +3821,9 @@ pub(crate) struct CommitResult {
 #[cfg(test)]
 mod conn_form_options_tests {
     use super::{conn_visible_fields, ConnField, ConnForm, ResultColumn};
-    use polydb_core::{ConnectionId, ConnectionInfo, DatabaseKind, Value};
+    use polydb_core::{
+        ConnectionId, ConnectionInfo, DatabaseKind, RedisKeyInfo, RedisKeyType, Value,
+    };
     use std::collections::HashMap;
 
     fn pg_form() -> ConnForm {
@@ -3911,6 +3952,57 @@ mod conn_form_options_tests {
 
         // 空结果页：空缓存（重绘零成本，不产生越界）。
         let keys = super::PolyDBApp::compute_row_keys(&cols, &[], &pk);
+        assert!(keys.is_empty());
+    }
+
+    fn mk_key(i: usize) -> RedisKeyInfo {
+        RedisKeyInfo {
+            key: format!("k{i}"),
+            key_type: RedisKeyType::String,
+            ttl: None,
+        }
+    }
+
+    #[test]
+    fn redis_key_list_bounded_by_cap() {
+        let cap = super::REDIS_KEY_LIST_CAP;
+        // 未满：全量追加且未截断。
+        let mut keys = Vec::new();
+        assert!(!super::PolyDBApp::capped_extend(
+            &mut keys,
+            (0..10).map(mk_key).collect(),
+            cap
+        ));
+        assert_eq!(keys.len(), 10);
+
+        // 恰好填满：全量追加且未截断。
+        let mut keys = Vec::new();
+        assert!(!super::PolyDBApp::capped_extend(
+            &mut keys,
+            (0..cap).map(mk_key).collect(),
+            cap
+        ));
+        assert_eq!(keys.len(), cap);
+
+        // 超限：截断至 cap 并报告截断。
+        let mut keys = Vec::new();
+        let truncated =
+            super::PolyDBApp::capped_extend(&mut keys, (0..cap + 5).map(mk_key).collect(), cap);
+        assert!(truncated);
+        assert_eq!(keys.len(), cap);
+
+        // 已满再翻页：room=0 → 截断且列表不变。
+        let mut keys: Vec<RedisKeyInfo> = (0..cap).map(mk_key).collect();
+        assert!(super::PolyDBApp::capped_extend(
+            &mut keys,
+            (0..5).map(mk_key).collect(),
+            cap
+        ));
+        assert_eq!(keys.len(), cap);
+
+        // 空页：SCAN 结束信号，非截断。
+        let mut keys = Vec::new();
+        assert!(!super::PolyDBApp::capped_extend(&mut keys, Vec::new(), cap));
         assert!(keys.is_empty());
     }
 }
