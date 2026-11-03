@@ -1,6 +1,8 @@
 //! polydb-db-oracle：基于 oracle crate（ODPI-C）的驱动实现（对应 Go 侧 dboracle）。
-//! oracle crate 为阻塞式 API（ODPI-C）：主执行路径经 spawn_blocking 移出 runtime
-//! worker（见 execute），事务内的路径暂保持同步。
+//! oracle crate 为阻塞式 API（ODPI-C）：执行与事务路径（execute / execute_in_tx /
+//! begin_tx / commit / rollback）全部经 spawn_blocking 移出 runtime worker。
+//! OracleTxHandle 是单元结构体、不持有连接引用，所以阻塞闭包只需要
+//! Arc<Mutex<Connection>>，`&mut` 句柄留在 async 侧、从不进闭包。
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -140,47 +142,68 @@ fn quote_ident(s: &str) -> String {
 
 /// Oracle 事务句柄。oracle crate 无独立 Transaction 对象，事务状态由
 /// 连接上的第一条 DML 隐式开启，commit()/rollback() 收尾；本结构仅作
-/// 不透明标记。
+/// 不透明标记。它是**单元结构体**——不持有连接引用，因此 `&mut` 句柄
+/// 留在 async 侧、从不进 spawn_blocking 闭包；闭包只需要 Arc<Mutex<Connection>>。
 #[derive(Clone, Debug)]
 pub struct OracleTxHandle;
 
+/// Oracle 的隔离级别声明是 SET TRANSACTION：必须是新事务的第一条语句
+///（本连接是隐式事务模型——begin_tx 后、第一条 DML 前执行即成立）。
+/// 旧实现发的是 ALTER SESSION SET TRANSACTION …，两种拼写都不是 Oracle
+/// 语法，一直靠"失败回退默认"掩盖。
+/// 返回 None 表示该级别无需声明（回退默认 ReadCommitted）。
+fn set_transaction_sql(level: IsolationLevel) -> Option<&'static str> {
+    match level {
+        // Oracle 没有 READ UNCOMMITTED：回退默认 ReadCommitted。
+        IsolationLevel::ReadUncommitted => None,
+        // Oracle 也没有 REPEATABLE READ：最近的对应物是 SERIALIZABLE
+        //（与 Go 侧 go-ora 的映射一致）。
+        IsolationLevel::RepeatableRead | IsolationLevel::Serializable => {
+            Some("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+        }
+        IsolationLevel::ReadCommitted => None,
+    }
+}
+
 impl OracleConn {
-    pub fn begin_tx(&self, mode: TxMode) -> CoreResult<OracleTxHandle> {
-        // Oracle 的隔离级别声明是 SET TRANSACTION：必须是新事务的第一条
-        // 语句（本连接是隐式事务模型——begin_tx 后、第一条 DML 前执行即成立）。
-        // 旧实现发的是 ALTER SESSION SET TRANSACTION …，两种拼写都不是
-        // Oracle 语法，一直靠"失败回退默认"掩盖。
-        if mode.isolation_level != IsolationLevel::ReadCommitted {
-            let sql = match mode.isolation_level {
-                // Oracle 没有 READ UNCOMMITTED：回退默认 ReadCommitted。
-                IsolationLevel::ReadUncommitted => return Ok(OracleTxHandle),
-                // Oracle 也没有 REPEATABLE READ：最近的对应物是 SERIALIZABLE
-                //（与 Go 侧 go-ora 的映射一致）。
-                IsolationLevel::RepeatableRead => "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
-                IsolationLevel::Serializable => "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
-                IsolationLevel::ReadCommitted => return Ok(OracleTxHandle),
-            };
+    pub async fn begin_tx(&self, mode: TxMode) -> CoreResult<OracleTxHandle> {
+        if let Some(sql) = set_transaction_sql(mode.isolation_level) {
             // 非默认级别设置失败不视为致命错误：SET TRANSACTION 要求它确实是
             // 新事务的第一条语句，若此前有语句意外开着事务会失败——回退默认。
-            let _ = self.conn.lock().execute(sql, &[]);
+            let conn = Arc::clone(&self.conn);
+            let sql = sql.to_string();
+            tokio::task::spawn_blocking(move || {
+                let _ = conn.lock().execute(&sql, &[]);
+            })
+            .await
+            .map_err(|e| CoreError::Internal(format!("oracle task join: {e}")))?;
         }
         Ok(OracleTxHandle)
     }
 
-    pub fn commit(&self, _tx: &mut OracleTxHandle) -> CoreResult<()> {
-        self.conn
-            .lock()
-            .commit()
-            .map_err(|e| CoreError::Driver(format!("commit failed: {e}")))?;
-        Ok(())
+    pub async fn commit(&self, _tx: &mut OracleTxHandle) -> CoreResult<()> {
+        // ODPI-C 是阻塞式 API：与 execute / execute_in_tx 同范式，经
+        // spawn_blocking 移出 runtime worker，否则慢提交/锁等待会钉死
+        // WS 的取消/超时臂所在的那个 worker。
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            conn.lock()
+                .commit()
+                .map_err(|e| CoreError::Driver(format!("commit failed: {e}")))
+        })
+        .await
+        .map_err(|e| CoreError::Internal(format!("oracle task join: {e}")))?
     }
 
-    pub fn rollback(&self, _tx: &mut OracleTxHandle) -> CoreResult<()> {
-        self.conn
-            .lock()
-            .rollback()
-            .map_err(|e| CoreError::Driver(format!("rollback failed: {e}")))?;
-        Ok(())
+    pub async fn rollback(&self, _tx: &mut OracleTxHandle) -> CoreResult<()> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            conn.lock()
+                .rollback()
+                .map_err(|e| CoreError::Driver(format!("rollback failed: {e}")))
+        })
+        .await
+        .map_err(|e| CoreError::Internal(format!("oracle task join: {e}")))?
     }
 
     /// 事务内执行一条 SQL。Oracle 隐式事务：连接上的第一条 DML/DDL 即开启
@@ -336,7 +359,7 @@ impl SqlDriver for OracleConn {
     }
 
     async fn begin_tx(&self, mode: TxMode) -> CoreResult<Box<dyn Any + Send>> {
-        Ok(Box::new(OracleConn::begin_tx(self, mode)?))
+        Ok(Box::new(OracleConn::begin_tx(self, mode).await?))
     }
 
     async fn execute_in_tx(
@@ -355,22 +378,23 @@ impl SqlDriver for OracleConn {
         let mut h = tx
             .downcast::<OracleTxHandle>()
             .map_err(|_| CoreError::Internal("tx handle downcast failed".into()))?;
-        OracleConn::commit(self, &mut h)
+        OracleConn::commit(self, &mut h).await
     }
 
     async fn rollback(&self, tx: Box<dyn Any + Send>) -> CoreResult<()> {
         let mut h = tx
             .downcast::<OracleTxHandle>()
             .map_err(|_| CoreError::Internal("tx handle downcast failed".into()))?;
-        OracleConn::rollback(self, &mut h)
+        OracleConn::rollback(self, &mut h).await
     }
 
     async fn execute(&self, sql: &str, params: &[Value]) -> CoreResult<QueryResult> {
         // oracle crate 是阻塞式 API（ODPI-C）：整段执行直接在 runtime worker
         // 上跑会阻塞该 worker，WS 的取消/超时臂没有机会被轮询（与 db-sqlite
         // 同范式）。移入 spawn_blocking：语句本身仍在后台跑完（best-effort
-        // 取消，与 Go 侧语义一致），future 则能让步。事务内的 execute 暂不
-        // 迁移（handle 是 &mut 引用，拿不进 'static 闭包）。
+        // 取消，与 Go 侧语义一致），future 则能让步。事务内的 execute 见
+        // execute_in_tx，同样经 spawn_blocking 迁移（OracleTxHandle 是单元
+        // 结构体，`&mut` 句柄留在 async 侧、从不进闭包）。
         let conn = Arc::clone(&self.conn);
         let sql = sql.to_string();
         let params = params.to_vec();
@@ -728,4 +752,65 @@ fn db_err(e: &oracle::Error, what: &str) -> CoreError {
     let text = format!("{what}: {e}");
     let numeric = e.db_error().map(|d| d.code() as u32);
     driver_error(None, numeric, None, &text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 编译期证据：spawn_blocking 闭包只捕获 `Arc<Mutex<Connection>>`，而
+    /// `OracleConn` / `OracleTxHandle` 必须满足 Send + Sync + 'static 才能
+    /// 跨进 `Box<dyn Any + Send>` 与阻塞池闭包。这条断言锁住"句柄留在
+    /// async 侧、连接 Arc 进闭包"的迁移前提——若哪天句柄开始持有连接引用，
+    /// 这里会先编译失败。
+    #[test]
+    fn oracle_conn_and_tx_handle_are_send_sync_static() {
+        fn assert_send_sync_static<T: Send + Sync + 'static>() {}
+        assert_send_sync_static::<OracleConn>();
+        assert_send_sync_static::<OracleTxHandle>();
+    }
+
+    /// `OracleTxHandle` 是单元结构体：零尺寸、不持有连接引用。这正是事务内
+    /// 三条路径（begin/commit/rollback）能改成 spawn_blocking 的原因——
+    /// `&mut` 句柄留在 async 侧、从不进闭包。
+    #[test]
+    fn tx_handle_is_a_zero_sized_unit_struct() {
+        assert_eq!(std::mem::size_of::<OracleTxHandle>(), 0);
+        let h = OracleTxHandle;
+        let mut h2 = h.clone();
+        let _ = &mut h2; // 句柄可随意克隆/移动，不牵出连接
+    }
+
+    /// 隔离级别映射：只有 SERIALIZABLE 需要声明；Oracle 不支持的
+    /// READ UNCOMMITTED 回退默认，默认 ReadCommitted 不发语句。
+    #[test]
+    fn set_transaction_sql_maps_only_the_supported_levels() {
+        assert_eq!(set_transaction_sql(IsolationLevel::ReadCommitted), None);
+        assert_eq!(set_transaction_sql(IsolationLevel::ReadUncommitted), None);
+        // Oracle 没有 REPEATABLE READ：与 SERIALIZABLE 同发 SERIALIZABLE（对齐 Go 侧 go-ora）。
+        assert_eq!(
+            set_transaction_sql(IsolationLevel::Serializable),
+            Some("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+        );
+        assert_eq!(
+            set_transaction_sql(IsolationLevel::RepeatableRead),
+            Some("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
+        );
+    }
+
+    /// 回归：旧实现发的是 `ALTER SESSION SET TRANSACTION …`，该拼写不是
+    /// Oracle 语法，一直靠"失败回退默认"掩盖——真库用例的计数会因此变成 5。
+    /// 这里把合法拼写钉死，防止再退回 ALTER SESSION。
+    #[test]
+    fn set_transaction_sql_is_oracle_legal_not_alter_session() {
+        let sql = set_transaction_sql(IsolationLevel::Serializable).expect("must declare");
+        assert!(
+            sql.starts_with("SET TRANSACTION"),
+            "must be SET TRANSACTION: {sql}"
+        );
+        assert!(
+            !sql.starts_with("ALTER SESSION"),
+            "ALTER SESSION 拼写不是 Oracle 语法: {sql}"
+        );
+    }
 }

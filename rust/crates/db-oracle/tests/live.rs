@@ -71,8 +71,9 @@ async fn conn_and_table(suffix: &str) -> OracleConn {
         .begin_tx(TxMode {
             isolation_level: IsolationLevel::ReadCommitted,
         })
+        .await
         .expect("setup commit");
-    c.commit(&mut tx).expect("setup commit");
+    c.commit(&mut tx).await.expect("setup commit");
     c
 }
 
@@ -183,6 +184,7 @@ fn live_transaction_serializable_snapshot_isolation() {
             .begin_tx(TxMode {
                 isolation_level: IsolationLevel::Serializable,
             })
+            .await
             .expect("begin tx");
         a.execute_in_tx(
             &mut tx,
@@ -197,6 +199,7 @@ fn live_transaction_serializable_snapshot_isolation() {
             .begin_tx(TxMode {
                 isolation_level: IsolationLevel::ReadCommitted,
             })
+            .await
             .expect("begin tx b");
         b.execute_in_tx(
             &mut tx_b,
@@ -205,7 +208,7 @@ fn live_transaction_serializable_snapshot_isolation() {
         )
         .await
         .expect("insert in tx b");
-        b.commit(&mut tx_b).expect("commit b");
+        b.commit(&mut tx_b).await.expect("commit b");
 
         // A 的串行化快照看不到 B 的提交：4 行 = 基线 3 行 + A 自己的 1 行
         let r = a
@@ -218,7 +221,7 @@ fn live_transaction_serializable_snapshot_isolation() {
             "SERIALIZABLE 快照看不到 B 已提交的行；若隔离声明失效这里会是 5"
         );
 
-        a.rollback(&mut tx).expect("rollback");
+        a.rollback(&mut tx).await.expect("rollback");
         let r = a
             .execute(&format!("SELECT COUNT(*) FROM {table} WHERE id = 4"), &[])
             .await
