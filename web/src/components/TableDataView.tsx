@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties } from 're
 import type { DatabaseKind, FilterCondition, FilterOperator, SortDirection, TableRowsResult, Value } from '../api';
 import * as api from '../lib/api';
 import { ApiError } from '../lib/api';
+import { isBigIntString } from '../lib/bigintSafe';
 import { ChangeQueue, buildStatements, commitInTransaction, dialectFor, valuesEqual } from '../lib/changes';
 import { CASE_MODES, FILTER_OPS, condToWire, emptyCondRow, opMeta, opSupported, opUnsupportedHint, type CaseMode, type CondRow } from '../lib/filterOps';
 import { toCsv, toTsv, toJson, toNdjson, toMarkdown, toSqlInsert, toInClause, download } from '../lib/exporters';
@@ -193,7 +194,8 @@ export default function TableDataView({ connId, kind, schema, table, onOpenSql, 
     if (t === '' || t === 'null' || t === 'NULL') return null;
     if (t === 'true') return true;
     if (t === 'false') return false;
-    if (/^-?\d+$/.test(t)) return Number(t);
+    // 超出安全范围的精确整数保留字符串：Number() 会丢精度，编辑回写必须精确。
+    if (/^-?\d+$/.test(t)) return isBigIntString(t) ? t : Number(t);
     if (/^-?\d*\.\d+$/.test(t)) return Number(t);
     return s;
   };

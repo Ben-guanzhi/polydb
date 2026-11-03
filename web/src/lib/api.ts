@@ -1,4 +1,5 @@
-import { encode, decode } from '@msgpack/msgpack';
+import { encode } from '@msgpack/msgpack';
+import { decodeMsgpack } from './bigintSafe';
 import type {
   BatchQueryRequest,
   BatchQueryResult,
@@ -78,11 +79,9 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   const isMsgpack = (res.headers.get('content-type') ?? '').includes(MSGPACK);
   let data: unknown = null;
   if (raw.byteLength > 0) {
-    // Deliberately NOT useBigInt64: it would turn every int64 into BigInt
-    // and break arithmetic/rendering across the UI. Values beyond 2^53
-    // (rows_affected, Redis integers of that magnitude) distort silently —
-    // recorded, needs a UI-wide pass, not a flag flip.
-    data = isMsgpack ? decode(raw as ArrayBuffer) : res.status === 204 ? null : decodeJson(raw);
+    // 大整数（|v| > 2^53）不再静默失真：decodeMsgpack 先用 useBigInt64 取精确值，
+    // 再归一化成 number|string（约定见 bigintSafe.ts）。
+    data = isMsgpack ? decodeMsgpack(raw as ArrayBuffer) : res.status === 204 ? null : decodeJson(raw);
   }
   if (!res.ok) {
     throw toApiError(res.status, data);

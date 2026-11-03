@@ -29,6 +29,15 @@ describe('fmt / cellClass', () => {
     expect(cellClass(null)).toBe('null');
   });
 
+  it('大整数（>2^53）以精确十进制文本渲染，数值列分类为 num（P2-4）', () => {
+    // 归一化后的大整数是字符串：渲染必须原样显示数字，不能走 Number() 丢精度。
+    expect(fmt('9007199254740993')).toBe('9007199254740993');
+    expect(fmt('-9007199254740995')).toBe('-9007199254740995');
+    expect(cellClass('9007199254740993', col('id', 'bigint'))).toBe('num');
+    // 非数值列里的同形文本仍是文本（不能因为长得像数字就当数值）。
+    expect(cellClass('9007199254740993', col('s', 'varchar'))).toBe('text');
+  });
+
   it('$blob 内联与旁路引用统一占位标签（encoding.md §5.1）', () => {
     expect(fmt({ $blob: { len: 3, base64: 'AAEC' } })).toBe('<blob 3 bytes>');
     expect(fmt({ $blob: { len: 2097153, ref: '$polydb_blob:00000000-0000-0000-0000-000000000000' } }))

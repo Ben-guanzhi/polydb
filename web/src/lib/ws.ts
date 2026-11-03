@@ -1,6 +1,7 @@
-import { decode, encode } from '@msgpack/msgpack';
+import { encode } from '@msgpack/msgpack';
 import type { ClientMessage, PolyDBError, QueryRequest, QueryResult, ServerMessage } from '../api';
 import { getServerToken } from './api';
+import { decodeMsgpack } from './bigintSafe';
 
 type QueryHandler = {
   onStarted?: (queryId: string) => void;
@@ -42,7 +43,7 @@ function newClient(): Client {
   });
   ws.addEventListener('message', (ev) => {
     const buf: ArrayBuffer = ev.data instanceof ArrayBuffer ? ev.data : new Uint8Array(ev.data).buffer;
-    const msg = decode(buf) as ServerMessage;
+    const msg = decodeMsgpack(buf) as ServerMessage;
     if (msg.type === 'hello_ack') return;
     if (!('query_id' in msg) || !msg.query_id) return;
     const item = pending.get(msg.query_id);

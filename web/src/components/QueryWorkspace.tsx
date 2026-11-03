@@ -5,6 +5,7 @@ import { KeyCode, KeyMod, Range } from 'monaco-editor';
 import type { QueryResult, ResultColumn } from '../api';
 import * as api from '../lib/api';
 import { ApiError } from '../lib/api';
+import { compareNumeric, isBigIntString } from '../lib/bigintSafe';
 import { asBlobValue, blobIdOfRef } from '../lib/blobValue';
 import * as exporters from '../lib/exporters';
 import * as ws from '../lib/ws';
@@ -140,6 +141,9 @@ function sqlLiteral(v: unknown): string {
   if (v === null || v === undefined) return 'NULL';
   if (typeof v === 'number') return String(v);
   if (typeof v === 'boolean') return v ? 'TRUE' : 'FALSE';
+  // 归一化后的大整数（> 2^53）以精确十进制字符串承载：必须发裸数字字面量，
+  // 否则 PK WHERE / SET 会生成 '9007199254740993' 这样的字符串字面量。
+  if (typeof v === 'string' && isBigIntString(v)) return v;
   const s = String(v).replace(/'/g, "''");
   return `'${s}'`;
 }
@@ -343,9 +347,13 @@ function parseCellValue(s: string, col: ResultColumn): unknown {
   const t = (col.type ?? '').toLowerCase();
   if (/boolean|bool\b/i.test(t)) return /^(1|true|yes|on|t|y)$/i.test(s.trim());
   if (/int|smallint|bigint|decimal|numeric|float|double|real|tinyint|mediumint|unsigned/i.test(t)) {
+    // 归一化后的大整数（> 2^53）以精确十进制字符串承载：Number() 会丢精度，
+    // 原样保留字符串，编辑框显示与回写都是精确数字。
+    const trimmed = s.trim();
+    if (isBigIntString(trimmed)) return trimmed;
     const n = Number(s);
     if (!Number.isFinite(n)) throw new Error(`非数值：${s}`);
-    return Number.isInteger(n) ? n : n;
+    return n;
   }
   return s;
 }
@@ -1262,9 +1270,10 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
       if (x === null) return 1;
       if (y === null) return -1;
       if (numeric) {
-        const xn = Number(x);
-        const yn = Number(y);
-        if (!Number.isNaN(xn) && !Number.isNaN(yn)) return sortDir === 'asc' ? xn - yn : yn - xn;
+        // BigInt 精确比较：归一化后 >2^53 的大整数是十进制字符串，Number() 会把它们
+        // 压成同一个 double 导致排序错乱。
+        const cmp = compareNumeric(x, y);
+        if (cmp !== null) return sortDir === 'asc' ? cmp : -cmp;
       }
       const sx = String(x);
       const sy = String(y);

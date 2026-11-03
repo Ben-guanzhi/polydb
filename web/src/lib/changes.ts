@@ -4,6 +4,7 @@
 
 import type { DatabaseKind, QueryRequest, Value } from '../api';
 import * as api from './api';
+import { isBigIntString } from './bigintSafe';
 
 export type RowChangeType = 'update' | 'insert' | 'delete';
 
@@ -216,7 +217,13 @@ export function valueToLiteral(v: Value, d: Dialect): string {
   if (v === null || v === undefined) return 'NULL';
   if (typeof v === 'number') return String(v);
   if (typeof v === 'boolean') return v ? 'TRUE' : 'FALSE';
-  if (typeof v === 'string') return v === '' ? "''" : d.quoteString(v);
+  if (typeof v === 'string') {
+    // 归一化后的大整数（> 2^53）以精确十进制字符串承载：PK WHERE / INSERT VALUES /
+    // UPDATE SET 都必须发裸数字字面量，否则生成 '9007199254740993' 这样的字符串字面量。
+    // 安全范围内的整数已经收敛成 number，所以只有超出范围的字符串才走这条分支。
+    if (isBigIntString(v)) return v;
+    return v === '' ? "''" : d.quoteString(v);
+  }
   return d.quoteString(JSON.stringify(v));
 }
 

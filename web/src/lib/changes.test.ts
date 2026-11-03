@@ -87,6 +87,18 @@ describe('buildStatements', () => {
     expect(valueToLiteral("a'b", d)).toBe("'a''b'");
     expect(valueToLiteral(null, d)).toBe('NULL');
   });
+
+  it('归一化后的大整数发裸数字字面量（P2-4）', () => {
+    const d = dialectFor('mysql');
+    // 安全范围内的整数已经是 number，走原有的 number 分支。
+    expect(valueToLiteral(42, d)).toBe('42');
+    // 超出安全范围的大整数是精确十进制字符串：必须裸数字，加引号会生成字符串字面量。
+    expect(valueToLiteral('9007199254740993', d)).toBe('9007199254740993');
+    expect(valueToLiteral('-9007199254740995', d)).toBe('-9007199254740995');
+    // 普通文本仍要引号包裹：安全范围内的整数字符串不是大整数。
+    expect(valueToLiteral('42', d)).toBe("'42'");
+    expect(valueToLiteral("a'b", d)).toBe("'a''b'");
+  });
 });
 
 describe('commitInTransaction', () => {
