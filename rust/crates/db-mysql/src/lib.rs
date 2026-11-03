@@ -213,10 +213,24 @@ impl MySqlConn {
         }
 
         if stmt_type == StatementType::Select || stmt_type == StatementType::Other {
-            let rows = q
-                .fetch_all(executor)
+            // 物化上限（polydb_db_core::row_cap，behavior.md §5）：流式 fetch
+            // 到上限即停——fetch_all 会先把整个结果集拉进内存，大表在 server
+            // 层截断之前就 OOM。truncated/has_more 与 apply_max_rows 同义。
+            let mut stream = q.fetch(executor);
+            let mut rows: Vec<sqlx::mysql::MySqlRow> = Vec::new();
+            let mut truncated = false;
+            use futures_util::StreamExt;
+            while let Some(row) = stream
+                .next()
                 .await
-                .map_err(|e| db_err(&e, "query failed"))?;
+            {
+                let row = row.map_err(|e| db_err(&e, "query failed"))?;
+                if rows.len() >= polydb_db_core::row_cap() {
+                    truncated = true;
+                    break;
+                }
+                rows.push(row);
+            }
             let columns = Self::columns_of(&rows);
             let data = rows
                 .iter()
@@ -227,9 +241,9 @@ impl MySqlConn {
                 rows: data,
                 affected_rows: 0,
                 execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
-                truncated: false,
+                truncated,
                 total_rows: None,
-                has_more: false,
+                has_more: truncated,
                 statement_type: Some(stmt_type),
             })
         } else {

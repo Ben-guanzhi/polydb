@@ -179,7 +179,12 @@ impl SqliteConn {
                 .map_err(|e| db_err(&e, "query failed"))?;
 
             let mut rows = Vec::new();
+            let mut truncated = false;
             for row_result in rows_result {
+                if rows.len() >= polydb_db_core::row_cap() {
+                    truncated = true;
+                    break;
+                }
                 let row = row_result.map_err(|e| db_err(&e, "row failed"))?;
                 rows.push(row);
             }
@@ -189,9 +194,9 @@ impl SqliteConn {
                 rows,
                 affected_rows: 0,
                 execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
-                truncated: false,
+                truncated,
                 total_rows: None,
-                has_more: false,
+                has_more: truncated,
                 statement_type: Some(stmt_type),
             })
         } else {

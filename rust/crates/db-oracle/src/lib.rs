@@ -227,11 +227,18 @@ impl OracleConn {
                 })
                 .collect();
             let mut data = Vec::new();
+            let mut truncated = false;
+            // 物化上限（polydb_db_core::row_cap，behavior.md §5）：游标数到
+            // 上限即停——大表不再在 server 层截断之前吃满内存。
             while let Some(row) = rows
                 .next()
                 .transpose()
                 .map_err(|e| db_err(&e, "row failed"))?
             {
+                if data.len() >= polydb_db_core::row_cap() {
+                    truncated = true;
+                    break;
+                }
                 data.push(row.sql_values().iter().map(Self::or_value).collect());
             }
             Ok(QueryResult {
@@ -239,9 +246,9 @@ impl OracleConn {
                 rows: data,
                 affected_rows: 0,
                 execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
-                truncated: false,
+                truncated,
                 total_rows: None,
-                has_more: false,
+                has_more: truncated,
                 statement_type: Some(stmt_type),
             })
         } else {

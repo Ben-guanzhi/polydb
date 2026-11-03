@@ -264,7 +264,40 @@ impl MssqlConn {
     fn query_rows(&self, sql: &str, refs: &[&dyn ToSql], what: &str) -> CoreResult<Vec<Row>> {
         let mut client = self.client.lock();
         let stream = timed_within(what, STATEMENT_TIMEOUT, client.as_mut().unwrap().query(sql, refs))?;
-        timed_within(what, STATEMENT_TIMEOUT, stream.into_first_result())
+        // 物化上限（polydb_db_core::row_cap，behavior.md §5）：逐行拉取到上限
+        // 即停——into_first_result 会把整个结果集收进内存。MSSQL 另有
+        // STATEMENT_TIMEOUT 兜底墙钟，但那不限制行数 × 行宽的内存总量。
+        // 单行 next 是 Future<Option<QueryItem>>，timed_within 的墙钟按行
+        // 续期：总时长不再有界，但受 cap 与行到达节奏约束，与游标语义一致。
+        use futures_util::StreamExt;
+        let mut rows: Vec<Row> = Vec::new();
+        let mut stream = stream;
+        loop {
+            if rows.len() >= polydb_db_core::row_cap() {
+                break; // 余下行随 QueryStream 一起 drop 关闭。
+            }
+            // next() 解析成 Option<Result<QueryItem>>，而 timed_within 要
+            // Result future：把 Option 适配进 Result（None → Ok(None)）。
+            // stream 按 &mut 借用进 async 块（StreamExt::next 接收 Pin<&mut
+            // Self>），不移动所有权。
+            let next = std::pin::pin!(stream.next());
+            let item = timed_within(what, STATEMENT_TIMEOUT, async {
+                match next.await {
+                    Some(r) => r.map(Some),
+                    None => Ok(None),
+                }
+            })?;
+            let item = match item {
+                Some(item) => item,
+                None => break,
+            };
+            // tiberius 的 Item = QueryItem：Row 是数据行，Metadata（结果集
+            // 描述）跳过继续等下一项。
+            if let tiberius::QueryItem::Row(row) = item {
+                rows.push(row);
+            }
+        }
+        Ok(rows)
     }
 }
 

@@ -16,3 +16,4 @@ tokio-util = "0.7"
 chrono = { workspace = true }
 parking_lot = { workspace = true }
 polydb-rt = { workspace = true }
+futures-util = "0.3"
