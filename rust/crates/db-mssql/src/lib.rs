@@ -17,13 +17,13 @@ use tiberius::{AuthMethod, Client, Config, Row, ToSql};
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
+use polydb_core::error_classify::driver_error;
 use polydb_core::{
     ColumnInfo, CoreError, CoreResult, DatabaseKind, ForeignKeyInfo, IndexColumn, IndexInfo,
     IndexType, IsolationLevel, QueryResult, ResultColumn, SchemaInfo, StatementType, TableInfo,
     TableType, Value,
 };
 use polydb_db_core::{DatabaseDriver, SqlDriver, TxMode};
-use polydb_core::error_classify::driver_error;
 
 // tiberius 0.12 无内置连接/查询超时；不可达主机（防火墙丢包）会让 TCP 握手
 // 挂到系统超时（本机实测 ~4s/地址，tokio 会串行尝试多个地址）。所有 block_on
@@ -107,7 +107,11 @@ where
     timed_within(what, IO_TIMEOUT, fut)
 }
 
-fn timed_within<T, E>(what: &str, limit: Duration, fut: impl Future<Output = Result<T, E>>) -> CoreResult<T>
+fn timed_within<T, E>(
+    what: &str,
+    limit: Duration,
+    fut: impl Future<Output = Result<T, E>>,
+) -> CoreResult<T>
 where
     E: std::fmt::Display,
 {
@@ -263,7 +267,11 @@ impl MssqlConn {
 
     fn query_rows(&self, sql: &str, refs: &[&dyn ToSql], what: &str) -> CoreResult<Vec<Row>> {
         let mut client = self.client.lock();
-        let stream = timed_within(what, STATEMENT_TIMEOUT, client.as_mut().unwrap().query(sql, refs))?;
+        let stream = timed_within(
+            what,
+            STATEMENT_TIMEOUT,
+            client.as_mut().unwrap().query(sql, refs),
+        )?;
         // 物化上限（polydb_db_core::row_cap，behavior.md §5）：逐行拉取到上限
         // 即停——into_first_result 会把整个结果集收进内存。MSSQL 另有
         // STATEMENT_TIMEOUT 兜底墙钟，但那不限制行数 × 行宽的内存总量。
@@ -328,7 +336,11 @@ impl MssqlConn {
 
     fn run_batch(&self, sql: &str, what: &str) -> CoreResult<()> {
         let mut client = self.client.lock();
-        let stream = timed_within(what, STATEMENT_TIMEOUT, client.as_mut().unwrap().simple_query(sql))?;
+        let stream = timed_within(
+            what,
+            STATEMENT_TIMEOUT,
+            client.as_mut().unwrap().simple_query(sql),
+        )?;
         timed_within(what, STATEMENT_TIMEOUT, stream.into_first_result())?;
         Ok(())
     }

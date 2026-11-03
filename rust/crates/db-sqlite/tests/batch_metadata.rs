@@ -22,11 +22,7 @@ fn conn_with(stmts: &[&str]) -> SqliteConn {
 
 /// 批量列与逐表列逐行相等（表内列序一致）。
 fn assert_cols_equal(per: &[ColumnInfo], batch: &[ColumnInfo], table: &str) {
-    assert_eq!(
-        per.len(),
-        batch.len(),
-        "表 {table} 批量列数 != 逐表列数"
-    );
+    assert_eq!(per.len(), batch.len(), "表 {table} 批量列数 != 逐表列数");
     for (i, (a, b)) in per.iter().zip(batch.iter()).enumerate() {
         assert_eq!(a.name, b.name, "表 {table} 第 {i} 列名不一致");
         assert_eq!(a.data_type, b.data_type, "表 {table} 第 {i} 列类型不一致");

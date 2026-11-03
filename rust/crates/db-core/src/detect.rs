@@ -381,36 +381,84 @@ mod tests {
     #[test]
     fn mutates_data_diverges_across_dialects() {
         let hash: &[(&str, Option<DatabaseKind>, bool)] = &[
-            ("SELECT 1 # ok; DROP TABLE t", Some(DatabaseKind::MySql), false),
-            ("SELECT 1 # ok; DROP TABLE t", Some(DatabaseKind::Postgres), true),
-            ("SELECT 1 # ok; DROP TABLE t", Some(DatabaseKind::Sqlite), true),
+            (
+                "SELECT 1 # ok; DROP TABLE t",
+                Some(DatabaseKind::MySql),
+                false,
+            ),
+            (
+                "SELECT 1 # ok; DROP TABLE t",
+                Some(DatabaseKind::Postgres),
+                true,
+            ),
+            (
+                "SELECT 1 # ok; DROP TABLE t",
+                Some(DatabaseKind::Sqlite),
+                true,
+            ),
         ];
         for (sql, kind, want) in hash {
             assert_eq!(mutates_data(sql, *kind), *want, "hash/{sql:?}/{kind:?}");
         }
 
         let dash: &[(&str, Option<DatabaseKind>, bool)] = &[
-            ("SELECT 1--2; DELETE FROM t", Some(DatabaseKind::MySql), true),
-            ("SELECT 1--2; DELETE FROM t", Some(DatabaseKind::Postgres), false),
-            ("SELECT 1--2; DELETE FROM t", Some(DatabaseKind::Sqlite), false),
+            (
+                "SELECT 1--2; DELETE FROM t",
+                Some(DatabaseKind::MySql),
+                true,
+            ),
+            (
+                "SELECT 1--2; DELETE FROM t",
+                Some(DatabaseKind::Postgres),
+                false,
+            ),
+            (
+                "SELECT 1--2; DELETE FROM t",
+                Some(DatabaseKind::Sqlite),
+                false,
+            ),
         ];
         for (sql, kind, want) in dash {
             assert_eq!(mutates_data(sql, *kind), *want, "dash/{sql:?}/{kind:?}");
         }
 
         let dollar: &[(&str, Option<DatabaseKind>, bool)] = &[
-            ("SELECT $tag$ DROP TABLE t $tag$", Some(DatabaseKind::Postgres), false),
-            ("SELECT $tag$ DROP TABLE t $tag$", Some(DatabaseKind::MySql), true),
-            ("SELECT $tag$ DROP TABLE t $tag$", Some(DatabaseKind::Sqlite), true),
+            (
+                "SELECT $tag$ DROP TABLE t $tag$",
+                Some(DatabaseKind::Postgres),
+                false,
+            ),
+            (
+                "SELECT $tag$ DROP TABLE t $tag$",
+                Some(DatabaseKind::MySql),
+                true,
+            ),
+            (
+                "SELECT $tag$ DROP TABLE t $tag$",
+                Some(DatabaseKind::Sqlite),
+                true,
+            ),
         ];
         for (sql, kind, want) in dollar {
             assert_eq!(mutates_data(sql, *kind), *want, "dollar/{sql:?}/{kind:?}");
         }
 
         let q: &[(&str, Option<DatabaseKind>, bool)] = &[
-            ("SELECT q'[it's ok]' FROM dual; DROP TABLE t", Some(DatabaseKind::Oracle), true),
-            ("SELECT q'[it's ok]' FROM dual; DROP TABLE t", Some(DatabaseKind::Postgres), false),
-            ("SELECT q'[it's ok]' FROM dual; DROP TABLE t", Some(DatabaseKind::MySql), false),
+            (
+                "SELECT q'[it's ok]' FROM dual; DROP TABLE t",
+                Some(DatabaseKind::Oracle),
+                true,
+            ),
+            (
+                "SELECT q'[it's ok]' FROM dual; DROP TABLE t",
+                Some(DatabaseKind::Postgres),
+                false,
+            ),
+            (
+                "SELECT q'[it's ok]' FROM dual; DROP TABLE t",
+                Some(DatabaseKind::MySql),
+                false,
+            ),
         ];
         for (sql, kind, want) in q {
             assert_eq!(mutates_data(sql, *kind), *want, "q/{sql:?}/{kind:?}");
@@ -418,8 +466,16 @@ mod tests {
 
         let exec: &[(&str, Option<DatabaseKind>, bool)] = &[
             ("/*!50000 DROP TABLE t */", Some(DatabaseKind::MySql), true),
-            ("/*!50000 DROP TABLE t */", Some(DatabaseKind::Postgres), false),
-            ("/*!50000 DROP TABLE t */", Some(DatabaseKind::Sqlite), false),
+            (
+                "/*!50000 DROP TABLE t */",
+                Some(DatabaseKind::Postgres),
+                false,
+            ),
+            (
+                "/*!50000 DROP TABLE t */",
+                Some(DatabaseKind::Sqlite),
+                false,
+            ),
         ];
         for (sql, kind, want) in exec {
             assert_eq!(mutates_data(sql, *kind), *want, "exec/{sql:?}/{kind:?}");

@@ -11,13 +11,13 @@ use oracle::sql_type::ToSql;
 use oracle::{Connection, SqlValue};
 use parking_lot::Mutex;
 
+use polydb_core::error_classify::driver_error;
 use polydb_core::{
     ColumnInfo, CoreError, CoreResult, DatabaseKind, ForeignKeyInfo, IndexColumn, IndexInfo,
     IndexType, IsolationLevel, QueryResult, ResultColumn, SchemaInfo, StatementType, TableInfo,
     TableType, Value,
 };
 use polydb_db_core::{DatabaseDriver, SqlDriver, TxMode};
-use polydb_core::error_classify::driver_error;
 
 /// Oracle 自带维护 schema，默认不展示（对应 Go 侧 maintainedSchemas）。
 const MAINTAINED: &[&str] = &[
@@ -211,63 +211,61 @@ impl OracleConn {
                 .build()
                 .map_err(|e| db_err(&e, "prepare failed"))?;
 
-        if stmt_type == StatementType::Select || stmt_type == StatementType::Other {
-            let mut rows = stmt
-                .query(&refs)
-                .map_err(|e| db_err(&e, "query failed"))?;
-            let columns = rows
-                .column_info()
-                .iter()
-                .map(|c| ResultColumn {
-                    name: c.name().to_string(),
-                    table: None,
-                    data_type: format!("{:?}", c.oracle_type()),
-                    generic_type: None,
-                    nullable: Some(true),
-                })
-                .collect();
-            let mut data = Vec::new();
-            let mut truncated = false;
-            // 物化上限（polydb_db_core::row_cap，behavior.md §5）：游标数到
-            // 上限即停——大表不再在 server 层截断之前吃满内存。
-            while let Some(row) = rows
-                .next()
-                .transpose()
-                .map_err(|e| db_err(&e, "row failed"))?
-            {
-                if data.len() >= polydb_db_core::row_cap() {
-                    truncated = true;
-                    break;
+            if stmt_type == StatementType::Select || stmt_type == StatementType::Other {
+                let mut rows = stmt.query(&refs).map_err(|e| db_err(&e, "query failed"))?;
+                let columns = rows
+                    .column_info()
+                    .iter()
+                    .map(|c| ResultColumn {
+                        name: c.name().to_string(),
+                        table: None,
+                        data_type: format!("{:?}", c.oracle_type()),
+                        generic_type: None,
+                        nullable: Some(true),
+                    })
+                    .collect();
+                let mut data = Vec::new();
+                let mut truncated = false;
+                // 物化上限（polydb_db_core::row_cap，behavior.md §5）：游标数到
+                // 上限即停——大表不再在 server 层截断之前吃满内存。
+                while let Some(row) = rows
+                    .next()
+                    .transpose()
+                    .map_err(|e| db_err(&e, "row failed"))?
+                {
+                    if data.len() >= polydb_db_core::row_cap() {
+                        truncated = true;
+                        break;
+                    }
+                    data.push(row.sql_values().iter().map(Self::or_value).collect());
                 }
-                data.push(row.sql_values().iter().map(Self::or_value).collect());
+                Ok(QueryResult {
+                    columns,
+                    rows: data,
+                    affected_rows: 0,
+                    execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
+                    truncated,
+                    total_rows: None,
+                    has_more: truncated,
+                    statement_type: Some(stmt_type),
+                })
+            } else {
+                stmt.execute(&refs)
+                    .map_err(|e| db_err(&e, "execute failed"))?;
+                let affected = stmt
+                    .row_count()
+                    .map_err(|e| db_err(&e, "row_count failed"))?;
+                Ok(QueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                    affected_rows: affected,
+                    execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
+                    truncated: false,
+                    total_rows: None,
+                    has_more: false,
+                    statement_type: Some(stmt_type),
+                })
             }
-            Ok(QueryResult {
-                columns,
-                rows: data,
-                affected_rows: 0,
-                execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
-                truncated,
-                total_rows: None,
-                has_more: truncated,
-                statement_type: Some(stmt_type),
-            })
-        } else {
-            stmt.execute(&refs)
-                .map_err(|e| db_err(&e, "execute failed"))?;
-            let affected = stmt
-                .row_count()
-                .map_err(|e| db_err(&e, "row_count failed"))?;
-            Ok(QueryResult {
-                columns: vec![],
-                rows: vec![],
-                affected_rows: affected,
-                execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
-                truncated: false,
-                total_rows: None,
-                has_more: false,
-                statement_type: Some(stmt_type),
-            })
-        }
         })
         .await
         .map_err(|e| CoreError::Internal(format!("oracle task join: {e}")))?
@@ -389,9 +387,7 @@ impl SqlDriver for OracleConn {
                 .map_err(|e| db_err(&e, "prepare failed"))?;
 
             if stmt_type == StatementType::Select || stmt_type == StatementType::Other {
-                let mut rows = stmt
-                    .query(&refs)
-                    .map_err(|e| db_err(&e, "query failed"))?;
+                let mut rows = stmt.query(&refs).map_err(|e| db_err(&e, "query failed"))?;
                 let columns = rows
                     .column_info()
                     .iter()

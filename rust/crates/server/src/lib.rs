@@ -595,7 +595,9 @@ async fn test_connection(State(app): State<AppState>, Path(id): Path<String>) ->
                 StatusCode::OK,
                 ConnectionStatus {
                     connected: true,
-                    latency_ms: Some(Instant::now().duration_since(start).as_micros() as f64 / 1000.0),
+                    latency_ms: Some(
+                        Instant::now().duration_since(start).as_micros() as f64 / 1000.0,
+                    ),
                     ..status
                 },
             ),

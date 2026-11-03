@@ -12,12 +12,12 @@ use sqlx::types::uuid::Uuid;
 use sqlx::types::Json;
 use sqlx::{Column, Row, TypeInfo, ValueRef};
 
+use polydb_core::error_classify::{driver_error, DriverClass};
 use polydb_core::{
     ColumnInfo, CoreError, CoreResult, DatabaseKind, ForeignKeyInfo, IndexInfo, IsolationLevel,
     QueryResult, ResultColumn, SchemaInfo, StatementType, TableInfo, TableType, Value,
 };
 use polydb_db_core::{DatabaseDriver, SqlDriver, TxMode};
-use polydb_core::error_classify::{driver_error, DriverClass};
 
 pub struct PostgresConn {
     pool: PgPool,
@@ -212,10 +212,7 @@ impl PostgresConn {
             let mut rows: Vec<sqlx::postgres::PgRow> = Vec::new();
             let mut truncated = false;
             use futures_util::StreamExt;
-            while let Some(row) = stream
-                .next()
-                .await
-            {
+            while let Some(row) = stream.next().await {
                 let row = row.map_err(|e| db_err(&e, "query failed"))?;
                 if rows.len() >= polydb_db_core::row_cap() {
                     truncated = true;
@@ -508,10 +505,8 @@ impl SqlDriver for PostgresConn {
 
         // 按索引名分组：行序由 ORDER BY c.relname, ik.N 保证，故索引序与列序都稳定；
         // 输出顺序仍以第一查询的 rows（按 relname）为准。
-        let mut cols_by_index: std::collections::HashMap<
-            String,
-            Vec<polydb_core::IndexColumn>,
-        > = std::collections::HashMap::new();
+        let mut cols_by_index: std::collections::HashMap<String, Vec<polydb_core::IndexColumn>> =
+            std::collections::HashMap::new();
         for cr in &col_rows {
             cols_by_index
                 .entry(cr.get::<String, _>(0))
@@ -607,10 +602,7 @@ impl SqlDriver for PostgresConn {
             .collect())
     }
 
-    async fn batch_columns(
-        &self,
-        schema: &str,
-    ) -> CoreResult<Option<Vec<(String, ColumnInfo)>>> {
+    async fn batch_columns(&self, schema: &str) -> CoreResult<Option<Vec<(String, ColumnInfo)>>> {
         // 批量列配方 = 逐表 `list_columns` 去掉表过滤、relname 前置（Go PG
         // `CatalogBatchColumns` 的 Rust 对应物）。表达式与 `list_columns` 逐列一致，
         // 故批量结果与逐表结果行对行相等（等价契约见 equivalence 测试）。

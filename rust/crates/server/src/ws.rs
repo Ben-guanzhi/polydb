@@ -322,7 +322,10 @@ impl Session {
         let in_flight = Arc::clone(&self.in_flight);
         // §2.3：timeout_ms>0 生效，超时回 POLYDB_ERR_TIMEOUT。此前 WS 路径
         // 完全忽略该字段，一条慢查询永不返回。
-        let timeout = request.timeout_ms.filter(|ms| *ms > 0).map(Duration::from_millis);
+        let timeout = request
+            .timeout_ms
+            .filter(|ms| *ms > 0)
+            .map(Duration::from_millis);
         let max_rows = crate::query_row_limit(&request);
 
         tokio::spawn(async move {
@@ -375,7 +378,12 @@ impl Session {
     }
 
     fn handle_cancel(&mut self, query_id: Uuid) {
-        if let Some(cancel) = self.in_flight.lock().expect("in_flight poisoned").remove(&query_id) {
+        if let Some(cancel) = self
+            .in_flight
+            .lock()
+            .expect("in_flight poisoned")
+            .remove(&query_id)
+        {
             cancel.notify_one();
             return;
         }

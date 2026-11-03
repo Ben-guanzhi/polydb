@@ -52,10 +52,7 @@ async fn probe_conn(label: &str) -> Option<(PostgresConn, String)> {
     {
         panic!("清理旧探测 schema 失败：{e}");
     }
-    if let Err(e) = conn
-        .execute(&format!("CREATE SCHEMA {schema}"), &[])
-        .await
-    {
+    if let Err(e) = conn.execute(&format!("CREATE SCHEMA {schema}"), &[]).await {
         panic!("建探测 schema 失败：{e}");
     }
     Some((conn, schema))
@@ -396,9 +393,7 @@ async fn p11_list_tables_respects_schema() {
         &c,
         &[
             &format!("CREATE TABLE {schema}.p11_marker (id bigint)"),
-            &format!(
-                "CREATE VIEW {schema}.p11_marker_v AS SELECT id FROM {schema}.p11_marker"
-            ),
+            &format!("CREATE VIEW {schema}.p11_marker_v AS SELECT id FROM {schema}.p11_marker"),
         ],
     )
     .await;
@@ -458,14 +453,12 @@ async fn p12_batch_metadata_equivalence() {
     let Some(batch_cols) = c.batch_columns(&schema).await.unwrap() else {
         panic!("PG 应实现 batch_columns（K-1.2 的 Rust 对应物）");
     };
-    let by_table: std::collections::HashMap<String, Vec<polydb_core::ColumnInfo>> =
-        batch_cols.into_iter().fold(
-            std::collections::HashMap::new(),
-            |mut m, (t, col)| {
-                m.entry(t).or_default().push(col);
-                m
-            },
-        );
+    let by_table: std::collections::HashMap<String, Vec<polydb_core::ColumnInfo>> = batch_cols
+        .into_iter()
+        .fold(std::collections::HashMap::new(), |mut m, (t, col)| {
+            m.entry(t).or_default().push(col);
+            m
+        });
     for t in ["t1", "t2", "t3"] {
         let per = c.list_columns(&schema, t).await.unwrap();
         let batch = by_table.get(t).cloned().unwrap_or_default();

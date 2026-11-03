@@ -10,13 +10,13 @@ use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use sqlx::mysql::{MySqlPool, MySqlPoolOptions, MySqlRow};
 use sqlx::{Column, Row, TransactionManager, TypeInfo, ValueRef};
 
+use polydb_core::error_classify::{driver_error, DriverClass};
 use polydb_core::{
     ColumnInfo, CoreError, CoreResult, DatabaseKind, ForeignKeyInfo, IndexColumn, IndexInfo,
     IndexType, IsolationLevel, QueryResult, ResultColumn, SchemaInfo, StatementType, TableInfo,
     TableType, Value,
 };
 use polydb_db_core::{DatabaseDriver, SqlDriver, TxMode};
-use polydb_core::error_classify::{driver_error, DriverClass};
 
 pub struct MySqlConn {
     pool: MySqlPool,
@@ -220,10 +220,7 @@ impl MySqlConn {
             let mut rows: Vec<sqlx::mysql::MySqlRow> = Vec::new();
             let mut truncated = false;
             use futures_util::StreamExt;
-            while let Some(row) = stream
-                .next()
-                .await
-            {
+            while let Some(row) = stream.next().await {
                 let row = row.map_err(|e| db_err(&e, "query failed"))?;
                 if rows.len() >= polydb_db_core::row_cap() {
                     truncated = true;

@@ -31,9 +31,12 @@ pub fn driver_error(
         Some((code, retryable)) => CoreError::DriverClassified {
             code: code.into_boxed_str(),
             message: text.to_string().into_boxed_str(),
-            detail: sqlstate.map(|s| Value::Object(
-                serde_json::Map::from_iter([("sqlstate".to_string(), Value::String(s.to_string()))]),
-            )),
+            detail: sqlstate.map(|s| {
+                Value::Object(serde_json::Map::from_iter([(
+                    "sqlstate".to_string(),
+                    Value::String(s.to_string()),
+                )]))
+            }),
             retryable,
         },
         None => CoreError::Driver(text.to_string()),
@@ -138,7 +141,9 @@ mod tests {
     fn sqlstate_maps_to_protocol_codes() {
         let e = driver_error(Some("23505"), None, None, "UNIQUE violation");
         match e {
-            CoreError::DriverClassified { code, retryable, .. } => {
+            CoreError::DriverClassified {
+                code, retryable, ..
+            } => {
                 assert_eq!(code.as_ref(), codes::DUPLICATE_KEY);
                 assert!(!retryable);
             }
@@ -146,7 +151,9 @@ mod tests {
         }
         let e = driver_error(Some("40P01"), None, None, "deadlock");
         match e {
-            CoreError::DriverClassified { code, retryable, .. } => {
+            CoreError::DriverClassified {
+                code, retryable, ..
+            } => {
                 assert_eq!(code.as_ref(), codes::DEADLOCK);
                 assert!(retryable);
             }
@@ -155,7 +162,9 @@ mod tests {
         // Class 08 prefix = connection class, anywhere in the five chars.
         let e = driver_error(Some("08006"), None, None, "connection lost");
         match e {
-            CoreError::DriverClassified { code, retryable, .. } => {
+            CoreError::DriverClassified {
+                code, retryable, ..
+            } => {
                 assert_eq!(code.as_ref(), codes::CONNECTION_FAILED);
                 assert!(retryable);
             }
@@ -167,7 +176,9 @@ mod tests {
     fn numeric_and_text_evidence_fill_the_gap() {
         let e = driver_error(None, Some(1205), None, "lock wait timed out");
         match e {
-            CoreError::DriverClassified { code, retryable, .. } => {
+            CoreError::DriverClassified {
+                code, retryable, ..
+            } => {
                 assert_eq!(code.as_ref(), codes::DEADLOCK);
                 assert!(retryable);
             }
@@ -175,7 +186,9 @@ mod tests {
         }
         let e = driver_error(None, None, None, "UNIQUE constraint failed: t.id");
         match e {
-            CoreError::DriverClassified { code, .. } => assert_eq!(code.as_ref(), codes::DUPLICATE_KEY),
+            CoreError::DriverClassified { code, .. } => {
+                assert_eq!(code.as_ref(), codes::DUPLICATE_KEY)
+            }
             other => panic!("expected classified, got {other:?}"),
         }
         let e = driver_error(None, None, None, "syntax error near ...");

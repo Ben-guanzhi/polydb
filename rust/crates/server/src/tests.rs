@@ -205,14 +205,26 @@ async fn query_flow_with_id_echo() {
 async fn query_duplicate_key_classified() {
     let router = new_test_router();
     let id = create_sqlite_conn(&router, "dupkey").await;
-    let (status, value, _) =
-        query(&router, &id, json!({"sql": "CREATE TABLE pk1(id INTEGER PRIMARY KEY, name TEXT)"})).await;
+    let (status, value, _) = query(
+        &router,
+        &id,
+        json!({"sql": "CREATE TABLE pk1(id INTEGER PRIMARY KEY, name TEXT)"}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{value}");
-    let (status, value, _) =
-        query(&router, &id, json!({"sql": "INSERT INTO pk1 VALUES(1, 'a')"})).await;
+    let (status, value, _) = query(
+        &router,
+        &id,
+        json!({"sql": "INSERT INTO pk1 VALUES(1, 'a')"}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{value}");
-    let (status, value, _) =
-        query(&router, &id, json!({"sql": "INSERT INTO pk1 VALUES(1, 'b')"})).await;
+    let (status, value, _) = query(
+        &router,
+        &id,
+        json!({"sql": "INSERT INTO pk1 VALUES(1, 'b')"}),
+    )
+    .await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(value["code"], "POLYDB_ERR_DUPLICATE_KEY", "{value}");
     assert_eq!(value["retryable"], false);
@@ -1249,7 +1261,13 @@ async fn body_under_the_limit_reaches_the_handler() {
 // 阻塞任务收尾——用比 SLOW_SQL 短一档的规模，保证窗口足够而用例不拖几十秒。
 const MEDIUM_SQL: &str = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 5000000) SELECT MAX(x) FROM c";
 
-fn ws_query_with(query_id: uuid::Uuid, id: &str, sql: &str, timeout_ms: Option<u64>, max_rows: Option<u64>) -> ClientMessage {
+fn ws_query_with(
+    query_id: uuid::Uuid,
+    id: &str,
+    sql: &str,
+    timeout_ms: Option<u64>,
+    max_rows: Option<u64>,
+) -> ClientMessage {
     ClientMessage::Query {
         query_id,
         request: QueryRequest {
@@ -1279,10 +1297,7 @@ async fn ws_hello(
     ws.send(WsMessage::Binary(ws_encode(&hello).into()))
         .await
         .unwrap();
-    assert!(matches!(
-        ws_recv(ws).await,
-        ServerMessage::HelloAck { .. }
-    ));
+    assert!(matches!(ws_recv(ws).await, ServerMessage::HelloAck { .. }));
 }
 
 // 取消必须在查询执行中可达：此前 in_flight 的 notify 从未被等待的一方读走。
@@ -1346,9 +1361,13 @@ async fn ws_query_timeout() {
 async fn ws_query_max_rows() {
     let router = new_test_router();
     let id = create_sqlite_conn(&router, "ws-maxrows").await;
-    let (status, value, _) = query(&router, &id, json!({"sql": "CREATE TABLE seq(v INTEGER)"})).await;
+    let (status, value, _) =
+        query(&router, &id, json!({"sql": "CREATE TABLE seq(v INTEGER)"})).await;
     assert_eq!(status, StatusCode::OK, "{value}");
-    let seed = (1..=25).map(|i| i.to_string()).collect::<Vec<_>>().join("),(");
+    let seed = (1..=25)
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join("),(");
     let (status, value, _) = query(
         &router,
         &id,
@@ -1362,7 +1381,13 @@ async fn ws_query_max_rows() {
     ws_hello(&mut ws, &id).await;
 
     let query_id = uuid::Uuid::new_v4();
-    let msg = ws_query_with(query_id, &id, "SELECT v FROM seq ORDER BY v", None, Some(10));
+    let msg = ws_query_with(
+        query_id,
+        &id,
+        "SELECT v FROM seq ORDER BY v",
+        None,
+        Some(10),
+    );
     ws.send(WsMessage::Binary(ws_encode(&msg).into()))
         .await
         .unwrap();

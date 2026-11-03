@@ -5,12 +5,12 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use rusqlite::Connection as RusqliteConnection;
 
+use polydb_core::error_classify::driver_error;
 use polydb_core::{
     ColumnInfo, CoreError, CoreResult, DatabaseKind, ForeignKeyAction, ForeignKeyInfo, IndexInfo,
     QueryResult, ResultColumn, SchemaInfo, StatementType, TableInfo, TableType, Value,
 };
 use polydb_db_core::{DatabaseDriver, SqlDriver, TxMode};
-use polydb_core::error_classify::driver_error;
 
 // Quote an identifier for interpolation into a PRAGMA statement. PRAGMA has no
 // bound-parameter form for its identifier argument, so the name goes in as
@@ -624,10 +624,7 @@ impl SqlDriver for SqliteConn {
         .map_err(|e| CoreError::Internal(format!("sqlite task join: {e}")))?
     }
 
-    async fn batch_columns(
-        &self,
-        _schema: &str,
-    ) -> CoreResult<Option<Vec<(String, ColumnInfo)>>> {
+    async fn batch_columns(&self, _schema: &str) -> CoreResult<Option<Vec<(String, ColumnInfo)>>> {
         // 批量列配方 = 逐表 `list_columns` 去掉表名参数、改用 `pragma_table_info`
         // 表值函数一次取全库（Go SQLite `CatalogBatchColumns` 的 Rust 对应物）。
         // 表达式与逐表逐列一致，故批量结果与逐表结果行对行相等。
@@ -807,12 +804,10 @@ mod tests {
         // introspectable through the PRAGMA paths that interpolate it.
         let conn = SqliteConn::open(":memory:").unwrap();
         let sql_driver: &dyn SqlDriver = conn.as_sql().unwrap();
-        polydb_rt::block_on(
-            sql_driver.execute(
-                "CREATE TABLE \"my\"\"table\" (id INTEGER PRIMARY KEY, x INTEGER)",
-                &[],
-            ),
-        )
+        polydb_rt::block_on(sql_driver.execute(
+            "CREATE TABLE \"my\"\"table\" (id INTEGER PRIMARY KEY, x INTEGER)",
+            &[],
+        ))
         .unwrap();
         let cols = polydb_rt::block_on(sql_driver.list_columns("main", "my\"table")).unwrap();
         assert_eq!(cols.len(), 2);
