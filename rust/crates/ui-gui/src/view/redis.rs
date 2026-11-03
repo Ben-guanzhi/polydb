@@ -63,6 +63,8 @@ impl PolyDBApp {
         let vediting = self.redis_val_editing;
         let vbuf = self.redis_val_buf.clone();
         let vcur = self.redis_val_cursor;
+        let vwin = self.redis_value_window.clone();
+        let vloading = self.redis_value_loading;
 
         let db_chips: Vec<Stateful<Div>> = (0..16u32)
             .map(|i| {
@@ -313,6 +315,44 @@ impl PolyDBApp {
                                             ),
                                     )
                                     .when_some(type_label, |d, tl| d.child(badge(tl, th.ok, &th)))
+                                    .when(!vediting && has_value, |d| {
+                                        let total = vwin.as_ref().map_or(0, |w| w.total);
+                                        let more = vwin
+                                            .as_ref()
+                                            .is_some_and(|w| !w.next_cursor.is_empty());
+                                        let truncated = vwin.as_ref().is_some_and(|w| w.truncated);
+                                        d.child(
+                                            div()
+                                                .text_size(px(11.0))
+                                                .text_color(th.fg_dim)
+                                                .child(format!("共 {total} 项")),
+                                        )
+                                        .when(more, |d| {
+                                            let label = if vloading {
+                                                "加载中…"
+                                            } else {
+                                                "加载更多…"
+                                            };
+                                            d.child(btn("rd-val-more", label, &th).on_click(
+                                                cx.listener(
+                                                    |this, _ev: &ClickEvent, _window, cx| {
+                                                        this.redis_more_value(cx);
+                                                    },
+                                                ),
+                                            ))
+                                        })
+                                        .when(
+                                            !more && truncated,
+                                            |d| {
+                                                d.child(
+                                                    div()
+                                                        .text_size(px(11.0))
+                                                        .text_color(th.fg_dim)
+                                                        .child("已到末尾"),
+                                                )
+                                            },
+                                        )
+                                    })
                                     .when(vediting, |d| {
                                         d.child(
                                             div()

@@ -5909,6 +5909,7 @@ dependencies = [
  "async-trait",
  "polydb-core",
  "polydb-protocol",
+ "serde",
  "thiserror 2.0.20",
 ]
 
@@ -6098,6 +6099,7 @@ dependencies = [
  "async-trait",
  "polydb-app-core",
  "polydb-core",
+ "polydb-db-core",
  "polydb-protocol",
  "polydb-rt",
  "polydb-storage",

@@ -15,13 +15,19 @@ use polydb_core::{
     CoreError, CoreResult, DatabaseKind, RedisKeyInfo, RedisKeyType, RedisReply, RedisReplyType,
     RedisReplyValue, RedisScanPage, RedisValue, RedisZSetMember,
 };
-use polydb_db_core::{DatabaseDriver, KvDriver};
+use polydb_db_core::{DatabaseDriver, KvDriver, RedisValueLimit, RedisValueWindow};
 
 /// 拨号/读/写超时（与 Go 侧 5s 对齐）。
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 /// D5（spec/behavior.md §1.3）：单次 scan_keys 内部续扫的轮次上限，Go 侧同名同值。
 const SCAN_MAX_ROUNDS: u32 = 100;
+
+/// XRANGE 单条消息 `(id, fields)`。类型别名消掉 clippy `type_complexity`。
+type StreamEntry = (String, HashMap<String, String>);
+
+#[cfg(test)]
+mod bounded_tests;
 
 #[cfg(test)]
 mod scan_tests;
@@ -168,7 +174,11 @@ impl KvDriver for RedisConn {
     }
 
     async fn scan_keys(&self, cursor: u64, pattern: &str, count: u32) -> CoreResult<RedisScanPage> {
-        let pattern: String = if pattern.is_empty() { "*".to_string() } else { pattern.to_string() };
+        let pattern: String = if pattern.is_empty() {
+            "*".to_string()
+        } else {
+            pattern.to_string()
+        };
         let count = if count == 0 { 100 } else { count };
         let db = self.db.load(Ordering::Relaxed);
         let (cursor, keys) = self
@@ -200,9 +210,7 @@ impl KvDriver for RedisConn {
                     for k in &batch {
                         pipe.cmd("TYPE").arg(k).cmd("TTL").arg(k);
                     }
-                    let pairs: Vec<(String, i64)> = pipe
-                        .query(conn)
-                        .map_err(Self::err)?;
+                    let pairs: Vec<(String, i64)> = pipe.query(conn).map_err(Self::err)?;
                     for (k, (typ, ttl)) in batch.into_iter().zip(pairs) {
                         keys.push(RedisKeyInfo {
                             key: k,
@@ -243,7 +251,9 @@ impl KvDriver for RedisConn {
             RedisKeyType::None => Err(CoreError::Driver(format!("key not found: {owned}"))),
             RedisKeyType::String => {
                 let v: String = self
-                    .with_conn(move |conn| redis::cmd("GET").arg(owned).query(conn).map_err(Self::err))
+                    .with_conn(move |conn| {
+                        redis::cmd("GET").arg(owned).query(conn).map_err(Self::err)
+                    })
                     .await?;
                 Ok(RedisValue::String(v))
             }
@@ -251,7 +261,12 @@ impl KvDriver for RedisConn {
                 let list_key = owned.clone();
                 let v: Vec<String> = self
                     .with_conn(move |conn| {
-                        redis::cmd("LRANGE").arg(list_key).arg(0).arg(-1).query(conn).map_err(Self::err)
+                        redis::cmd("LRANGE")
+                            .arg(list_key)
+                            .arg(0)
+                            .arg(-1)
+                            .query(conn)
+                            .map_err(Self::err)
                     })
                     .await?;
                 Ok(RedisValue::List(v))
@@ -260,7 +275,10 @@ impl KvDriver for RedisConn {
                 let set_key = owned.clone();
                 let v: Vec<String> = self
                     .with_conn(move |conn| {
-                        redis::cmd("SMEMBERS").arg(set_key).query(conn).map_err(Self::err)
+                        redis::cmd("SMEMBERS")
+                            .arg(set_key)
+                            .query(conn)
+                            .map_err(Self::err)
                     })
                     .await?;
                 Ok(RedisValue::Set(v))
@@ -296,7 +314,10 @@ impl KvDriver for RedisConn {
                 let hash_key = owned.clone();
                 let v: HashMap<String, String> = self
                     .with_conn(move |conn| {
-                        redis::cmd("HGETALL").arg(hash_key).query(conn).map_err(Self::err)
+                        redis::cmd("HGETALL")
+                            .arg(hash_key)
+                            .query(conn)
+                            .map_err(Self::err)
                     })
                     .await?;
                 Ok(RedisValue::Hash(v))
@@ -318,6 +339,35 @@ impl KvDriver for RedisConn {
                     .await?;
                 Ok(RedisValue::Stream(serialize_stream(&v)))
             }
+        }
+    }
+
+    /// 有界窗口读取（对齐内核 `BoundedValueReader` + `KeyPageReader` 语义）：
+    /// 首窗只取限额内的值，附完整规模与截断标记；`cursor` 非空时续读下一窗。
+    ///
+    /// 游标为驱动私有字符串（调用方原样回传 [`RedisValueWindow::next_cursor`]）：
+    /// `""` = 首窗；`rank:<n>` = list/zset 从第 n 项起；`scan:<c>` = set/hash
+    /// 的 SCAN/HSCAN 游标；`stream:<id>` = stream 从该 ID 之后起。
+    async fn get_value_window(
+        &self,
+        key: &str,
+        limit: RedisValueLimit,
+        cursor: &str,
+    ) -> CoreResult<RedisValueWindow> {
+        let limit = limit.resolved();
+        let owned = key.to_string();
+        let probe = owned.clone();
+        let typ: String = self
+            .with_conn(move |conn| redis::cmd("TYPE").arg(probe).query(conn).map_err(Self::err))
+            .await?;
+        match Self::key_type_of(&typ) {
+            RedisKeyType::None => Err(CoreError::Driver(format!("key not found: {owned}"))),
+            RedisKeyType::String => self.window_string(owned, limit).await,
+            RedisKeyType::List => self.window_rank(owned, limit, cursor, false).await,
+            RedisKeyType::Set => self.window_scan_set(owned, limit, cursor).await,
+            RedisKeyType::Zset => self.window_rank(owned, limit, cursor, true).await,
+            RedisKeyType::Hash => self.window_scan_hash(owned, limit, cursor).await,
+            RedisKeyType::Stream => self.window_stream(owned, limit, cursor).await,
         }
     }
 
@@ -510,6 +560,48 @@ fn scalar_repr(v: &RValue) -> String {
     }
 }
 
+// ─── 有界窗口读取辅助 ────────────────────────────────────────
+
+/// 解析 rank 游标（list/zset）：空串 = 0，`rank:<n>` = n。
+fn parse_rank_cursor(cursor: &str) -> i64 {
+    cursor
+        .strip_prefix("rank:")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0)
+}
+
+/// 解析 scan 游标（set/hash）：空串 = 0，`scan:<c>` = c。
+fn parse_scan_cursor(cursor: &str) -> u64 {
+    cursor
+        .strip_prefix("scan:")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+/// 解析 stream 游标：空串 = 从头，`stream:<id>` = id。
+fn parse_stream_cursor(cursor: &str) -> String {
+    cursor.strip_prefix("stream:").unwrap_or("").to_string()
+}
+
+/// 在字节切片上回退到最后一个完整 UTF-8 字符边界（最多 3 字节，即最长字符的
+/// 一半），与 Go 侧 trimPartialRune 的二进制安全语义严格一致：每轮回退后重判
+/// 整段是否合法 UTF-8，非法才继续退。只看末字节是否为续字节不够——3 字节字符
+/// 被切在第 1 字节后时末字节是首字节，仍须再退一格。
+/// 无效 UTF-8 的原样保留（garbage in, garbage out）。
+fn trim_partial_rune_bytes(bytes: &[u8]) -> &[u8] {
+    let mut end = bytes.len();
+    for _ in 0..3 {
+        if end == 0 {
+            break;
+        }
+        if std::str::from_utf8(&bytes[..end]).is_ok() {
+            break;
+        }
+        end -= 1;
+    }
+    &bytes[..end]
+}
+
 // serialize_stream：id {k=v, k2=v2} 格式，消息间 "; " 连接（与 Go 侧一致）。
 fn serialize_stream(msgs: &[(String, HashMap<String, String>)]) -> String {
     let mut parts: Vec<String> = Vec::with_capacity(msgs.len());
@@ -519,4 +611,306 @@ fn serialize_stream(msgs: &[(String, HashMap<String, String>)]) -> String {
         parts.push(format!("{id} {{{}}}", pairs.join(", ")));
     }
     parts.join("; ")
+}
+
+impl RedisConn {
+    /// string：STRLEN 取总字节，超限用 GETRANGE 只取前 max_string_bytes 字节
+    /// （无续读游标，与内核一致——截断标记足够值页提示）。
+    async fn window_string(
+        &self,
+        key: String,
+        limit: RedisValueLimit,
+    ) -> CoreResult<RedisValueWindow> {
+        let max = limit.max_string_bytes;
+        let (total, raw): (i64, Vec<u8>) = self
+            .with_conn(move |conn| {
+                let total: i64 = redis::cmd("STRLEN")
+                    .arg(&key)
+                    .query(conn)
+                    .map_err(Self::err)?;
+                let raw: Vec<u8> = redis::cmd("GET").arg(&key).query(conn).map_err(Self::err)?;
+                Ok((total, raw))
+            })
+            .await?;
+        if total <= max {
+            Ok(RedisValueWindow {
+                value: RedisValue::String(String::from_utf8_lossy(&raw).into_owned()),
+                total,
+                truncated: false,
+                next_cursor: String::new(),
+            })
+        } else {
+            let end = (max.min(raw.len() as i64)) as usize;
+            let trimmed = trim_partial_rune_bytes(&raw[..end]);
+            Ok(RedisValueWindow {
+                value: RedisValue::String(String::from_utf8_lossy(trimmed).into_owned()),
+                total,
+                truncated: true,
+                next_cursor: String::new(),
+            })
+        }
+    }
+
+    /// list/zset：按名次窗口（LRANGE/ZRANGE offset..offset+max-1），
+    /// 游标 `rank:<offset>`；truncated = 已取偏移 + 本窗条数 < 总长。
+    async fn window_rank(
+        &self,
+        key: String,
+        limit: RedisValueLimit,
+        cursor: &str,
+        zset: bool,
+    ) -> CoreResult<RedisValueWindow> {
+        let offset = parse_rank_cursor(cursor);
+        let max = limit.max_entries;
+        let stop = offset + max - 1;
+        if zset {
+            let (total, flat): (i64, Vec<String>) = self
+                .with_conn(move |conn| {
+                    let mut pipe = redis::pipe();
+                    pipe.cmd("ZCARD").arg(&key);
+                    pipe.cmd("ZRANGE")
+                        .arg(&key)
+                        .arg(offset)
+                        .arg(stop)
+                        .arg("WITHSCORES");
+                    pipe.query(conn).map_err(Self::err)
+                })
+                .await?;
+            let mut members = Vec::with_capacity(flat.len() / 2);
+            let mut it = flat.into_iter();
+            while let (Some(member), Some(score)) = (it.next(), it.next()) {
+                members.push(RedisZSetMember {
+                    member,
+                    score: score.parse().unwrap_or(0.0),
+                });
+            }
+            let returned = members.len() as i64;
+            let truncated = offset + returned < total;
+            let next_cursor = if truncated {
+                format!("rank:{}", offset + returned)
+            } else {
+                String::new()
+            };
+            Ok(RedisValueWindow {
+                value: RedisValue::Zset(members),
+                total,
+                truncated,
+                next_cursor,
+            })
+        } else {
+            let (total, items): (i64, Vec<String>) = self
+                .with_conn(move |conn| {
+                    let mut pipe = redis::pipe();
+                    pipe.cmd("LLEN").arg(&key);
+                    pipe.cmd("LRANGE").arg(&key).arg(offset).arg(stop);
+                    pipe.query(conn).map_err(Self::err)
+                })
+                .await?;
+            let returned = items.len() as i64;
+            let truncated = offset + returned < total;
+            let next_cursor = if truncated {
+                format!("rank:{}", offset + returned)
+            } else {
+                String::new()
+            };
+            Ok(RedisValueWindow {
+                value: RedisValue::List(items),
+                total,
+                truncated,
+                next_cursor,
+            })
+        }
+    }
+
+    /// set：SCARD 取总成员数；SSCAN 循环凑满 max_entries 个去重成员，
+    /// 游标 `scan:<c>`；truncated = 未取到 0 游标（还有更多）。
+    async fn window_scan_set(
+        &self,
+        key: String,
+        limit: RedisValueLimit,
+        cursor: &str,
+    ) -> CoreResult<RedisValueWindow> {
+        let start = parse_scan_cursor(cursor);
+        let max = limit.max_entries;
+        let (total, mut members, next): (i64, Vec<String>, u64) = self
+            .with_conn(move |conn| {
+                let total: i64 = redis::cmd("SCARD")
+                    .arg(&key)
+                    .query(conn)
+                    .map_err(Self::err)?;
+                let mut seen: std::collections::HashSet<String> = Default::default();
+                let mut members: Vec<String> = Vec::new();
+                let mut cur = start;
+                loop {
+                    let remaining = (max - members.len() as i64).max(0) as u64;
+                    if remaining == 0 {
+                        break;
+                    }
+                    // SSCAN 返回 [next_cursor, [members...]]。
+                    let (nxt, batch): (u64, Vec<String>) = redis::cmd("SSCAN")
+                        .arg(&key)
+                        .arg(cur)
+                        .arg("COUNT")
+                        .arg(remaining)
+                        .query(conn)
+                        .map_err(Self::err)?;
+                    for m in batch {
+                        // SSCAN 在 rehash 中途可能重复成员，窗口内去重。
+                        if seen.insert(m.clone()) {
+                            members.push(m);
+                        }
+                    }
+                    cur = nxt;
+                    if cur == 0 || members.len() as i64 >= max {
+                        break;
+                    }
+                }
+                Ok((total, members, cur))
+            })
+            .await?;
+        members.sort();
+        let truncated = next != 0;
+        let next_cursor = if next != 0 {
+            format!("scan:{next}")
+        } else {
+            String::new()
+        };
+        Ok(RedisValueWindow {
+            value: RedisValue::Set(members),
+            total,
+            truncated,
+            next_cursor,
+        })
+    }
+
+    /// hash：HLEN 取总字段数；HSCAN 循环凑满 max_entries 个字段，
+    /// 游标 `scan:<c>`；truncated = 未取到 0 游标。
+    async fn window_scan_hash(
+        &self,
+        key: String,
+        limit: RedisValueLimit,
+        cursor: &str,
+    ) -> CoreResult<RedisValueWindow> {
+        let start = parse_scan_cursor(cursor);
+        let max = limit.max_entries;
+        let (total, fields, next): (i64, HashMap<String, String>, u64) = self
+            .with_conn(move |conn| {
+                let total: i64 = redis::cmd("HLEN")
+                    .arg(&key)
+                    .query(conn)
+                    .map_err(Self::err)?;
+                let mut fields: HashMap<String, String> = HashMap::new();
+                let mut cur = start;
+                loop {
+                    let remaining = (max - fields.len() as i64).max(0) as u64;
+                    if remaining == 0 {
+                        break;
+                    }
+                    // HSCAN 返回 [next_cursor, [field, value, ...]]。
+                    let (nxt, flat): (u64, Vec<String>) = redis::cmd("HSCAN")
+                        .arg(&key)
+                        .arg(cur)
+                        .arg("COUNT")
+                        .arg(remaining)
+                        .query(conn)
+                        .map_err(Self::err)?;
+                    let mut it = flat.into_iter();
+                    while let (Some(f), Some(v)) = (it.next(), it.next()) {
+                        fields.entry(f).or_insert(v);
+                    }
+                    cur = nxt;
+                    if cur == 0 || fields.len() as i64 >= max {
+                        break;
+                    }
+                }
+                Ok((total, fields, cur))
+            })
+            .await?;
+        let truncated = next != 0;
+        let next_cursor = if next != 0 {
+            format!("scan:{next}")
+        } else {
+            String::new()
+        };
+        Ok(RedisValueWindow {
+            value: RedisValue::Hash(fields),
+            total,
+            truncated,
+            next_cursor,
+        })
+    }
+
+    /// stream：XLEN 取总条数；XRANGE 按 ID 顺序取 max_entries 条。
+    /// 游标 `stream:<id>`（从该 ID 之后起，用 `(` 排除自身，不支持则多读丢首条）；
+    /// truncated = 本窗取满（可能还有更多）。
+    async fn window_stream(
+        &self,
+        key: String,
+        limit: RedisValueLimit,
+        cursor: &str,
+    ) -> CoreResult<RedisValueWindow> {
+        let after = parse_stream_cursor(cursor);
+        let max = limit.max_entries;
+        let (total, msgs): (i64, Vec<StreamEntry>) = self
+            .with_conn(move |conn| {
+                let total: i64 = redis::cmd("XLEN")
+                    .arg(&key)
+                    .query(conn)
+                    .map_err(Self::err)?;
+                let msgs: Vec<StreamEntry> = if after.is_empty() {
+                    redis::cmd("XRANGE")
+                        .arg(&key)
+                        .arg("-")
+                        .arg("+")
+                        .arg("COUNT")
+                        .arg(max)
+                        .query(conn)
+                        .map_err(Self::err)?
+                } else {
+                    // `(` 前缀排除 after 本身（Redis 6.2+）；不支持则回退多读一条丢首条。
+                    match redis::cmd("XRANGE")
+                        .arg(&key)
+                        .arg(format!("({after}"))
+                        .arg("+")
+                        .arg("COUNT")
+                        .arg(max)
+                        .query::<Vec<StreamEntry>>(conn)
+                    {
+                        Ok(v) => v,
+                        Err(_) => {
+                            let v: Vec<StreamEntry> = redis::cmd("XRANGE")
+                                .arg(&key)
+                                .arg(&after)
+                                .arg("+")
+                                .arg("COUNT")
+                                .arg(max + 1)
+                                .query(conn)
+                                .map_err(Self::err)?;
+                            if v.first().map(|(id, _)| id.as_str()) == Some(after.as_str()) {
+                                v[1..].to_vec()
+                            } else {
+                                v
+                            }
+                        }
+                    }
+                };
+                Ok((total, msgs))
+            })
+            .await?;
+        let returned = msgs.len() as i64;
+        let truncated = returned >= max;
+        let next_cursor = if truncated {
+            msgs.last()
+                .map(|(id, _)| format!("stream:{id}"))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        Ok(RedisValueWindow {
+            value: RedisValue::Stream(serialize_stream(&msgs)),
+            total,
+            truncated,
+            next_cursor,
+        })
+    }
 }

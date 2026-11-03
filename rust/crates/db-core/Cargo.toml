@@ -8,4 +8,5 @@ description = "PolyDB database driver abstractions"
 polydb-core = { workspace = true }
 polydb-protocol = { workspace = true }
 async-trait = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }

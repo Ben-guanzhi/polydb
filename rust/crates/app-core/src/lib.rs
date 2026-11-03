@@ -12,7 +12,10 @@ use polydb_core::{
     SchemaDiffPlan, SchemaDiffRequest, SchemaDiffTarget, SchemaInfo, TableInfo, TableRowsRequest,
     TableRowsResult, TableType, TransactionInfo, TransactionStatus, UpdateConnectionRequest, Value,
 };
-use polydb_db_core::{set_blob_sink, BlobSink, Connection, DatabaseDriver, SqlDriver, TxMode};
+use polydb_db_core::{
+    set_blob_sink, BlobSink, Connection, DatabaseDriver, RedisValueLimit, RedisValueWindow,
+    SqlDriver, TxMode,
+};
 use polydb_protocol::common::SshTunnelConfig;
 use polydb_protocol::error::{codes, PolyDBError};
 use polydb_schema_diff as schema_diff;
@@ -380,30 +383,32 @@ impl AppCore {
                 Err(e) => Err(e.into_core()),
             };
         }
-            // 拨号本身是阻塞的（SSH 隧道、ODPI-C connect，冷路径可达数十秒）：
-            // 多线程 flavor 上用 block_in_place 让出 worker（execute 的
-            // spawn_blocking 同理）；current-thread flavor 没有 worker 池
-            // 可让（block_in_place 会 panic），直呼是唯一合法形态；runtime
-            // 之外直呼，同步路径不受影响。
-            let outcome: Result<(), ConnectErr> = match tokio::runtime::Handle::try_current() {
-                Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-                    tokio::task::block_in_place(|| {
-                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.connect(*id))) {
-                            Ok(r) => r.map_err(|e| ConnectErr::from_core(&e)),
-                            Err(p) => Err(ConnectErr::Other(format!("connect panicked: {p:?}"))),
-                        }
-                    })
-                }
-                _ => {
-                    // The sync/current-thread arm carries the same publish
-                    // guarantee: a panic here must not leave followers blocked
-                    // on a never-set flight.
-                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.connect(*id))) {
+        // 拨号本身是阻塞的（SSH 隧道、ODPI-C connect，冷路径可达数十秒）：
+        // 多线程 flavor 上用 block_in_place 让出 worker（execute 的
+        // spawn_blocking 同理）；current-thread flavor 没有 worker 池
+        // 可让（block_in_place 会 panic），直呼是唯一合法形态；runtime
+        // 之外直呼，同步路径不受影响。
+        let outcome: Result<(), ConnectErr> = match tokio::runtime::Handle::try_current() {
+            Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(|| {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        self.connect(*id)
+                    })) {
                         Ok(r) => r.map_err(|e| ConnectErr::from_core(&e)),
                         Err(p) => Err(ConnectErr::Other(format!("connect panicked: {p:?}"))),
                     }
+                })
+            }
+            _ => {
+                // The sync/current-thread arm carries the same publish
+                // guarantee: a panic here must not leave followers blocked
+                // on a never-set flight.
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.connect(*id))) {
+                    Ok(r) => r.map_err(|e| ConnectErr::from_core(&e)),
+                    Err(p) => Err(ConnectErr::Other(format!("connect panicked: {p:?}"))),
                 }
-            };
+            }
+        };
         // 发布裁决并把本连接的结果翻译回 CoreResult 返回。
         flight.set(outcome.clone()).ok();
         self.connect_flights.lock().remove(id);
@@ -893,6 +898,20 @@ impl AppCore {
         self.ensure_connected(&id)?;
         let conn = self.get_conn(id)?;
         conn.as_kv()?.get_value(key).await
+    }
+
+    /// 有界窗口读取（对齐内核 `BoundedValueReader`）：首窗只取限额内的值，
+    /// 附完整规模与截断标记；`cursor` 非空时续读下一窗（GUI「加载更多」）。
+    pub async fn get_value_window(
+        &self,
+        id: ConnectionId,
+        key: &str,
+        limit: RedisValueLimit,
+        cursor: &str,
+    ) -> CoreResult<RedisValueWindow> {
+        self.ensure_connected(&id)?;
+        let conn = self.get_conn(id)?;
+        conn.as_kv()?.get_value_window(key, limit, cursor).await
     }
 
     pub async fn set_value(

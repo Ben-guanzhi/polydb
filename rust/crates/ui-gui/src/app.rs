@@ -18,6 +18,7 @@ use polydb_core::{
     SchemaDiffRequest, SchemaDiffTarget, SchemaInfo, SortDirection, TableInfo, TableRowsRequest,
     UpdateConnectionRequest, Value,
 };
+use polydb_db_core::{RedisValueLimit, RedisValueWindow};
 use polydb_transport::Transport;
 
 use crate::changes::{self, ChangeQueue, Row};
@@ -726,6 +727,11 @@ pub struct PolyDBApp {
     pub(crate) redis_loading: bool,
     pub(crate) redis_selected: Option<String>,
     pub(crate) redis_value: Option<RedisValue>,
+    /// 有界窗口读取元信息（total / truncated / next_cursor）；`redis_value`
+    /// 是跨窗累积后的完整视图，本字段只记最后一窗用于「加载更多」。
+    pub(crate) redis_value_window: Option<RedisValueWindow>,
+    /// 值续读中（防重复点击「加载更多」）。
+    pub(crate) redis_value_loading: bool,
     /// D4 string 值整值写回子模式（对齐 TUI 的 `e`；其余类型走不了整值替换）。
     pub(crate) redis_val_editing: bool,
     /// 写回缓冲 + 字节光标（单行，与 TUI textinput 同形态）。
@@ -813,6 +819,8 @@ impl PolyDBApp {
             redis_loading: false,
             redis_selected: None,
             redis_value: None,
+            redis_value_window: None,
+            redis_value_loading: false,
             redis_val_editing: false,
             redis_val_buf: String::new(),
             redis_val_cursor: 0,
@@ -1529,19 +1537,28 @@ impl PolyDBApp {
         take < page_len
     }
 
-    /// 打开某个键读取值。
+    /// 打开某个键读取值（有界窗口首窗，限额取内核缺省：string 64KB / 集合 1000 项）。
     pub(crate) fn redis_open_key(&mut self, key: String, cx: &mut Context<Self>) {
         let Some(id) = self.sel_id() else { return };
         self.redis_selected = Some(key.clone());
         self.redis_value = None;
+        self.redis_value_window = None;
         self.redis_val_editing = false;
         cx.notify();
         self.io(
             cx,
-            move |t| Box::pin(async move { t.get_value(id, &key).await }),
+            move |t| {
+                Box::pin(async move {
+                    t.get_value_window(id, &key, RedisValueLimit::default(), "")
+                        .await
+                })
+            },
             move |this, out, cx| {
                 match out {
-                    Ok(v) => this.redis_value = Some(v),
+                    Ok(w) => {
+                        this.redis_value = Some(w.value.clone());
+                        this.redis_value_window = Some(w);
+                    }
                     Err(e) => this.status = format!("取值失败: {e}"),
                 }
                 cx.notify();
@@ -1549,10 +1566,107 @@ impl PolyDBApp {
         );
     }
 
+    /// 值页「加载更多」：用上一窗的 `next_cursor` 续读下一窗并累积合并。
+    /// string 无续读游标（next_cursor 恒空），不会进入此路径。
+    pub(crate) fn redis_more_value(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.sel_id() else { return };
+        let Some(key) = self.redis_selected.clone() else {
+            return;
+        };
+        let Some(cursor) = self
+            .redis_value_window
+            .as_ref()
+            .map(|w| w.next_cursor.clone())
+            .filter(|c| !c.is_empty())
+        else {
+            self.status = "已到末尾".into();
+            cx.notify();
+            return;
+        };
+        if self.redis_value_loading {
+            return;
+        }
+        self.redis_value_loading = true;
+        cx.notify();
+        let limit = RedisValueLimit::default();
+        self.io(
+            cx,
+            move |t| Box::pin(async move { t.get_value_window(id, &key, limit, &cursor).await }),
+            move |this, out, cx| {
+                this.redis_value_loading = false;
+                match out {
+                    Ok(w) => {
+                        match this.redis_value.as_mut() {
+                            Some(base) => Self::merge_redis_value(base, w.value.clone()),
+                            None => this.redis_value = Some(w.value.clone()),
+                        }
+                        this.redis_value_window = Some(w);
+                        this.status = format!(
+                            "已加载 {} 项",
+                            this.redis_value.as_ref().map_or(0, redis_value_len)
+                        );
+                    }
+                    Err(e) => this.status = format!("续读失败: {e}"),
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    /// 跨窗累积合并：list/zset 按序追加，set 去重后排序，hash 取并集（旧值优先），
+    /// stream 追加。类型不一致（不应发生）以新值为准。
+    fn merge_redis_value(base: &mut RedisValue, extra: RedisValue) {
+        match extra {
+            RedisValue::List(e) => match base {
+                RedisValue::List(b) => b.extend(e),
+                _ => *base = RedisValue::List(e),
+            },
+            RedisValue::Set(e) => match base {
+                RedisValue::Set(b) => {
+                    for m in e {
+                        if !b.contains(&m) {
+                            b.push(m);
+                        }
+                    }
+                    b.sort();
+                }
+                _ => *base = RedisValue::Set(e),
+            },
+            RedisValue::Zset(e) => match base {
+                RedisValue::Zset(b) => b.extend(e),
+                _ => *base = RedisValue::Zset(e),
+            },
+            RedisValue::Hash(e) => match base {
+                RedisValue::Hash(b) => {
+                    for (k, v) in e {
+                        b.entry(k).or_insert(v);
+                    }
+                }
+                _ => *base = RedisValue::Hash(e),
+            },
+            RedisValue::Stream(e) => match base {
+                RedisValue::Stream(b) => {
+                    if !b.is_empty() && !e.is_empty() {
+                        b.push_str("; ");
+                    }
+                    b.push_str(&e);
+                }
+                _ => *base = RedisValue::Stream(e),
+            },
+            RedisValue::String(s) => *base = RedisValue::String(s),
+        }
+    }
+
     // ─── D4 string 值整值写回（对齐 TUI 的 `e`：仅 string、写后回读、失败留输入）───
 
     fn redis_write_block(&self) -> Option<&'static str> {
-        crate::util::redis_write_block(self.redis_value.as_ref(), self.is_read_only())
+        crate::util::redis_write_block(
+            self.redis_value.as_ref(),
+            self.is_read_only(),
+            self.redis_value_window
+                .as_ref()
+                .is_some_and(|w| w.truncated),
+        )
     }
 
     /// 进入写回子模式，缓冲预填当前值。
@@ -2970,10 +3084,7 @@ impl PolyDBApp {
                         r.rows.len(),
                         r.execution_time_ms
                     );
-                } else if last_err
-                    .as_ref()
-                    .is_some_and(|e| e.contains("CANCELLED"))
-                {
+                } else if last_err.as_ref().is_some_and(|e| e.contains("CANCELLED")) {
                     // 用户主动取消（POLYDB_ERR_CANCELLED）不是失败：如实报
                     // 已取消，别让取消自己的查询看起来像出了错。
                     this.status = "已取消当前查询".into();
@@ -3796,6 +3907,18 @@ fn value_to_text(v: &Value) -> String {
         Value::Float(f) => format!("{}", f),
         Value::String(s) => s.clone(),
         other => serde_json::to_string(other).unwrap_or_default(),
+    }
+}
+
+/// RedisValue 的项数（string 视为 1 项，用于「已加载 N 项」提示）。
+fn redis_value_len(v: &RedisValue) -> usize {
+    match v {
+        RedisValue::String(_) => 1,
+        RedisValue::List(v) => v.len(),
+        RedisValue::Set(v) => v.len(),
+        RedisValue::Zset(v) => v.len(),
+        RedisValue::Hash(v) => v.len(),
+        RedisValue::Stream(v) => v.len(),
     }
 }
 

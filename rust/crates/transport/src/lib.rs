@@ -1,16 +1,16 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use tokio::sync::Notify;
 use polydb_app_core::AppCore;
 use polydb_core::{
-    BeginTransactionRequest, ColumnInfo, ConnectionId, ConnectionInfo, ConnectionStatus,
-    CoreError,
+    BeginTransactionRequest, ColumnInfo, ConnectionId, ConnectionInfo, ConnectionStatus, CoreError,
     CoreResult, CreateConnectionRequest, DdlScript, ForeignKeyInfo, IndexInfo, QueryResult,
     RedisKeyType, RedisReply, RedisScanPage, RedisValue, SchemaDdlRequest, SchemaDiffPlan,
     SchemaDiffRequest, SchemaInfo, TableInfo, TableRowsRequest, TableRowsResult, TransactionInfo,
     UpdateConnectionRequest, Value,
 };
+use polydb_db_core::{RedisValueLimit, RedisValueWindow};
+use tokio::sync::Notify;
 
 #[async_trait]
 pub trait Transport: Send + Sync {
@@ -109,6 +109,15 @@ pub trait Transport: Send + Sync {
     ) -> CoreResult<RedisScanPage>;
     async fn key_type(&self, id: ConnectionId, key: &str) -> CoreResult<RedisKeyType>;
     async fn get_value(&self, id: ConnectionId, key: &str) -> CoreResult<RedisValue>;
+    /// 有界窗口读取（对齐内核 `BoundedValueReader`）：首窗只取限额内的值，
+    /// 附完整规模与截断标记；`cursor` 非空时续读下一窗。
+    async fn get_value_window(
+        &self,
+        id: ConnectionId,
+        key: &str,
+        limit: RedisValueLimit,
+        cursor: &str,
+    ) -> CoreResult<RedisValueWindow>;
     async fn set_value(&self, id: ConnectionId, key: &str, value: RedisValue) -> CoreResult<()>;
     async fn exec_command(&self, id: ConnectionId, args: &[String]) -> CoreResult<RedisReply>;
 
@@ -219,26 +228,26 @@ impl Transport for LocalTransport {
 
         match outcome {
             Some(Ok(mut result)) => {
-        // 本地（GUI）路径与 HTTP/WS 同受 §5 限行：驱动 fetch_all 全量物化，
-        // MAX_RESULT_ROWS 只是渲染截断——一条无 LIMIT 的 SELECT 在此处就该
-        // 被截住，而不是等 UI 拿着千万行去渲染。
-            const LOCAL_MAX_ROWS: u64 = 10000;
-            if result.rows.len() as u64 > LOCAL_MAX_ROWS {
-                let total = result.rows.len() as u64;
-                result.rows.truncate(LOCAL_MAX_ROWS as usize);
-                result.truncated = true;
-                result.total_rows = Some(total);
+                // 本地（GUI）路径与 HTTP/WS 同受 §5 限行：驱动 fetch_all 全量物化，
+                // MAX_RESULT_ROWS 只是渲染截断——一条无 LIMIT 的 SELECT 在此处就该
+                // 被截住，而不是等 UI 拿着千万行去渲染。
+                const LOCAL_MAX_ROWS: u64 = 10000;
+                if result.rows.len() as u64 > LOCAL_MAX_ROWS {
+                    let total = result.rows.len() as u64;
+                    result.rows.truncate(LOCAL_MAX_ROWS as usize);
+                    result.truncated = true;
+                    result.total_rows = Some(total);
+                }
+                Ok(result)
             }
-            Ok(result)
+            Some(Err(e)) => Err(e),
+            None => Err(CoreError::Protocol(Box::new(
+                polydb_protocol::PolyDBError::new(
+                    polydb_protocol::error::codes::CANCELLED,
+                    "query cancelled",
+                ),
+            ))),
         }
-        Some(Err(e)) => Err(e),
-        None => Err(CoreError::Protocol(Box::new(
-            polydb_protocol::PolyDBError::new(
-                polydb_protocol::error::codes::CANCELLED,
-                "query cancelled",
-            ),
-        ))),
-    }
     }
 
     async fn cancel_latest(&self) -> bool {
@@ -341,6 +350,16 @@ impl Transport for LocalTransport {
 
     async fn get_value(&self, id: ConnectionId, key: &str) -> CoreResult<RedisValue> {
         self.app.get_value(id, key).await
+    }
+
+    async fn get_value_window(
+        &self,
+        id: ConnectionId,
+        key: &str,
+        limit: RedisValueLimit,
+        cursor: &str,
+    ) -> CoreResult<RedisValueWindow> {
+        self.app.get_value_window(id, key, limit, cursor).await
     }
 
     async fn set_value(&self, id: ConnectionId, key: &str, value: RedisValue) -> CoreResult<()> {

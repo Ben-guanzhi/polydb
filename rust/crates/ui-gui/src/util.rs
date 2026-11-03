@@ -476,11 +476,15 @@ pub(crate) fn split_statements(sql: &str) -> Vec<String> {
 }
 
 /// Redis 整值写回门禁（D4，与 TUI `kvStartEdit` / Web `redisWriteBlock` 同语义）：
-/// 只有**已加载的 string 值**且连接非只读才能整值替换；list/hash/set 需按元素操作，走命令行。
-/// 返回提示语，`None` 表示可以写。
+/// 只有**已加载的 string 值**、连接非只读、且值未被有界读取截断时才能整值替换；
+/// list/hash/set 需按元素操作，走命令行。
+/// `truncated` 由调用方从 `RedisValueWindow` 传入：有界首窗会把 >64KB 的 string
+/// 截到前缀（`next_cursor` 恒空，无法续读），用截断值预填编辑缓冲再提交会把用户
+/// 数据写短——旧路径 `get_value` 返回整值，不存在此问题。返回提示语，`None` 表示可以写。
 pub(crate) fn redis_write_block(
     value: Option<&RedisValue>,
     read_only: bool,
+    truncated: bool,
 ) -> Option<&'static str> {
     let Some(v) = value else {
         return Some("先从左侧点击键加载值");
@@ -490,6 +494,9 @@ pub(crate) fn redis_write_block(
     }
     if !matches!(v, RedisValue::String(_)) {
         return Some("仅 string 支持整值写回，其余类型请用命令行（RPUSH/HSET …）");
+    }
+    if truncated {
+        return Some("该 string 已被有界读取截断，无法整值写回；请用命令行处理");
     }
     None
 }
@@ -513,21 +520,34 @@ mod tests {
         use polydb_core::RedisValue;
         let string = RedisValue::String("v".into());
         let list = RedisValue::List(vec!["a".into()]);
-        assert_eq!(redis_write_block(None, false), Some("先从左侧点击键加载值"));
+        assert_eq!(
+            redis_write_block(None, false, false),
+            Some("先从左侧点击键加载值")
+        );
         // 只读门禁优先于类型门禁（与 TUI 提示顺序一致）。
         assert_eq!(
-            redis_write_block(Some(&list), true),
+            redis_write_block(Some(&list), true, false),
             Some("连接标记为只读，不能写入")
         );
         assert_eq!(
-            redis_write_block(Some(&list), false),
+            redis_write_block(Some(&list), false, false),
             Some("仅 string 支持整值写回，其余类型请用命令行（RPUSH/HSET …）")
         );
         assert_eq!(
-            redis_write_block(Some(&string), true),
+            redis_write_block(Some(&string), true, false),
             Some("连接标记为只读，不能写入")
         );
-        assert_eq!(redis_write_block(Some(&string), false), None);
+        assert_eq!(redis_write_block(Some(&string), false, false), None);
+        // 有界首窗截断的 string 不放行整值写回（否则会把 >64KB 的值写短）。
+        assert_eq!(
+            redis_write_block(Some(&string), false, true),
+            Some("该 string 已被有界读取截断，无法整值写回；请用命令行处理")
+        );
+        // 截断提示让位于只读门禁（顺序不变）。
+        assert_eq!(
+            redis_write_block(Some(&string), true, true),
+            Some("连接标记为只读，不能写入")
+        );
     }
 
     #[test]

@@ -10,12 +10,37 @@ use polydb_core::{
 use polydb_storage::{FileKeyring, Storage};
 use polydb_transport::{LocalTransport, Transport};
 
-fn setup() -> Arc<AppCore> {
+/// 全局 blob sink 是进程级单例（db-core `blobsink`），而每个用例的
+/// `AppCore::with_keyring` 都会 `set_blob_sink`：并行跑时 A 的查询可能把大字段
+/// 写进 B 的 BlobStore，随后 A 的 `get_blob` 查不到（BlobNotFound）。
+/// 整组用例串行进出，与 `db-core/blobsink.rs` 单测的 `LOCK` 同一范式。
+static SINK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// `setup()` 的返回值：解引用到 `Arc<AppCore>`，同时持有串行锁直到用例结束。
+struct TestApp {
+    app: Arc<AppCore>,
+    /// 仅用于在 Drop 时释放锁；字段本身不读。
+    #[allow(dead_code)]
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+impl std::ops::Deref for TestApp {
+    type Target = Arc<AppCore>;
+    fn deref(&self) -> &Arc<AppCore> {
+        &self.app
+    }
+}
+
+fn setup() -> TestApp {
+    let _guard = SINK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = std::env::temp_dir().join(format!("polydb-transport-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let storage = Storage::open(dir.join("test.db").to_str().unwrap()).unwrap();
     let kr = FileKeyring::open(&dir.to_string_lossy(), "").unwrap();
-    Arc::new(AppCore::with_keyring(storage, Arc::new(kr)))
+    TestApp {
+        app: Arc::new(AppCore::with_keyring(storage, Arc::new(kr))),
+        _guard,
+    }
 }
 
 fn sqlite_req(name: &str) -> CreateConnectionRequest {
@@ -273,7 +298,9 @@ fn cancel_latest_stops_running_statement() {
     let id: ConnectionId = info.id;
 
     polydb_rt::block_on(async {
-        t.execute(id, "CREATE TABLE t(x INTEGER)", &[]).await.unwrap();
+        t.execute(id, "CREATE TABLE t(x INTEGER)", &[])
+            .await
+            .unwrap();
 
         // 足够久（注册与取消的窗口）、足够短（runtime 收尾等阻塞线程的时长）。
         const MEDIUM_CTE: &str = "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x < 5000000) SELECT count(*) FROM n";
@@ -281,8 +308,14 @@ fn cancel_latest_stops_running_statement() {
         let task = tokio::spawn(async move { t2.execute(id, MEDIUM_CTE, &[]).await });
 
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        assert!(t.cancel_latest().await, "cancel_latest must find the statement in flight");
-        assert!(!t.cancel_latest().await, "the registry must be empty after a cancel");
+        assert!(
+            t.cancel_latest().await,
+            "cancel_latest must find the statement in flight"
+        );
+        assert!(
+            !t.cancel_latest().await,
+            "the registry must be empty after a cancel"
+        );
 
         let err = task.await.unwrap().unwrap_err();
         assert!(err.to_string().contains("CANCELLED"), "unexpected: {err}");
@@ -304,15 +337,23 @@ fn cancel_latest_now_pins_the_target() {
     let id: ConnectionId = info.id;
 
     polydb_rt::block_on(async {
-        t.execute(id, "CREATE TABLE t2(x INTEGER)", &[]).await.unwrap();
+        t.execute(id, "CREATE TABLE t2(x INTEGER)", &[])
+            .await
+            .unwrap();
 
         const MEDIUM_CTE: &str = "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x < 5000000) SELECT count(*) FROM n";
         let t2 = Arc::clone(&t);
         let task = tokio::spawn(async move { t2.execute(id, MEDIUM_CTE, &[]).await });
 
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        assert!(t.cancel_latest_now(), "cancel_latest_now must find the statement in flight");
-        assert!(!t.cancel_latest_now(), "the registry must be empty after a cancel");
+        assert!(
+            t.cancel_latest_now(),
+            "cancel_latest_now must find the statement in flight"
+        );
+        assert!(
+            !t.cancel_latest_now(),
+            "the registry must be empty after a cancel"
+        );
 
         let err = task.await.unwrap().unwrap_err();
         assert!(err.to_string().contains("CANCELLED"), "unexpected: {err}");

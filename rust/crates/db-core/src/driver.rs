@@ -3,10 +3,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use polydb_core::{
-    ColumnInfo, CoreResult, DatabaseKind, ForeignKeyInfo, IndexInfo, QueryResult, RedisKeyType,
-    RedisReply, RedisScanPage, RedisValue, SchemaInfo, TableInfo, TableRowsRequest,
+    ColumnInfo, CoreError, CoreResult, DatabaseKind, ForeignKeyInfo, IndexInfo, QueryResult,
+    RedisKeyType, RedisReply, RedisScanPage, RedisValue, SchemaInfo, TableInfo, TableRowsRequest,
     TableRowsResult, Value,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::tx::TxMode;
 
@@ -46,10 +47,7 @@ pub trait SqlDriver: DatabaseDriver {
     ///
     /// 行形状 = 逐表 `list_columns` 的列形状 + 表名前置（对应 Go 的 column 0 =
     /// table name）。默认实现返回 `Ok(None)`；PG / SQLite 驱动覆盖此方法。
-    async fn batch_columns(
-        &self,
-        _schema: &str,
-    ) -> CoreResult<Option<Vec<(String, ColumnInfo)>>> {
+    async fn batch_columns(&self, _schema: &str) -> CoreResult<Option<Vec<(String, ColumnInfo)>>> {
         Ok(None)
     }
 
@@ -101,6 +99,58 @@ pub trait SqlDriver: DatabaseDriver {
     fn clone_sql_driver_arc(&self) -> Arc<dyn SqlDriver>;
 }
 
+/// 有界读取限额（对齐内核 `dbcore.RedisValueLimit`，wave 19）。
+/// 零值字段 = 驱动缺省（见 [`DEFAULT_MAX_STRING_BYTES`] / [`DEFAULT_MAX_ENTRIES`]）；
+/// 不存在"无界"读法——无界读是 [`KvDriver::get_value`]。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisValueLimit {
+    /// 字符串值按字节截断到此数（回退到 UTF-8 行边界）；集合类型忽略。
+    #[serde(default)]
+    pub max_string_bytes: i64,
+    /// 集合条目上限（list 项 / set 成员 / zset 成员 / hash 字段 / stream 条目）。
+    #[serde(default)]
+    pub max_entries: i64,
+}
+
+impl RedisValueLimit {
+    /// 把零值字段解析为驱动缺省，得到真正生效的限额。
+    pub fn resolved(&self) -> RedisValueLimit {
+        RedisValueLimit {
+            max_string_bytes: if self.max_string_bytes <= 0 {
+                DEFAULT_MAX_STRING_BYTES
+            } else {
+                self.max_string_bytes
+            },
+            max_entries: if self.max_entries <= 0 {
+                DEFAULT_MAX_ENTRIES
+            } else {
+                self.max_entries
+            },
+        }
+    }
+}
+
+/// 首窗缺省字符串字节上限（64 KiB，对齐内核 `DefaultMaxStringBytes`）。
+pub const DEFAULT_MAX_STRING_BYTES: i64 = 64 << 10;
+/// 首窗缺省集合条目上限（1000，对齐内核 `DefaultMaxEntries`）。
+pub const DEFAULT_MAX_ENTRIES: i64 = 1000;
+
+/// 有界窗口读取结果（对齐内核 `BoundedRedisValue` + `KeyPageReader` 续读语义，
+/// wave 19 / wave 3.5）：窗口内的值 + 完整规模 + 是否截断 + 续读游标。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedisValueWindow {
+    /// 窗口内的值（与 [`KvDriver::get_value`] 同形；截断字符串不做数值解析）。
+    pub value: RedisValue,
+    /// 完整规模：字符串为字节数（STRLEN），集合为条目数
+    /// （LLEN/SCARD/ZCARD/HLEN/XLEN）。
+    pub total: i64,
+    /// Value 是否在限额处被截断（Total > Value 实际持有）。
+    pub truncated: bool,
+    /// 续读游标；空串 = 已到末尾。驱动私有，调用方原样回传。
+    #[serde(default)]
+    pub next_cursor: String,
+}
+
 #[async_trait]
 pub trait KvDriver: DatabaseDriver {
     async fn select_db(&self, index: u32) -> CoreResult<()>;
@@ -109,4 +159,21 @@ pub trait KvDriver: DatabaseDriver {
     async fn get_value(&self, key: &str) -> CoreResult<RedisValue>;
     async fn set_value(&self, key: &str, value: RedisValue) -> CoreResult<()>;
     async fn exec_command(&self, args: &[String]) -> CoreResult<RedisReply>;
+
+    /// 有界窗口读取（对齐内核 `BoundedValueReader` + `KeyPageReader` 续读语义）：
+    /// 一次调用只取窗口内的值，附完整规模与截断标记，百万成员 key 首窗毫秒级返回。
+    ///
+    /// `cursor` 为空串 = 从头读第一窗；非空 = 驱动私有续读游标（调用方原样回传
+    /// [`RedisValueWindow::next_cursor`]）。缺省返回 `NotSupported`：仅 KV 驱动
+    /// 可选覆写，调用方据此回落到 [`get_value`]（无界读）。
+    async fn get_value_window(
+        &self,
+        _key: &str,
+        _limit: RedisValueLimit,
+        _cursor: &str,
+    ) -> CoreResult<RedisValueWindow> {
+        Err(CoreError::NotSupported(
+            "get_value_window not supported by this driver".into(),
+        ))
+    }
 }

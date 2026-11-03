@@ -8,6 +8,7 @@ description = "PolyDB transport layer (local / HTTP)"
 polydb-core = { workspace = true }
 polydb-protocol = { workspace = true }
 polydb-app-core = { workspace = true }
+polydb-db-core = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
