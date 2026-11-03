@@ -227,7 +227,34 @@ impl BlobSink for StoreSink {
 }
 
 /// 一个懒连接的并发归并flight：leader 发布裁决，follower 等待共享。
-type ConnectFlight = Arc<std::sync::OnceLock<Result<(), String>>>;
+/// 裁决的类型化载体（NotFound / Other）——若只用 String，ConnectionNotFound
+/// 经桥接会退化成 CoreError::Driver → POLYDB_ERR_QUERY_FAILED → HTTP 500；
+/// 状态映射（server error_response）只有 ConnectionNotFound 才落 404。
+type ConnectFlight = Arc<std::sync::OnceLock<Result<(), ConnectErr>>>;
+
+/// 连接裁决的错误载体：NotFound 保留连接 id 供重建 ConnectionNotFound，
+/// Other 仅承载 Display 文本（CoreError 不可 Clone，只过桥一次）。
+#[derive(Clone)]
+enum ConnectErr {
+    NotFound(String),
+    Other(String),
+}
+
+impl ConnectErr {
+    /// CoreError → 裁决载体：ConnectionNotFound 走 NotFound 分支，其余按文本。
+    fn from_core(e: &CoreError) -> Self {
+        match e {
+            CoreError::ConnectionNotFound(id) => ConnectErr::NotFound(id.clone()),
+            e => ConnectErr::Other(e.to_string()),
+        }
+    }
+    fn into_core(self) -> CoreError {
+        match self {
+            ConnectErr::NotFound(id) => CoreError::ConnectionNotFound(id),
+            ConnectErr::Other(msg) => CoreError::Driver(msg),
+        }
+    }
+}
 
 pub struct AppCore {
     storage: Storage,
@@ -340,7 +367,7 @@ impl AppCore {
             // N-1 个 worker，server 全域停摆。current-thread flavor 没有
             // worker 池可让（block_in_place 会 panic——server 测试套件当场
             // 抓住），直呼 park 是该模型下的唯一形态；runtime 之外同此。
-            let outcome: Result<(), String> = match tokio::runtime::Handle::try_current() {
+            let outcome: Result<(), ConnectErr> = match tokio::runtime::Handle::try_current() {
                 Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
                     tokio::task::block_in_place(|| flight.wait().clone())
                 }
@@ -348,7 +375,9 @@ impl AppCore {
             };
             return match outcome {
                 Ok(()) => Ok(()),
-                Err(msg) => Err(CoreError::Driver(msg.clone())),
+                // 类型化还原：NotFound → ConnectionNotFound（HTTP 404）；
+                // 其余退化回 Driver（映射表里落 500，与历史行为一致）。
+                Err(e) => Err(e.into_core()),
             };
         }
             // 拨号本身是阻塞的（SSH 隧道、ODPI-C connect，冷路径可达数十秒）：
@@ -356,12 +385,12 @@ impl AppCore {
             // spawn_blocking 同理）；current-thread flavor 没有 worker 池
             // 可让（block_in_place 会 panic），直呼是唯一合法形态；runtime
             // 之外直呼，同步路径不受影响。
-            let outcome: Result<(), String> = match tokio::runtime::Handle::try_current() {
+            let outcome: Result<(), ConnectErr> = match tokio::runtime::Handle::try_current() {
                 Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
                     tokio::task::block_in_place(|| {
                         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.connect(*id))) {
-                            Ok(r) => r.map_err(|e| e.to_string()),
-                            Err(p) => Err(format!("connect panicked: {p:?}")),
+                            Ok(r) => r.map_err(|e| ConnectErr::from_core(&e)),
+                            Err(p) => Err(ConnectErr::Other(format!("connect panicked: {p:?}"))),
                         }
                     })
                 }
@@ -370,18 +399,15 @@ impl AppCore {
                     // guarantee: a panic here must not leave followers blocked
                     // on a never-set flight.
                     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.connect(*id))) {
-                        Ok(r) => r.map_err(|e| e.to_string()),
-                        Err(p) => Err(format!("connect panicked: {p:?}")),
+                        Ok(r) => r.map_err(|e| ConnectErr::from_core(&e)),
+                        Err(p) => Err(ConnectErr::Other(format!("connect panicked: {p:?}"))),
                     }
                 }
             };
-        // 发布裁决（String 承载错误；CoreError 不可 Clone）并把本连接的
-        // 结果翻译回 CoreResult 返回。
-        flight
-            .set(outcome.clone())
-            .ok();
+        // 发布裁决并把本连接的结果翻译回 CoreResult 返回。
+        flight.set(outcome.clone()).ok();
         self.connect_flights.lock().remove(id);
-        outcome.map_err(CoreError::Driver)
+        outcome.map_err(|e| e.into_core())
     }
 
     pub fn create_connection(&self, req: &CreateConnectionRequest) -> CoreResult<ConnectionInfo> {
