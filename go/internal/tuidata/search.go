@@ -2,7 +2,8 @@ package tuidata
 
 import (
 	"strings"
-	"unicode"
+
+	fuzzy "github.com/dbcore/dbcore/fuzzy"
 )
 
 // SearchExact returns the indices of rows where at least one cell's display
@@ -288,42 +289,8 @@ func SearchFuzzyFold(f *Frame, needle string, cache *FuzzyCache) []int {
 // fuzzyMatchIndices 按行判定"中/不中"，按帧序返回索引。判据与 fuzzy.Find 逐位
 // 等价（同一行的中/不中一致），但不打分、不排序——SearchFuzzy 只用索引，打分
 // 与 fuzzy.Find 的末尾排序全程是白付的。等价性由 TestSearchFuzzyFoldMatches
-// 差分锁定，库升级改判据时那条测试会先炸。
+// 差分锁定，库升级改判据时那条测试会先炸。判据本体自 K-F2 起统一进
+// dbcore/fuzzy（一处实现，消费者不再各内联一份）。
 func fuzzyMatchIndices(needle string, haystack []string) []int {
-	pat := []rune(needle)
-	if len(pat) == 0 {
-		return nil
-	}
-	// fuzzy 的 equalFold 等价于"落在同一条 unicode.SimpleFold 轨道上"，这里
-	// 先把每个模式 rune 的整条轨道展开成集合，匹配时只做整数比较。注意
-	// SimpleFold('k') 是 U+212A 而非 'K'——轨道是三元环，不能用 ToLower 近似
-	//（ToLower('İ') 是 'i'，会误命中 "elvin" 里的 i）。
-	pi := make([]map[rune]struct{}, len(pat))
-	for i, p := range pat {
-		m := map[rune]struct{}{p: {}}
-		cur := unicode.SimpleFold(p)
-		for n := 0; n < 64 && cur != p; n++ {
-			m[cur] = struct{}{}
-			cur = unicode.SimpleFold(cur)
-		}
-		pi[i] = m
-	}
-	out := make([]int, 0)
-	for i, s := range haystack {
-		// fuzzy 也把 haystack 截到首个 NUL：多付一次 IndexByte 换来整行不拆。
-		if j := strings.IndexByte(s, 0); j >= 0 {
-			s = s[:j]
-		}
-		pidx := 0
-		for _, ch := range s {
-			if _, ok := pi[pidx][ch]; ok {
-				pidx++
-				if pidx == len(pat) {
-					out = append(out, i)
-					break
-				}
-			}
-		}
-	}
-	return out
+	return fuzzy.MatchIndices(needle, haystack)
 }
