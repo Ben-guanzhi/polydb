@@ -4,6 +4,7 @@
 //! 契约依据：spec/behavior.md §10（事务单次 finalize）。
 
 use polydb_core::{DatabaseKind, Value};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RowChangeType {
@@ -54,6 +55,9 @@ pub(crate) struct RowChange {
     pub original_row: Row,
     pub new_row: Option<Row>,
     pub sequence: i64,
+    /// 查找键（row_id + rtype）：入队时一次算好，索引按它寻址，
+    /// 不再每次查找都重新格式化字符串。
+    pub(crate) key: String,
 }
 
 #[derive(Debug, Clone)]
@@ -87,6 +91,9 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
 #[derive(Debug, Default)]
 pub(crate) struct ChangeQueue {
     changes: Vec<RowChange>,
+    /// key → changes 下标。查找（find/get/undo）从 O(n) 线性扫变 O(1)；
+    /// 追加（高频）走增量登记，删除（undo/塌缩，低频）后整表重建。
+    index: HashMap<String, usize>,
     undo_stack: Vec<UndoOp>,
     seq: i64,
 }
@@ -121,9 +128,7 @@ impl ChangeQueue {
 
     fn find(&self, row_id: &str, rtype: RowChangeType) -> Option<usize> {
         let k = key_of(row_id, rtype);
-        self.changes
-            .iter()
-            .position(|c| key_of(&c.row_id, c.rtype) == k)
+        self.index.get(&k).copied()
     }
 
     /// 取某行已存在的变更（update 优先，其次 delete）。
@@ -172,18 +177,24 @@ impl ChangeQueue {
         let idx = match self.find(row_id, RowChangeType::Update) {
             Some(i) => i,
             None => {
+                let seq = {
+                    self.seq += 1;
+                    self.seq
+                };
+                let key = key.clone();
+                let idx = self.changes.len();
                 self.changes.push(RowChange {
                     row_id: row_id.to_string(),
                     rtype: RowChangeType::Update,
                     cell_changes: Vec::new(),
                     original_row,
                     new_row: None,
-                    sequence: {
-                        self.seq += 1;
-                        self.seq
-                    },
+                    sequence: seq,
+                    key,
                 });
-                self.changes.len() - 1
+                self.index
+                    .insert(key_of(row_id, RowChangeType::Update), idx);
+                idx
             }
         };
         // undo 数据先收集（列名 + 是否塌缩），下面会按需重借 self：
@@ -236,6 +247,7 @@ impl ChangeQueue {
             original_row: Vec::new(),
             new_row: Some(row),
             sequence: seq,
+            key: key_of(&row_id, RowChangeType::Insert),
         });
         self.push_undo(UndoOp::Row {
             key: key_of(&row_id, RowChangeType::Insert),
@@ -253,6 +265,7 @@ impl ChangeQueue {
             original_row,
             new_row: None,
             sequence: seq,
+            key: key_of(&row_id, RowChangeType::Delete),
         });
         self.push_undo(UndoOp::Row {
             key: key_of(&row_id, RowChangeType::Delete),
@@ -261,18 +274,31 @@ impl ChangeQueue {
 
     fn upsert(&mut self, change: RowChange) {
         let k = key_of(&change.row_id, change.rtype);
-        match self
-            .changes
-            .iter()
-            .position(|c| key_of(&c.row_id, c.rtype) == k)
-        {
-            Some(i) => self.changes[i] = change,
-            None => self.changes.push(change),
+        match self.index.get(&k) {
+            Some(&i) => self.changes[i] = change,
+            None => {
+                let idx = self.changes.len();
+                self.changes.push(change);
+                self.index.insert(k, idx);
+            }
         }
     }
 
     fn remove_by_key(&mut self, key: &str) {
-        self.changes.retain(|c| key_of(&c.row_id, c.rtype) != key);
+        let before = self.changes.len();
+        self.changes.retain(|c| c.key != key);
+        if self.changes.len() != before {
+            self.rebuild_index();
+        }
+    }
+
+    /// 删除类操作（retain/remove）后整表重建索引——删除是低频路径
+    /// （undo/塌缩），重建 O(n) 摊还远低于每次格编辑 O(n) 的线性扫。
+    fn rebuild_index(&mut self) {
+        self.index.clear();
+        for (i, c) in self.changes.iter().enumerate() {
+            self.index.insert(c.key.clone(), i);
+        }
     }
 
     /// 撤销最近一次操作。cell：移除该格改动（全空则整行）；row：移除整条插入/删除。
@@ -288,11 +314,7 @@ impl ChangeQueue {
                 self.changes.len() < before
             }
             UndoOp::Cell { key, column } => {
-                let Some(i) = self
-                    .changes
-                    .iter()
-                    .position(|c| key_of(&c.row_id, c.rtype) == key)
-                else {
+                let Some(&i) = self.index.get(&key) else {
                     return false;
                 };
                 if self.changes[i].rtype != RowChangeType::Update {
@@ -301,6 +323,7 @@ impl ChangeQueue {
                 self.changes[i].cell_changes.retain(|c| c.column != column);
                 if self.changes[i].cell_changes.is_empty() {
                     self.changes.remove(i);
+                    self.rebuild_index();
                 }
                 true
             }
@@ -309,6 +332,7 @@ impl ChangeQueue {
 
     pub(crate) fn clear(&mut self) {
         self.changes.clear();
+        self.index.clear();
         self.undo_stack.clear();
     }
 }
@@ -568,6 +592,30 @@ mod tests {
         assert_eq!(q.size(), 1);
         q.add_cell_change("r1", "a", s("y"), s("x"), orig);
         assert_eq!(q.size(), 0);
+    }
+
+    /// 索引回归：塌缩删除走 remove_by_key+rebuild，删后再编辑必须能重新
+    /// 命中（find/get 走 index，重建错位会静默丢变更）。
+    #[test]
+    fn index_survives_collapse_and_reedit() {
+        let mut q = ChangeQueue::new();
+        let orig = row(&[("a", s("x"))]);
+        q.add_cell_change("r1", "a", s("x"), s("y"), orig.clone());
+        // 改回原值 → 塌缩（remove_by_key → rebuild_index）
+        q.add_cell_change("r1", "a", s("y"), s("x"), orig.clone());
+        assert_eq!(q.size(), 0);
+        // 重建后同行再编辑必须重新入队
+        q.add_cell_change("r1", "a", s("x"), s("z"), orig.clone());
+        let c = q.get("r1").unwrap();
+        assert_eq!(c.cell_changes[0].new_value, s("z"));
+        assert_eq!(q.size(), 1);
+        // undo 塌缩路径（cell 全空 → remove(i)+rebuild）后查找不受影响
+        assert!(q.undo());
+        assert_eq!(q.size(), 0);
+        assert!(q.get("r1").is_none());
+        // undo 后新编辑仍可命中
+        q.add_cell_change("r1", "a", s("x"), s("w"), orig);
+        assert_eq!(q.get("r1").unwrap().cell_changes[0].new_value, s("w"));
     }
 
     #[test]

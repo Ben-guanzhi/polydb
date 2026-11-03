@@ -5918,6 +5918,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "futures-util",
  "parking_lot",
  "polydb-core",
  "polydb-db-core",
@@ -5936,6 +5937,7 @@ dependencies = [
  "async-trait",
  "bigdecimal",
  "chrono",
+ "futures-util",
  "polydb-core",
  "polydb-db-core",
  "polydb-protocol",
@@ -5968,6 +5970,7 @@ dependencies = [
  "async-trait",
  "bigdecimal",
  "chrono",
+ "futures-util",
  "polydb-core",
  "polydb-db-core",
  "polydb-protocol",

@@ -107,6 +107,10 @@ pub(crate) struct GridData {
     pub columns: Vec<ResultColumn>,
     pub rows: Vec<Vec<Value>>,
     pub elapsed_ms: f64,
+    /// 行稳定键缓存：加载页时按当时主键一次算好（列名→下标先建表），
+    /// 重绘每格调用从「克隆整行快照+列序拼接」降为 O(1) 数组访问。
+    /// 主键在明细刷新后变化时以重载页为准（编辑入口先读最新明细再写变更）。
+    pub row_keys: Vec<Option<String>>,
 }
 
 pub(crate) const PAGE_SIZES: [u32; 3] = [50, 200, 1000];
@@ -1945,6 +1949,8 @@ impl PolyDBApp {
         self.tabs[idx].loading_detail = true;
         self.tabs[idx].detail_err = None;
         self.tabs[idx].browse.loading = true;
+        // 行键缓存所需的主键列名：detail 结果回填后与页一起落地。
+        let mut detail_pk: Vec<String> = Vec::new();
         cx.notify();
         cx.spawn(async move |this, cx| {
             let detail = io
@@ -1977,6 +1983,11 @@ impl PolyDBApp {
                 tab.browse.loading = false;
                 match detail {
                     Ok(Ok((columns, indexes, fks, ddl))) => {
+                        detail_pk = columns
+                            .iter()
+                            .filter(|c| c.is_primary_key)
+                            .map(|c| c.name.clone())
+                            .collect();
                         tab.detail = Some(TableDetail {
                             columns,
                             indexes,
@@ -1992,6 +2003,7 @@ impl PolyDBApp {
                         tab.browse.has_more = r.has_more;
                         tab.browse.total = r.total_estimate;
                         tab.browse.grid = Some(GridData {
+                            row_keys: Self::compute_row_keys(&r.columns, &r.rows, &detail_pk),
                             columns: r.columns,
                             rows: r.rows,
                             elapsed_ms: r.execution_time_ms,
@@ -2030,6 +2042,8 @@ impl PolyDBApp {
             cx,
             move |t| Box::pin(async move { t.browse_rows(id, &schema, &table, &req).await }),
             move |this, out, cx| {
+                // 行键缓存所需的主键列名：load_page 不拉明细，按现有 detail 快照取。
+                let pk = this.pk_column_names(idx);
                 let Some(tab) = this.tabs.get_mut(idx) else {
                     return;
                 };
@@ -2040,6 +2054,7 @@ impl PolyDBApp {
                         tab.browse.has_more = r.has_more;
                         tab.browse.total = r.total_estimate;
                         tab.browse.grid = Some(GridData {
+                            row_keys: Self::compute_row_keys(&r.columns, &r.rows, &pk),
                             columns: r.columns,
                             rows: r.rows,
                             elapsed_ms: r.execution_time_ms,
@@ -2155,7 +2170,16 @@ impl PolyDBApp {
     }
 
     /// 行稳定键：主键值按序拼接；无主键列则 None（不可编辑）。
+    /// 命中 GridData.row_keys 缓存（O(1)）；缓存缺失（如网格尚未加载）时现算兜底。
     pub(crate) fn browse_row_key(&self, idx: usize, row: usize) -> Option<String> {
+        if let Some(g) = self
+            .tabs
+            .get(idx)
+            .and_then(|t| t.browse.grid.as_ref())
+            .and_then(|g| g.row_keys.get(row))
+        {
+            return g.clone();
+        }
         let pk = self.pk_column_names(idx);
         if pk.is_empty() {
             return None;
@@ -2167,6 +2191,36 @@ impl PolyDBApp {
                 .collect::<Vec<_>>()
                 .join("\u{1}"),
         )
+    }
+
+    /// 页加载时一次性算好行稳定键：列名→列下标先建映射（结果列不含
+    /// 主键列时按 NULL 文本参与拼接，与 row_snapshot+row_get 缺失语义一致）。
+    fn compute_row_keys(
+        columns: &[ResultColumn],
+        rows: &[Vec<Value>],
+        pk: &[String],
+    ) -> Vec<Option<String>> {
+        if pk.is_empty() {
+            return vec![None; rows.len()];
+        }
+        let col_idx: Vec<Option<usize>> = pk
+            .iter()
+            .map(|p| columns.iter().position(|c| c.name == *p))
+            .collect();
+        rows.iter()
+            .map(|vals| {
+                Some(
+                    col_idx
+                        .iter()
+                        .map(|ci| match ci {
+                            Some(i) => vals.get(*i).map(value_to_text).unwrap_or_default(),
+                            None => "NULL".to_string(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\u{1}"),
+                )
+            })
+            .collect()
     }
 
     /// 该表当前是否可内联编辑（非只读 + 有主键 + 有数据）。
@@ -3727,8 +3781,8 @@ pub(crate) struct CommitResult {
 /// 的类型遍历上栈溢出（Windows GNU 工具链实测）。
 #[cfg(test)]
 mod conn_form_options_tests {
-    use super::{conn_visible_fields, ConnField, ConnForm};
-    use polydb_core::{ConnectionId, ConnectionInfo, DatabaseKind};
+    use super::{conn_visible_fields, ConnField, ConnForm, ResultColumn};
+    use polydb_core::{ConnectionId, ConnectionInfo, DatabaseKind, Value};
     use std::collections::HashMap;
 
     fn pg_form() -> ConnForm {
@@ -3815,5 +3869,48 @@ mod conn_form_options_tests {
         );
         assert_eq!(req.default_schema.as_deref(), Some("public"));
         assert!(req.password.is_none());
+    }
+
+    fn mk_col(name: &str) -> ResultColumn {
+        ResultColumn {
+            name: name.to_string(),
+            table: None,
+            data_type: "text".to_string(),
+            generic_type: None,
+            nullable: None,
+        }
+    }
+
+    #[test]
+    fn row_key_cache_matches_live_compute_semantics() {
+        // 缓存值必须与 browse_row_key 现算语义逐字节一致：
+        // 主键列顺序拼接、缺失列按 NULL、无主键返回 None。
+        let cols = vec![mk_col("id"), mk_col("name"), mk_col("age")];
+        let rows = vec![
+            vec![
+                Value::Integer(1),
+                Value::String("a".into()),
+                Value::Integer(9),
+            ],
+            vec![Value::Integer(2), Value::String("b".into()), Value::Null],
+        ];
+        let pk = vec!["id".to_string(), "age".to_string()];
+        let keys = super::PolyDBApp::compute_row_keys(&cols, &rows, &pk);
+        assert_eq!(keys[0].as_deref(), Some("1\u{1}9"));
+        assert_eq!(keys[1].as_deref(), Some("2\u{1}NULL"));
+
+        // 主键列不在结果集：按 NULL 文本参与拼接（与 row_snapshot 缺失语义一致）。
+        let pk2 = vec!["missing".to_string()];
+        let keys = super::PolyDBApp::compute_row_keys(&cols, &rows, &pk2);
+        assert_eq!(keys[0].as_deref(), Some("NULL"));
+        assert_eq!(keys[1].as_deref(), Some("NULL"));
+
+        // 无主键：整页 None（不可编辑）。
+        let keys = super::PolyDBApp::compute_row_keys(&cols, &rows, &[]);
+        assert!(keys.iter().all(Option::is_none));
+
+        // 空结果页：空缓存（重绘零成本，不产生越界）。
+        let keys = super::PolyDBApp::compute_row_keys(&cols, &[], &pk);
+        assert!(keys.is_empty());
     }
 }
