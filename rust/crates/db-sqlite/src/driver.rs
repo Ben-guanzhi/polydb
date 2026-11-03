@@ -624,6 +624,144 @@ impl SqlDriver for SqliteConn {
         .map_err(|e| CoreError::Internal(format!("sqlite task join: {e}")))?
     }
 
+    async fn batch_columns(
+        &self,
+        _schema: &str,
+    ) -> CoreResult<Option<Vec<(String, ColumnInfo)>>> {
+        // 批量列配方 = 逐表 `list_columns` 去掉表名参数、改用 `pragma_table_info`
+        // 表值函数一次取全库（Go SQLite `CatalogBatchColumns` 的 Rust 对应物）。
+        // 表达式与逐表逐列一致，故批量结果与逐表结果行对行相等。
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let guard = conn.lock();
+            let mut stmt = guard
+                .prepare(
+                    "SELECT t.name, c.name, c.type, c.\"notnull\", c.dflt_value, c.pk, c.cid + 1 \
+                     FROM sqlite_master t \
+                     JOIN pragma_table_info(t.name) c \
+                     WHERE t.type IN ('table', 'view') AND t.name NOT LIKE 'sqlite_%' \
+                     ORDER BY t.name, c.cid",
+                )
+                .map_err(|e| CoreError::Driver(format!("batch_columns prepare: {e}")))?;
+
+            let cols = stmt
+                .query_map([], |row| {
+                    let table: String = row.get(0)?;
+                    let name: String = row.get(1)?;
+                    let data_type: String = row.get(2)?;
+                    let notnull: bool = row.get(3)?;
+                    let default: Option<String> = row.get(4)?;
+                    let pk: bool = row.get(5)?;
+                    let ord: i32 = row.get(6)?;
+                    Ok((table, name, data_type, notnull, default, pk, ord))
+                })
+                .map_err(|e| CoreError::Driver(format!("batch_columns query: {e}")))?;
+
+            let mut out = Vec::new();
+            for c in cols {
+                let (table, name, data_type, notnull, default, pk, ord) =
+                    c.map_err(|e| CoreError::Driver(format!("row: {e}")))?;
+                let col = ColumnInfo {
+                    name,
+                    data_type: data_type.clone(),
+                    generic_type: None,
+                    nullable: !notnull,
+                    default_value: default,
+                    max_length: None,
+                    precision: None,
+                    scale: None,
+                    is_primary_key: pk,
+                    is_auto_increment: false,
+                    comment: None,
+                    ordinal_position: ord,
+                };
+                out.push((table, col));
+            }
+            Ok(Some(out))
+        })
+        .await
+        .map_err(|e| CoreError::Internal(format!("sqlite task join: {e}")))?
+    }
+
+    async fn batch_foreign_keys(
+        &self,
+        _schema: &str,
+    ) -> CoreResult<Option<Vec<(String, Vec<ForeignKeyInfo>)>>> {
+        // 批量外键配方 = 逐表 `list_foreign_keys` 去掉表名参数、改用
+        // `pragma_foreign_key_list` 表值函数一次取全库（Go SQLite
+        // `CatalogBatchForeignKeys` 的 Rust 对应物）。按 (表, id) 分组，
+        // 分组/列序/动作/名字与逐表路径逐字一致（等价契约见 equivalence 测试）。
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let guard = conn.lock();
+            let mut stmt = guard
+                .prepare(
+                    "SELECT t.name, fkl.id, fkl.seq, fkl.\"table\", fkl.\"from\", fkl.\"to\", \
+                             fkl.on_update, fkl.on_delete \
+                     FROM sqlite_master t \
+                     JOIN pragma_foreign_key_list(t.name) fkl ON true \
+                     WHERE t.type = 'table' AND t.name NOT LIKE 'sqlite_%' \
+                     ORDER BY t.name, fkl.id, fkl.seq",
+                )
+                .map_err(|e| CoreError::Driver(format!("batch_fk prepare: {e}")))?;
+
+            let rows = stmt
+                .query_map([], |row| {
+                    let table: String = row.get(0)?;
+                    let id: i32 = row.get(1)?;
+                    let seq: i32 = row.get(2)?;
+                    let ref_table: String = row.get(3)?;
+                    let from: String = row.get(4)?;
+                    let to: String = row.get(5)?;
+                    let on_update: String = row.get(6)?;
+                    let on_delete: String = row.get(7)?;
+                    Ok((table, id, seq, ref_table, from, to, on_update, on_delete))
+                })
+                .map_err(|e| CoreError::Driver(format!("batch_fk query: {e}")))?;
+
+            use std::collections::BTreeMap;
+            // (表, id) → (ref_table, [(seq, from, to)], on_update, on_delete)。
+            // id 是表内 FK 约束序号，seq 是多列内次序，两者都按数值排（同逐表）。
+            let mut by_table: BTreeMap<
+                String,
+                BTreeMap<i32, (String, Vec<(i32, String, String)>, String, String)>,
+            > = BTreeMap::new();
+            for r in rows {
+                let (table, id, seq, ref_table, from, to, on_update, on_delete) =
+                    r.map_err(|e| CoreError::Driver(format!("row: {e}")))?;
+                let entry = by_table
+                    .entry(table)
+                    .or_default()
+                    .entry(id)
+                    .or_insert_with(|| (ref_table, Vec::new(), on_update, on_delete));
+                entry.1.push((seq, from, to));
+            }
+
+            let mut out: Vec<(String, Vec<ForeignKeyInfo>)> = Vec::new();
+            for (table, agg) in &by_table {
+                let mut fks = Vec::with_capacity(agg.len());
+                for (ref_table, pairs, on_update, on_delete) in agg.values() {
+                    let mut pairs = pairs.clone();
+                    pairs.sort_by_key(|(seq, _, _)| *seq);
+                    fks.push(ForeignKeyInfo {
+                        // SQLite 的外键约束本来没有名字（同逐表）：留空由 diff 按内容配对。
+                        name: String::new(),
+                        columns: pairs.iter().map(|(_, from, _)| from.clone()).collect(),
+                        referenced_schema: "main".to_string(),
+                        referenced_table: ref_table.clone(),
+                        referenced_columns: pairs.iter().map(|(_, _, to)| to.clone()).collect(),
+                        on_update: fk_action(on_update),
+                        on_delete: fk_action(on_delete),
+                    });
+                }
+                out.push((table.clone(), fks));
+            }
+            Ok(Some(out))
+        })
+        .await
+        .map_err(|e| CoreError::Internal(format!("sqlite task join: {e}")))?
+    }
+
     async fn create_table_sql(&self, _schema: &str, table: &str) -> CoreResult<String> {
         let conn = Arc::clone(&self.conn);
         let table = table.to_string();

@@ -123,6 +123,11 @@ pub trait SqlDriver: DatabaseDriver {
     async fn list_columns(&self, schema: &str, table: &str) -> Result<Vec<ColumnInfo>>;
     async fn list_indexes(&self, schema: &str, table: &str) -> Result<Vec<IndexInfo>>;
     async fn list_foreign_keys(&self, schema: &str, table: &str) -> Result<Vec<FkInfo>>;
+    // 批量元数据（§57.4 #1）：一次往返取全库列/外键，调用方据此把逐表 N+1 降为 3 次。
+    // 返回 Option：Ok(Some) = 有批量能力；Ok(None) = 无能力（回落逐表）；Err = 批量失败（同样回落）。
+    // 空组语义：列空组不可信（真表必有列 ⇒ 回落补读）；外键空组是真状态（不回落）。
+    async fn batch_columns(&self, schema: &str) -> Result<Option<Vec<(String, ColumnInfo)>>> { Ok(None) }
+    async fn batch_foreign_keys(&self, schema: &str) -> Result<Option<Vec<(String, Vec<FkInfo>)>>> { Ok(None) }
     async fn create_table_sql(&self, schema: &str, table: &str) -> Result<String>;
 }
 

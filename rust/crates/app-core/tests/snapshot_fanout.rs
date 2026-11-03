@@ -2,7 +2,12 @@
 //
 // 订正的是同一句话："diff 场景动辄上千表，要不要放宽 200 表上限"——
 // 200 是 GUI 关系轨道的外键列表截断（`ui-gui/src/app.rs` 的 `.take(200)`），
-// 比对路径（`collect_snapshot`）**没有**任何表数上限，代价是每表 3 次串行元数据查询。
+// 比对路径（`collect_snapshot`）**没有**任何表数上限。
+//
+// §57.4 #1 之前：每表 3 次串行元数据查询（列 / 索引 / 外键）⇒ 扇出 1+3T。
+// §57.4 #1 之后：列与外键走批量（各 1 次），只剩索引逐表 ⇒ 扇出 3+2T（本测试形状
+// 每表 1 索引，索引侧本身是 1 次 index_list + 每索引 1 次 index_info）。
+// 下面的耗时断言不变——它钉的是「千表可采集」，不是具体次数。
 //
 // 与 Go 侧的不对称（如实记录）：Go 的测试在包内，可以把驱动换成计数装饰器，
 // 于是"每表恰好 3 次"是**精确断言**；Rust 的 `connections` 表是私有的、
@@ -104,8 +109,7 @@ fn snapshot_sees_the_last_table_no_cap() {
         assert_eq!(plan.entries[0].table, "t999");
         assert_eq!(plan.entries[0].op, polydb_core::SchemaDiffOp::DropTable);
         println!(
-            "实测：schema_diff（两侧各 {N} 表，即 2×(1+3n) = {} 次元数据查询）耗时 {:?}",
-            2 * (1 + 3 * N),
+            "实测：schema_diff（两侧各 {N} 表；§57.4 #1 后列/外键走批量，扇出 2×(3+2n)）耗时 {:?}",
             cost
         );
         assert!(

@@ -34,6 +34,37 @@ pub trait SqlDriver: DatabaseDriver {
         -> CoreResult<Vec<ForeignKeyInfo>>;
     async fn create_table_sql(&self, schema: &str, table: &str) -> CoreResult<String>;
 
+    /// 批量读一个 schema 下所有表/视图的列（K-1.2 配方，Go `BatchColumnsReader` 的
+    /// Rust 对应物）。一次往返取代逐表 `list_columns` 的 T 次往返——`collect_snapshot`
+    /// 的快照 N+1 正是靠它收敛。
+    ///
+    /// 三态返回，调用方据此决定回落策略（与 Go `schemadiff.Collect` 逐字对应）：
+    /// - `Ok(Some(pairs))`：驱动原生支持批量，一次往返拿到全部 `(表名, 列)`；
+    /// - `Ok(None)`：驱动不具备批量能力，调用方应回落逐表 `list_columns`；
+    /// - `Err(_)`：批量尝试失败，调用方同样回落逐表（错误由逐表路径传播，
+    ///   绝不产出半读快照——「半读快照把每个缺失索引/约束报成 DROP」防线保持）。
+    ///
+    /// 行形状 = 逐表 `list_columns` 的列形状 + 表名前置（对应 Go 的 column 0 =
+    /// table name）。默认实现返回 `Ok(None)`；PG / SQLite 驱动覆盖此方法。
+    async fn batch_columns(
+        &self,
+        _schema: &str,
+    ) -> CoreResult<Option<Vec<(String, ColumnInfo)>>> {
+        Ok(None)
+    }
+
+    /// 批量读一个 schema 下所有表的外键（K-1.2 配方，Go `BatchForeignKeysReader` 的
+    /// Rust 对应物）。三态语义同 `batch_columns`。
+    ///
+    /// 与列的关键区别：**空组是真状态**（表无外键），不像列那样需要回落补读。
+    /// 返回 `(表名, 该表外键组)`；只含真表（视图无外键）。
+    async fn batch_foreign_keys(
+        &self,
+        _schema: &str,
+    ) -> CoreResult<Option<Vec<(String, Vec<ForeignKeyInfo>)>>> {
+        Ok(None)
+    }
+
     /// 按表浏览行（服务端分页/排序/过滤，behavior.md §13）。
     /// 实现经 db-core browse 模块构造参数化 SQL 后走自身执行管线。
     async fn browse_rows(

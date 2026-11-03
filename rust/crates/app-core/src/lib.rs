@@ -752,9 +752,32 @@ impl AppCore {
             .unwrap_or_else(|| default_schema(kind).to_string());
         let sql = conn.as_sql()?;
         let mut tables = Vec::new();
+
+        // ── 批量元数据（K-1.2 的 Rust 对应物）：列相位 + FK 相位各一次往返 ──
+        // 列的空组不可信（真表必有列 ⇒ 回落单表补读）；FK 的空组是真状态（不回落）。
+        // 两组 known 分开管，与 Go schemadiff.Collect 逐字对应。批量失败绝不产出
+        // 半读快照：回落逐表后由逐表路径的错误传播兜底（E6.5 防线）。
+        let (batch_cols, batch_cols_known): (HashMap<String, Vec<ColumnInfo>>, bool) =
+            match sql.batch_columns(&schema).await {
+                Ok(Some(pairs)) => {
+                    let mut m: HashMap<String, Vec<ColumnInfo>> = HashMap::new();
+                    for (t, c) in pairs {
+                        m.entry(t).or_default().push(c);
+                    }
+                    (m, true)
+                }
+                // Ok(None) = 驱动无批量能力；Err = 批量尝试失败。两者都回落逐表。
+                Ok(None) | Err(_) => (HashMap::new(), false),
+            };
+        let (batch_fks, batch_fks_known): (HashMap<String, Vec<ForeignKeyInfo>>, bool) =
+            match sql.batch_foreign_keys(&schema).await {
+                Ok(Some(groups)) => (groups.into_iter().collect(), true),
+                Ok(None) | Err(_) => (HashMap::new(), false),
+            };
+
         for t in sql.list_tables(&schema).await? {
             // 视图（E6.5，取证 A.15）：只带**名字与类型**进快照——它不参与比对，但生成器要用
-            // 这些名字避让临时表、并据此挂视图警告。零元数据查询 ⇒ 采集扇出仍是每表 3 次。
+            // 这些名字避让临时表、并据此挂视图警告。零元数据查询。
             if t.table_type != TableType::Table {
                 tables.push(TableSnapshot {
                     name: t.name,
@@ -765,12 +788,24 @@ impl AppCore {
                 });
                 continue;
             }
+            // 列：批量命中且非空才用；否则回落逐表（错误传播，绝不半读）。
+            let columns = match batch_cols.get(&t.name) {
+                Some(c) if batch_cols_known && !c.is_empty() => c.clone(),
+                _ => sql.list_columns(&schema, &t.name).await?,
+            };
+            let indexes = sql.list_indexes(&schema, &t.name).await?;
+            // FK：批量命中即用（空组 = 无外键，真状态）；否则回落逐表。
+            let foreign_keys = if batch_fks_known {
+                batch_fks.get(&t.name).cloned().unwrap_or_default()
+            } else {
+                sql.list_foreign_keys(&schema, &t.name).await?
+            };
             tables.push(TableSnapshot {
                 name: t.name.clone(),
                 table_type: Some(t.table_type),
-                columns: sql.list_columns(&schema, &t.name).await?,
-                indexes: sql.list_indexes(&schema, &t.name).await?,
-                foreign_keys: sql.list_foreign_keys(&schema, &t.name).await?,
+                columns,
+                indexes,
+                foreign_keys,
             });
         }
         Ok(Snapshot::new(kind, schema, tables))
