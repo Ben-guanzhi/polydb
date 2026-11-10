@@ -280,38 +280,127 @@ impl ConnectionRepository {
         id: ConnectionId,
         req: &UpdateConnectionRequest,
     ) -> CoreResult<Option<ConnectionInfo>> {
-        let existing = self.get(id)?;
-        let Some(existing) = existing else {
-            return Ok(None);
-        };
+        let conn = self.conn.lock();
+
+        // F2 回归：get 与 UPDATE 必须在同一把锁内完成（原子 get-modify-write）。
+        // 旧写法先 self.get(id)（获锁→读→释锁）、再 self.get_password_ref(id)
+        // （获锁→读→释锁）、最后 conn.lock() 执行 UPDATE——两次读与写之间
+        // 另一并发 update 可改行，UPDATE 用陈旧 existing 填充未提供字段，
+        // 覆盖并发更新（丢失更新）。
 
         let now = Utc::now();
 
-        // password_ref 不随 ConnectionInfo 下发：更新请求未带新 ref 时保留库中已有 ref
-        // （与 Go 侧 repo.Update 对齐，避免改名/改 host 等更新把密码引用清空）。
-        // 必须在获取锁之前查询：get_password_ref 需要同一把锁，而 parking_lot 不可重入，
-        // 持锁时调用会自死锁。
-        let password_ref = match req.password_ref.as_ref() {
-            Some(r) => Some(r.clone()),
-            None => self.get_password_ref(id)?,
+        // 读 existing row（与 get() 同一 SELECT，直接用已持有的 conn）
+        let existing_row = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, name, kind, host, port, database, username, options, ssh_tunnel, default_schema, read_only, \"group\", color, created_at, updated_at FROM connections WHERE id = ?1",
+                )
+                .map_err(|e| CoreError::Storage(format!("get connection prepare: {e}")))?;
+
+            match stmt.query_row(rusqlite::params![id.to_string()], |row| {
+                let id_str: String = row.get(0)?;
+                let name: String = row.get(1)?;
+                let kind_str: String = row.get(2)?;
+                let host: Option<String> = row.get(3)?;
+                let port: Option<i64> = row.get(4)?;
+                let database: Option<String> = row.get(5)?;
+                let username: Option<String> = row.get(6)?;
+                let options_json: String = row.get(7)?;
+                let ssh_json: Option<String> = row.get(8)?;
+                let default_schema: Option<String> = row.get(9)?;
+                let read_only: i64 = row.get(10)?;
+                let group: Option<String> = row.get(11)?;
+                let color: Option<String> = row.get(12)?;
+                let created_at_str: String = row.get(13)?;
+                let updated_at_str: String = row.get(14)?;
+                Ok((
+                    id_str,
+                    name,
+                    kind_str,
+                    host,
+                    port,
+                    database,
+                    username,
+                    options_json,
+                    ssh_json,
+                    default_schema,
+                    read_only,
+                    group,
+                    color,
+                    created_at_str,
+                    updated_at_str,
+                ))
+            }) {
+                Ok(row) => Some(row),
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(e) => return Err(CoreError::Storage(format!("get connection: {e}"))),
+            }
         };
 
-        let conn = self.conn.lock();
+        let Some(existing_row) = existing_row else {
+            return Ok(None);
+        };
 
-        let name = req.name.as_deref().unwrap_or(&existing.name);
-        let host = req.host.as_ref().or(existing.host.as_ref());
-        let port = req.port.or(existing.port);
-        let database = req.database.as_ref().or(existing.database.as_ref());
-        let username = req.username.as_ref().or(existing.username.as_ref());
-        let options = req.options.as_ref().unwrap_or(&existing.options);
-        let ssh_tunnel = req.ssh_tunnel.as_ref().or(existing.ssh_tunnel.as_ref());
+        let (
+            _id_str,
+            name_existing,
+            kind_str,
+            host_existing,
+            port_existing,
+            database_existing,
+            username_existing,
+            options_json_existing,
+            ssh_json_existing,
+            default_schema_existing,
+            read_only_stored,
+            group_existing,
+            color_existing,
+            created_at_str,
+            _updated_at_str,
+        ) = existing_row;
+
+        let kind = parse_db_kind(&kind_str)?;
+        let options_existing: std::collections::HashMap<String, String> =
+            serde_json::from_str(&options_json_existing).unwrap_or_default();
+        let ssh_tunnel_existing = ssh_json_existing
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| CoreError::Storage(format!("parse ssh: {e}")))?;
+        let created_at: DateTime<Utc> = created_at_str
+            .parse()
+            .map_err(|e| CoreError::Storage(format!("parse created_at: {e}")))?;
+
+        // password_ref 在同一把锁内读取
+        let password_ref = match req.password_ref.as_ref() {
+            Some(r) => Some(r.clone()),
+            None => match conn.query_row(
+                "SELECT password_ref FROM connections WHERE id = ?1",
+                rusqlite::params![id.to_string()],
+                |row| row.get::<_, Option<String>>(0),
+            ) {
+                Ok(v) => v,
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(e) => return Err(CoreError::Storage(format!("get password_ref: {e}"))),
+            },
+        };
+
+        // 用锁内读到的新鲜数据填充未提供字段
+        let name = req.name.as_deref().unwrap_or(&name_existing);
+        let host = req.host.as_ref().or(host_existing.as_ref());
+        let port = req.port.or(port_existing.map(|p| p as u16));
+        let database = req.database.as_ref().or(database_existing.as_ref());
+        let username = req.username.as_ref().or(username_existing.as_ref());
+        let options = req.options.as_ref().unwrap_or(&options_existing);
+        let ssh_tunnel = req.ssh_tunnel.as_ref().or(ssh_tunnel_existing.as_ref());
         let default_schema = req
             .default_schema
             .as_ref()
-            .or(existing.default_schema.as_ref());
-        let read_only = req.read_only.or(existing.read_only);
-        let group = req.group.clone().or(existing.group.clone());
-        let color = req.color.clone().or(existing.color.clone());
+            .or(default_schema_existing.as_ref());
+        let read_only = req.read_only.or(bool_from_stored(read_only_stored));
+        let group = req.group.clone().or(group_existing.clone());
+        let color = req.color.clone().or(color_existing.clone());
 
         let options_json = serde_json::to_string(options)
             .map_err(|e| CoreError::Storage(format!("serialize options: {e}")))?;
@@ -320,7 +409,7 @@ impl ConnectionRepository {
             .transpose()
             .map_err(|e| CoreError::Storage(format!("serialize ssh: {e}")))?;
 
-        conn.execute(
+        let affected = conn.execute(
             "UPDATE connections SET name=?1, host=?2, port=?3, database=?4, username=?5, password_ref=?6, options=?7, ssh_tunnel=?8, default_schema=?9, read_only=?10, \"group\"=?11, color=?12, updated_at=?13 WHERE id=?14",
             rusqlite::params![
                 name,
@@ -338,12 +427,17 @@ impl ConnectionRepository {
                 now.to_rfc3339(),
                 id.to_string(),
             ],
-        ).map_err(|e| CoreError::Storage(format!("update connection: {e}")))?;
+        )
+        .map_err(|e| CoreError::Storage(format!("update connection: {e}")))?;
+
+        if affected == 0 {
+            return Ok(None);
+        }
 
         Ok(Some(ConnectionInfo {
             id,
             name: name.to_string(),
-            kind: existing.kind,
+            kind,
             host: host.cloned(),
             port,
             database: database.cloned(),
@@ -354,7 +448,7 @@ impl ConnectionRepository {
             read_only,
             group,
             color,
-            created_at: existing.created_at,
+            created_at,
             updated_at: now,
         }))
     }
@@ -534,6 +628,86 @@ mod tests {
             ..Default::default()
         };
         assert!(repo.update(id, &update).unwrap().is_none());
+    }
+
+    // F3 回归：get 与 UPDATE 之间行被删掉时，UPDATE 影响 0 行，
+    // update 必须返回 None 而非 Some(基于已删行的内存对象)。
+    // 用 BEFORE UPDATE 触发器模拟这个竞态：get 看到行存在，
+    // 触发器在 UPDATE 前删除该行，UPDATE 影响 0 行。
+    #[test]
+    fn update_after_delete_returns_none() {
+        let repo = test_repo();
+        let info = repo.create(&req("to-update")).unwrap();
+
+        // 触发器在 UPDATE 前删除该行——模拟并发删除
+        {
+            let conn = repo.conn.lock();
+            conn.execute_batch(
+                "CREATE TRIGGER delete_before_update BEFORE UPDATE ON connections
+                 BEGIN
+                     DELETE FROM connections WHERE id = NEW.id;
+                 END;",
+            )
+            .unwrap();
+        }
+
+        let update = polydb_protocol::UpdateConnectionRequest {
+            name: Some("renamed".to_string()),
+            ..Default::default()
+        };
+        let result = repo.update(info.id, &update).unwrap();
+        assert!(
+            result.is_none(),
+            "update-after-delete 应返回 None（UPDATE 影响 0 行），但返回了 Some"
+        );
+    }
+
+    // F2 回归：并发 update 不能丢失更新。
+    // 旧写法 get(id) 与 UPDATE 不在同一把锁内——两个并发 update 各自
+    // 读到同一旧行，UPDATE 用陈旧数据填充未提供字段，后执行的 UPDATE
+    // 覆盖先执行的修改（丢失更新）。
+    #[test]
+    fn concurrent_updates_do_not_lose_changes() {
+        let repo = std::sync::Arc::new(test_repo());
+        let info = repo.create(&req("original")).unwrap();
+
+        // 线程 A：改 name="renamed"（不提供 color）
+        // 线程 B：改 color="blue"（不提供 name）
+        // 修复后：两个修改都保留。修复前：取决于执行顺序，
+        // 后执行的 UPDATE 用陈旧 existing 覆盖先执行的修改。
+        let repo_a = std::sync::Arc::clone(&repo);
+        let repo_b = std::sync::Arc::clone(&repo);
+        let id = info.id;
+
+        let handle_a = std::thread::spawn(move || {
+            let update = polydb_protocol::UpdateConnectionRequest {
+                name: Some("renamed".to_string()),
+                ..Default::default()
+            };
+            repo_a.update(id, &update).unwrap();
+        });
+
+        let handle_b = std::thread::spawn(move || {
+            let update = polydb_protocol::UpdateConnectionRequest {
+                color: Some("blue".to_string()),
+                ..Default::default()
+            };
+            repo_b.update(id, &update).unwrap();
+        });
+
+        handle_a.join().unwrap();
+        handle_b.join().unwrap();
+
+        let final_info = repo.get(info.id).unwrap().unwrap();
+        assert_eq!(
+            final_info.name, "renamed",
+            "线程 A 的 name 修改不能被线程 B 覆盖（丢失更新）"
+        );
+        assert_eq!(
+            final_info.color.as_deref(),
+            Some("blue"),
+            "线程 B 的 color 修改不能被线程 A 覆盖（丢失更新）"
+        );
     }
 
     #[test]

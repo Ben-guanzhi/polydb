@@ -2586,15 +2586,52 @@ impl PolyDBApp {
                         {
                             Ok(r) => {
                                 if changes::rows_mismatch(s, r.affected_rows) {
-                                    let _ = t.rollback_transaction(&txn).await;
-                                    return CommitResult {
-                                        ok: false,
-                                        applied,
-                                        error: Some(format!(
-                                            "影响行数与预期不符（第 {} 条），已整体回滚",
-                                            applied + 1
-                                        )),
+                                    // 0 行守卫：UPDATE 的 0 可能是同值更新 no-op
+                                    // （行在，放行），也可能是行已被删/PK 已改——
+                                    // 同事务探针区分（TableProGo zeroRowVerdict
+                                    // 同课；R2-02）。探针读本事务快照，与提交
+                                    // 语句的定位谓词同源生成。
+                                    let present = if s.table.is_empty() || s.where_clause.is_empty()
+                                    {
+                                        Ok(true)
+                                    } else {
+                                        let probe_sql = format!(
+                                            "SELECT 1 FROM {} WHERE {}",
+                                            s.table, s.where_clause
+                                        );
+                                        t.execute_in_transaction(&txn, &probe_sql, &[])
+                                            .await
+                                            .map(|p| !p.rows.is_empty())
                                     };
+                                    match present {
+                                        Ok(true) if s.allow_zero => {
+                                            // 行还在：同值更新，无事发生。
+                                        }
+                                        present => {
+                                            let _ = t.rollback_transaction(&txn).await;
+                                            let why = match present {
+                                                Ok(false) => "目标行已不存在",
+                                                Ok(true) => "同值更新但该语句不容许 0 行",
+                                                Err(pe) => return CommitResult {
+                                                    ok: false,
+                                                    applied,
+                                                    error: Some(format!(
+                                                        "第 {} 条 0 行，探针失败: {pe}",
+                                                        applied + 1
+                                                    )),
+                                                },
+                                            };
+                                            return CommitResult {
+                                                ok: false,
+                                                applied,
+                                                error: Some(format!(
+                                                    "影响行数与预期不符（第 {} 条，{}），已整体回滚",
+                                                    applied + 1,
+                                                    why
+                                                )),
+                                            };
+                                        }
+                                    }
                                 }
                                 applied += 1;
                             }
@@ -2891,7 +2928,7 @@ impl PolyDBApp {
     /// 概览 rail：单条聚合 SQL 列画像（语义对齐 Web tableProfile，截前 24 列）。
     pub(crate) fn load_profile(&mut self, idx: usize, cx: &mut Context<Self>) {
         let Some(id) = self.sel_id() else { return };
-        let kind = self.kind_str();
+        let Some(kind) = self.sel_kind() else { return };
         let Some(tab) = self.tabs.get(idx) else {
             return;
         };
@@ -2905,12 +2942,12 @@ impl PolyDBApp {
                 data_type: c.data_type.clone(),
             })
             .collect();
-        let expr = format!(
-            "{}.{}",
-            profile::quote_ident(&kind, &tab.schema),
-            profile::quote_ident(&kind, &tab.table)
-        );
-        let plan = profile::build_profile_plan(&kind, &expr, &cols);
+        // 方言引用走 changes::quote_ident 单一实现（与行编辑/导出同一份）：
+        // 画像层自带的一份曾对 Oracle 小写化——把目录上报的大写标识符指向
+        // 另一个不存在的标识符，与 Web 画像路径（原样大小写）漂移。
+        let quote = |s: &str| crate::changes::quote_ident(kind, s);
+        let expr = format!("{}.{}", quote(&tab.schema), quote(&tab.table));
+        let plan = profile::build_profile_plan(&quote, &expr, &cols);
         tab_set(self, idx, |t| t.loading_profile = true);
         cx.notify();
         let sql_for_work = plan.sql.clone();
@@ -3904,6 +3941,7 @@ fn value_to_text(v: &Value) -> String {
             }
         }
         Value::Integer(i) => i.to_string(),
+        Value::U64(u) => u.to_string(),
         Value::Float(f) => format!("{}", f),
         Value::String(s) => s.clone(),
         other => serde_json::to_string(other).unwrap_or_default(),

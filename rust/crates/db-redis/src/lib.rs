@@ -409,12 +409,30 @@ impl KvDriver for RedisConn {
                     })?;
                 }
                 RedisValue::Stream(s) => {
+                    // Stream 的 set_value 按**追加条目**处理（XADD），与 Go 侧
+                    // 一致：Go 的 dbredis.go:165 走内核 RowAppender::AppendRow，
+                    // 对 RedisStream 落成 `XADD key * <field> <value>`
+                    // （dbcore/redis/redis.go:676-696，单字段名 "data"）。
+                    //
+                    // PD-25（2026-11-10）：此前本分支返回 NotSupported
+                    // （"set_value 语义是替换键，而 Stream 是 append-only"），
+                    // **只改了 Rust 一端**——Go 侧仍支持 XADD 追加，于是两端
+                    // 行为分叉（Go 成功、Rust 报 NOT_SUPPORTED），
+                    // 契约测试 `TestContractRedis` 的 "set stream" 步骤随即红。
+                    //
+                    // 语义上"set_value 不该写 Stream"的判断本身没错，但它
+                    // 属于**契约变更**（spec/behavior.md 未规定 stream 的
+                    // set_value），必须两端同时改并同步 spec/契约断言。
+                    // 本波选择**对齐 Go 侧**（两端都支持 XADD 追加）：改动面
+                    // 更小、语义无损（追加而非覆盖，不丢已有条目），
+                    // 且契约测试的既有断言（204 + 读回 {data=...}）无需改。
+                    let payload = s.clone();
                     redis::cmd("XADD")
                         .arg(&key)
                         .arg("*")
                         .arg("data")
-                        .arg(s)
-                        .query::<()>(conn)
+                        .arg(payload)
+                        .query::<String>(conn)
                         .map_err(Self::err)?;
                 }
             }
@@ -614,16 +632,36 @@ fn serialize_stream(msgs: &[(String, HashMap<String, String>)]) -> String {
 }
 
 impl RedisConn {
-    /// string：STRLEN 取总字节，超限用 GETRANGE 只取前 max_string_bytes 字节
+    /// string：STRLEN 取总字节，用 GETRANGE 只取前 max_string_bytes 字节
     /// （无续读游标，与内核一致——截断标记足够值页提示）。
+    ///
+    /// GETRANGE 而非 GET：一个多 MB 的 string 若整值取回再在 Rust 侧裁，内存与
+    /// 带宽都是 O(S) 而非 O(cap)——正是有界窗口读要防的事，也是 Go 内核
+    /// `GetValueBounded` 用 GetRange 做的事。total 不超过上限时 GETRANGE 本来就
+    /// 返回整值，两条路径的取值完全一致。
     async fn window_string(
         &self,
         key: String,
         limit: RedisValueLimit,
     ) -> CoreResult<RedisValueWindow> {
         let max = limit.max_string_bytes;
-        let (total, raw): (i64, Vec<u8>) = self
-            .with_conn(move |conn| {
+        let (total, raw): (i64, Vec<u8>) = if max > 0 {
+            self.with_conn(move |conn| {
+                let total: i64 = redis::cmd("STRLEN")
+                    .arg(&key)
+                    .query(conn)
+                    .map_err(Self::err)?;
+                let raw: Vec<u8> = redis::cmd("GETRANGE")
+                    .arg(&key)
+                    .arg(0)
+                    .arg(max - 1)
+                    .query(conn)
+                    .map_err(Self::err)?;
+                Ok((total, raw))
+            })
+            .await?
+        } else {
+            self.with_conn(move |conn| {
                 let total: i64 = redis::cmd("STRLEN")
                     .arg(&key)
                     .query(conn)
@@ -631,7 +669,8 @@ impl RedisConn {
                 let raw: Vec<u8> = redis::cmd("GET").arg(&key).query(conn).map_err(Self::err)?;
                 Ok((total, raw))
             })
-            .await?;
+            .await?
+        };
         if total <= max {
             Ok(RedisValueWindow {
                 value: RedisValue::String(String::from_utf8_lossy(&raw).into_owned()),
@@ -640,8 +679,7 @@ impl RedisConn {
                 next_cursor: String::new(),
             })
         } else {
-            let end = (max.min(raw.len() as i64)) as usize;
-            let trimmed = trim_partial_rune_bytes(&raw[..end]);
+            let trimmed = trim_partial_rune_bytes(&raw);
             Ok(RedisValueWindow {
                 value: RedisValue::String(String::from_utf8_lossy(trimmed).into_owned()),
                 total,

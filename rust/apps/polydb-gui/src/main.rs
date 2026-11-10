@@ -4,7 +4,10 @@ use polydb_transport::{LocalTransport, Transport};
 use std::sync::Arc;
 
 fn main() {
-    let data_dir = dirs::data_local_dir()
+    // 与 Go 的 os.UserConfigDir() 对齐（dirs::config_dir 等价），此前用
+    // data_local_dir() 解析到 ~/.local/share/polydb，与 Go 的 ~/.config/polydb
+    // 不同——GUI 与 Go TUI/Web 读写不同的 polydb.db / keyring.bin。
+    let data_dir = dirs::config_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("polydb");
     std::fs::create_dir_all(&data_dir).ok();

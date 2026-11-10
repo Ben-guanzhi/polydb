@@ -24,7 +24,7 @@ impl Storage {
     pub fn open(path: &str) -> CoreResult<Self> {
         let conn = RusqliteConnection::open(path)
             .map_err(|e| CoreError::Storage(format!("failed to open storage: {e}")))?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=NORMAL;")
             .map_err(|e| CoreError::Storage(format!("pragma failed: {e}")))?;
         let data_dir = Path::new(path)
             .parent()

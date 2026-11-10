@@ -19,6 +19,7 @@ fn cell_text(v: &Value) -> String {
             }
         }
         Value::Integer(i) => i.to_string(),
+        Value::U64(u) => u.to_string(),
         Value::Float(f) => format!("{}", f),
         Value::String(s) => s.clone(),
         other => serde_json::to_string(other).unwrap_or_default(),

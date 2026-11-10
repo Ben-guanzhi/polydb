@@ -21,6 +21,13 @@ const MUTATING_KEYWORDS: &[&str] = &[
     "SETVAL", "REFRESH", "INTO", "LOAD", "DO", "OPTIMIZE",
 ];
 
+/// 「既是写关键字又是 SQL 内建函数名」的歧义词。`REPLACE(name,'a','b')` 在
+/// MySQL/SQLite/PG 里是纯读的字符串函数，但 REPLACE 同时是 MySQL 的写语句
+/// 动词——旧判定把 `SELECT REPLACE(name,'a','b') FROM t` 判为写并在只读
+/// 连接上拒绝。函数调用形式（词后紧跟 `(`）豁免：SQL 语句动词后从不直接
+/// 跟 `(`，而函数调用总是。
+const KEYWORD_ALSO_FUNCTION: &[&str] = &["REPLACE"];
+
 /// 判断语句是否包含变更关键字（behavior.md §12.3 只读拦截的判定基础）。
 ///
 /// 扫描整条语句（含 WITH 子树与多语句），**按 token 类别**判定：只认裸词
@@ -34,9 +41,28 @@ const MUTATING_KEYWORDS: &[&str] = &[
 /// 丢数据。
 pub fn mutates_data(sql: &str, kind: Option<DatabaseKind>) -> bool {
     scan::profiles_for(kind).iter().any(|p| {
-        scan::scan_tokens(sql, *p).iter().any(|t| {
-            t.kind == TokenKind::Word
-                && MUTATING_KEYWORDS.contains(&t.text(sql).to_ascii_uppercase().as_str())
+        let toks = scan::scan_tokens(sql, *p);
+        toks.iter().enumerate().any(|(i, t)| {
+            if t.kind != TokenKind::Word {
+                return false;
+            }
+            let word = t.text(sql).to_ascii_uppercase();
+            if !MUTATING_KEYWORDS.contains(&word.as_str()) {
+                return false;
+            }
+            // 函数调用豁免：歧义词后紧跟 `(`（token 位置之间只可能是空白）
+            // 是纯读的函数调用，不是语句动词。
+            if KEYWORD_ALSO_FUNCTION.contains(&word.as_str()) {
+                if let Some(next) = toks.get(i + 1) {
+                    if next.kind == TokenKind::Other
+                        && next.start >= t.end
+                        && sql[t.end..=next.start].trim_start().starts_with('(')
+                    {
+                        return false;
+                    }
+                }
+            }
+            true
         })
     })
 }
@@ -161,9 +187,53 @@ pub fn strip_comments(sql: &str, kind: Option<DatabaseKind>) -> String {
     out
 }
 
+/// 判定语句是否携带 RETURNING 子句（token 级扫描，避开字符串字面量里的
+/// "RETURNING"）。
+///
+/// `INSERT/UPDATE/DELETE … RETURNING` 产出结果集——RETURNING 的行就是答案，
+/// 不是副作用。把这类语句路由到 Exec 会静默丢弃生成的 id（Go 侧
+/// `dbcore.IsReadQuery` 用 HasReturningClause 把 RETURNING 路由到查询路径，
+/// spec/behavior.md §11 双后端一致性）。
+pub fn has_returning_clause(sql: &str) -> bool {
+    scan::scan_tokens(sql, scan::profile_for_kind(None))
+        .into_iter()
+        .any(|t| t.kind == TokenKind::Word && t.text(sql).eq_ignore_ascii_case("RETURNING"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RETURNING 检测：DML 带子句时为真，字符串字面量/列名里的 "returning"
+    /// 不触发（token 级扫描的意义所在）。
+    #[test]
+    fn has_returning_clause_scans_tokens() {
+        assert!(has_returning_clause(
+            "INSERT INTO t (a) VALUES (1) RETURNING id"
+        ));
+        assert!(has_returning_clause(
+            "UPDATE t SET a = 1 WHERE id = 2 RETURNING a, b"
+        ));
+        assert!(has_returning_clause("DELETE FROM t RETURNING *"));
+        assert!(!has_returning_clause(
+            "SELECT * FROM t WHERE note = 'returning soon'"
+        ));
+        assert!(!has_returning_clause("SELECT * FROM returning_events"));
+        assert!(!has_returning_clause("SELECT 1"));
+    }
+
+    /// REPLACE 既是 MySQL 写语句动词又是内建字符串函数：函数调用形式
+    /// （词后紧跟 `(`）是纯读，语句动词形式才是写。与 Go 侧 detect_test.go
+    /// 的同名用例镜像（§11 双后端一致性）。
+    #[test]
+    fn replace_function_call_is_not_a_write() {
+        assert!(!mutates_data("SELECT REPLACE(name,'a','b') FROM t", None));
+        assert!(!mutates_data(
+            "SELECT REPLACE(name, 'a', 'b') AS cleaned FROM t",
+            None
+        ));
+        assert!(mutates_data("REPLACE INTO t VALUES (1)", None));
+    }
 
     /// 与 Go 侧 detect_test.go 的 TestMutatesData 用例逐条镜像。
     /// kind 为 None（方言未知 → 取各剖面并集）。

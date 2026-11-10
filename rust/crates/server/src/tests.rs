@@ -1220,7 +1220,7 @@ async fn cors_grants_authorized_headers() {
 async fn body_over_the_limit_is_rejected() {
     let router = new_test_router();
     let big = Bytes::from_static(&[0u8; MAX_BODY_BYTES + 1]);
-    let (status, _, _) = req_with(
+    let (status, raw, _) = req_with(
         router,
         "POST",
         "/api/connections/x/query",
@@ -1233,6 +1233,39 @@ async fn body_over_the_limit_is_rejected() {
         StatusCode::PAYLOAD_TOO_LARGE,
         "16 MiB + 1 must be 413, not a real query"
     );
+    // 与 Go 侧契约一致：413 必须带 PolyDB 错误包络（code + message），前端
+    // 才能按 code 分支而不是按裸状态码猜。
+    assert_eq!(err_code(&raw), "POLYDB_ERR_PAYLOAD_TOO_LARGE");
+    let v: Value = serde_json::from_slice(&raw).unwrap();
+    assert!(
+        v["message"].as_str().unwrap().contains("too large"),
+        "message = {}",
+        v["message"]
+    );
+}
+
+// 声明 Content-Length 超限却一个字节都不发（axum 的 oneshot 会缓冲请求体，
+// 用 Content-Length 头超限的请求验证"读字节之前就拒绝"路径）。
+#[tokio::test]
+async fn body_over_declared_limit_is_rejected_with_envelope() {
+    let router = new_test_router();
+    let (status, raw, _) = req_with(
+        router,
+        "POST",
+        "/api/connections/x/query",
+        &[
+            ("content-type", "application/json"),
+            ("content-length", "999999999"),
+        ],
+        Bytes::from_static(b"{}"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "declared 999999999 must be rejected before reading"
+    );
+    assert_eq!(err_code(&raw), "POLYDB_ERR_PAYLOAD_TOO_LARGE");
 }
 
 #[tokio::test]
@@ -1327,6 +1360,58 @@ async fn ws_query_cancel_while_running() {
         ServerMessage::QueryCancelled { .. } => {}
         other => panic!("expected query_cancelled, got {other:?}"),
     }
+}
+
+// 重复的 query_id 在同一条查询仍在途时必须被拒绝而非覆盖：覆盖会孤儿化第一条
+// 查询的取消通道（永不可取消），且第一条完成时 retire 会误删第二条的注册项，
+// 使其后续 cancel 报 query not found。与 Go 侧 registerQuery 同款拒绝
+// （PST-01，双实现行为一致性）。
+#[tokio::test]
+async fn ws_query_duplicate_id_is_refused_while_in_flight() {
+    let router = new_test_router();
+    let id = create_sqlite_conn(&router, "ws-dup").await;
+    let url = spawn_ws_server(router).await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    ws_hello(&mut ws, &id).await;
+
+    let query_id = uuid::Uuid::new_v4();
+    let msg = ws_query_with(query_id, &id, MEDIUM_SQL, None, None);
+    ws.send(WsMessage::Binary(ws_encode(&msg).into()))
+        .await
+        .unwrap();
+    assert!(matches!(
+        ws_recv(&mut ws).await,
+        ServerMessage::QueryStarted { .. }
+    ));
+
+    // Same id again: an error frame, not a second QueryStarted.
+    ws.send(WsMessage::Binary(ws_encode(&msg).into()))
+        .await
+        .unwrap();
+    match ws_recv(&mut ws).await {
+        ServerMessage::QueryError {
+            query_id: dup,
+            error,
+        } => {
+            assert_eq!(dup, query_id);
+            assert!(
+                error.message.contains("already in flight"),
+                "error = {}",
+                error.message
+            );
+        }
+        other => panic!("expected query_error for the duplicate id, got {other:?}"),
+    }
+
+    // 清理：取消在途查询，让 best-effort 的后台任务尽快收尾。
+    let cancel = ClientMessage::QueryCancel { query_id };
+    ws.send(WsMessage::Binary(ws_encode(&cancel).into()))
+        .await
+        .unwrap();
+    assert!(matches!(
+        ws_recv(&mut ws).await,
+        ServerMessage::QueryCancelled { .. }
+    ));
 }
 
 // timeout_ms 与 REST 同义（behavior.md §2.3）：WS 此前完全忽略该字段。

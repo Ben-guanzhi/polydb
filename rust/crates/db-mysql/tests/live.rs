@@ -44,13 +44,13 @@ async fn conn_and_table() -> MySqlConn {
     .await
     .expect("insert");
     // 建表/插数提交，测试事务从干净状态开始
-    let tx = c
+    let mut tx = c
         .begin_tx(TxMode {
             isolation_level: IsolationLevel::ReadCommitted,
         })
         .await
         .expect("setup begin");
-    c.commit(tx).await.expect("setup commit");
+    c.commit(&mut tx).await.expect("setup commit");
     c
 }
 
@@ -98,7 +98,7 @@ async fn live_transaction_repeatable_read_snapshot() {
     )
     .await
     .expect("insert in tx b");
-    b.commit(tx_b).await.expect("commit b");
+    b.commit(&mut tx_b).await.expect("commit b");
 
     // A 再读：RR 快照必须仍是 2 行
     let r = a
@@ -110,7 +110,7 @@ async fn live_transaction_repeatable_read_snapshot() {
         Value::Integer(2),
         "REPEATABLE READ 快照不应看到 B 的提交"
     );
-    a.rollback(tx_a).await.expect("rollback a");
+    a.rollback(&mut tx_a).await.expect("rollback a");
 
     // 新事务（默认 RR，重新声明）里 B 的提交可见
     let mut tx = a
@@ -128,7 +128,7 @@ async fn live_transaction_repeatable_read_snapshot() {
         Value::Integer(3),
         "新事务应看到 B 提交的 3 行"
     );
-    a.commit(tx).await.expect("commit c");
+    a.commit(&mut tx).await.expect("commit c");
 
     cleanup(&a).await;
 }

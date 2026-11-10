@@ -18,6 +18,7 @@ uuid = { workspace = true }
 futures-util = { version = "0.3", features = ["sink"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+dirs = { workspace = true }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

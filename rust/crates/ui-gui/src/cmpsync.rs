@@ -1346,6 +1346,7 @@ mod tests {
         let res = polydb_rt::block_on(t.execute(id, &sql, &[])).unwrap();
         match &res.rows[0][0] {
             Value::Integer(n) => *n,
+            Value::U64(n) => *n as i64,
             v => panic!("回读 {name} 不是整数：{v:?}"),
         }
     }

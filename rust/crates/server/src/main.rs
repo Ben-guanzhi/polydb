@@ -62,9 +62,33 @@ fn data_dir() -> PathBuf {
     if let Ok(d) = std::env::var("POLYDB_DATA_DIR") {
         return PathBuf::from(d);
     }
-    // Windows: APPDATA；Unix: HOME（简化，与 Go 实现一致）。
-    let base = std::env::var("APPDATA")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| ".".into());
-    PathBuf::from(base).join("polydb")
+    // 与 Go 的 os.UserConfigDir() 对齐：Linux ~/.config、macOS
+    // ~/Library/Application Support、Windows %APPDATA%。此前用
+    // APPDATA/HOME 直接拼 "polydb"，Linux 下解析到 ~/polydb，与 Go 的
+    // ~/.config/polydb 不同——Rust server 与 Go TUI/Web 会读写不同的
+    // polydb.db / keyring.bin / blobs/，连接与密码静默分叉。
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("polydb")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::data_dir;
+
+    /// F1 回归：server 的 data_dir 必须与 Go 的 os.UserConfigDir()/polydb
+    /// 解析一致。此前用 APPDATA/HOME 直接拼 "polydb"，Linux 下解析到
+    /// ~/polydb（Go 解析到 ~/.config/polydb），Rust server 与 Go TUI/Web
+    /// 读写不同的 polydb.db / keyring.bin，连接与密码静默分叉。
+    #[test]
+    fn data_dir_uses_config_dir_not_home() {
+        std::env::set_var("POLYDB_DATA_DIR", "/tmp/polydb-test");
+        assert_eq!(data_dir(), std::path::PathBuf::from("/tmp/polydb-test"));
+        std::env::remove_var("POLYDB_DATA_DIR");
+
+        let expected = dirs::config_dir()
+            .expect("dirs::config_dir should resolve on all platforms")
+            .join("polydb");
+        assert_eq!(data_dir(), expected);
+    }
 }

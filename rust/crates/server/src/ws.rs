@@ -28,6 +28,15 @@ const SERVER_VERSION: &str = "0.1.0";
 // 正常量级在 KB。
 const MAX_WS_MESSAGE: usize = 16 * 1024 * 1024;
 
+// 半开连接回收（与 Go 侧 ws.go 的 readIdle=60s / pingEvery=25s 对齐）：
+// 客户端睡眠/断网无 FIN 时 TCP 半开，服务端 `stream.next()` 会永远挂着——
+// 会话、其 ≤16 条在飞查询与 DB 连接全部滞留到进程退出。behavior.md §2.4
+// 要求「服务端对客户端连接断开负责清理在飞查询」，半开场景只有主动探活才
+// 能满足。健康的客户端对每个 ping 都回 pong（任何入站流量都刷新读空闲
+// 计时），两个 tick 内无任何入站即视为死连接。
+const WS_READ_IDLE: Duration = Duration::from_secs(60);
+const WS_PING_EVERY: Duration = Duration::from_secs(25);
+
 pub async fn ws_upgrade(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -95,23 +104,75 @@ fn origin_host(origin: &str) -> Option<&str> {
 async fn session(app: AppRef, token: Option<String>, socket: WebSocket) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
+    // 半开探活的 ping 走独立通道直达 socket：ServerMessage 是协议消息，Ping
+    // 是 ws 帧级的。outbound 任务 select 两个来源，Ping 不经 msgpack。
+    let (raw_tx, mut raw_rx) = mpsc::unbounded_channel::<Message>();
 
     let mut session = Session {
         app,
         token,
         tx: tx.clone(),
+        raw_tx,
         connection_id: None,
         authed: false,
         in_flight: Arc::new(Mutex::new(HashMap::new())),
     };
 
     let mut send = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            let bytes = match encode(&msg) {
-                Ok(b) => b,
-                Err(_) => continue,
+        // 两个发送通道：`rx` 承载协议消息（msgpack），`raw_rx` 承载原始 ws 帧
+        // （半开探活的 ping）。退出时必须把**两条通道都排空**：`tokio::select!`
+        // 在多个就绪分支间随机挑选，因此某一支返回 `None` 时**不能**直接退出——
+        // 否则在另一支仍排队着消息（典型：鉴权失败要发的 query_error(UNAUTHORIZED)）
+        // 时会被丢弃，客户端看到的不是错误帧而是连接被重置。
+        // 这里标记已关闭的支，继续排空另一支，直到两支都关闭。
+        let mut rx_closed = false;
+        let mut raw_closed = false;
+        loop {
+            if rx_closed {
+                // 协议通道已排空：冲掉剩余的原始帧，然后退出。
+                match raw_rx.recv().await {
+                    Some(frame) => {
+                        if ws_tx.send(frame).await.is_err() {
+                            return;
+                        }
+                    }
+                    None => return,
+                }
+                continue;
+            }
+            if raw_closed {
+                // 原始帧通道已关闭：继续只服务协议通道。
+                match rx.recv().await {
+                    Some(msg) => {
+                        let msg = match encode(&msg) {
+                            Ok(b) => Message::Binary(b.into()),
+                            Err(_) => continue,
+                        };
+                        if ws_tx.send(msg).await.is_err() {
+                            return;
+                        }
+                    }
+                    None => {
+                        rx_closed = true;
+                        continue;
+                    }
+                }
+                continue;
+            }
+            let msg = tokio::select! {
+                m = rx.recv() => match m {
+                    Some(msg) => match encode(&msg) {
+                        Ok(b) => Message::Binary(b.into()),
+                        Err(_) => continue,
+                    },
+                    None => { rx_closed = true; continue; }
+                },
+                f = raw_rx.recv() => match f {
+                    Some(frame) => frame,
+                    None => { raw_closed = true; continue; }
+                },
             };
-            if ws_tx.send(Message::Binary(bytes.into())).await.is_err() {
+            if ws_tx.send(msg).await.is_err() {
                 return;
             }
         }
@@ -123,10 +184,14 @@ async fn session(app: AppRef, token: Option<String>, socket: WebSocket) {
     }
 
     session.cancel_all();
-    // 先丢掉 session（内含 tx 的克隆）再 drop 原始 tx：否则 rx.recv() 永不返回
-    // None，outbound 任务收不了尾，连接在协议要求"关闭"时（如鉴权失败）保持悬挂。
+    // 先丢掉 session（内含 tx/raw_tx 的克隆）再 drop 原始两支发送端：否则
+    // rx.recv()/raw_rx.recv() 永不返回 None，outbound 任务收不了尾，连接在
+    // 协议要求"关闭"时（如鉴权失败）保持悬挂。raw_tx 只活在 session 里，
+    // 先取出来一起 drop。
+    let raw_tx = session.raw_tx.clone();
     drop(session);
     drop(tx);
+    drop(raw_tx);
     let _ = send.await;
 }
 
@@ -134,6 +199,8 @@ struct Session {
     app: AppRef,
     token: Option<String>,
     tx: mpsc::UnboundedSender<ServerMessage>,
+    // 半开探活 ping 的直发通道（ws 帧，绕过 msgpack 编码）。
+    raw_tx: mpsc::UnboundedSender<Message>,
     connection_id: Option<ConnectionId>,
     authed: bool,
     // 共享给每个查询的后台任务：完成路径必须注销自己，否则条目无界增长、
@@ -152,6 +219,15 @@ fn register_in_flight(
     if map.len() >= WS_MAX_IN_FLIGHT {
         return None;
     }
+    // A duplicate query_id must be refused, not overwritten: `insert` would
+    // orphan the first query's cancel channel (it could never be cancelled)
+    // and the first query's retire would remove the second's registration, so
+    // cancelling the second would then report "query not found". The Go side
+    // (ws.go registerQuery) refuses for exactly those reasons — same wire
+    // protocol, same rule.
+    if map.contains_key(&query_id) {
+        return None;
+    }
     let cancel = Arc::new(Notify::new());
     map.insert(query_id, Arc::clone(&cancel));
     Some(cancel)
@@ -168,7 +244,31 @@ async fn receive_loop(
     session: &mut Session,
     stream: &mut futures_util::stream::SplitStream<WebSocket>,
 ) {
-    while let Some(msg) = stream.next().await {
+    // 半开探活：25s 一个 ping，60s 无任何入站即放弃会话。deadline 变量由
+    // 每条入站消息刷新（与 Go 的 SetReadDeadline+PongHandler 同一语义——
+    // axum 在 read 路径自动回 pong，ping 的应答本身就是入站流量）。
+    let mut last_inbound = tokio::time::Instant::now();
+    let mut ping = tokio::time::interval(WS_PING_EVERY);
+    ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ping.tick().await; // interval 首个 tick 立即返回，跳过
+    loop {
+        let msg = tokio::select! {
+            m = stream.next() => m,
+            _ = ping.tick() => {
+                // 先判读空闲再发 ping：空闲已超限说明上一发 ping 也没回音，
+                // 直接收割；未超限则发下一个 ping 供客户端回 pong 刷新。
+                if last_inbound.elapsed() >= WS_READ_IDLE {
+                    tracing::debug!("ws read idle {}s, reaping half-open session", WS_READ_IDLE.as_secs());
+                    return;
+                }
+                if !session.send_raw(Message::Ping(Vec::new().into())) {
+                    return;
+                }
+                continue;
+            }
+        };
+        let Some(msg) = msg else { return };
+        last_inbound = tokio::time::Instant::now();
         let bytes = match msg {
             Ok(Message::Text(t)) => t.as_bytes().to_vec(),
             Ok(Message::Binary(b)) => b.to_vec(),
@@ -245,6 +345,12 @@ impl Session {
         self.tx.send(msg).is_ok()
     }
 
+    /// 半开探活的 ping 需要直达 socket（不是协议消息）：经 outbound 任务的
+    /// 通道转发原始 ws 帧。
+    fn send_raw(&self, msg: Message) -> bool {
+        self.raw_tx.send(msg).is_ok()
+    }
+
     async fn handle_hello(&mut self, connection_id: ConnectionId) -> bool {
         match self.app.get_connection_info(connection_id) {
             Ok(Some(_info)) => {
@@ -300,14 +406,17 @@ impl Session {
             return;
         }
 
-        // behavior.md §6/§12：同一连接可并发多个查询。注册表满时如实拒绝，
-        // 不让失控客户端把 goroutine 堆满。
+        // behavior.md §6/§12：同一连接可并发多个查询。注册表满或 query_id
+        // 重复时如实拒绝——重复 id 若覆盖会孤儿化先前查询的取消通道（Go 侧
+        // registerQuery 同款拒绝）。客户端可由是否收到过 QueryStarted 帧区分。
         let Some(cancel) = register_in_flight(&self.in_flight, query_id) else {
             let _ = self.send(ServerMessage::QueryError {
                 query_id,
                 error: PolyDBError::new(
                     codes::INVALID_PARAM,
-                    format!("too many concurrent queries (max {WS_MAX_IN_FLIGHT})"),
+                    format!(
+                        "query_id {query_id} is already in flight, or the session has reached {WS_MAX_IN_FLIGHT} concurrent queries"
+                    ),
                 ),
             });
             return;

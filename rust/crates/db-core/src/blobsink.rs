@@ -6,7 +6,11 @@
 //! [`BlobSink`] 落盘。无 sink 或落盘失败时回落仅 `len` 占位（§5.2 降级）。
 //!
 //! sink 为进程级全局：驱动实例由连接参数构造，无注入点，故在 `AppCore`
-//! 构造期一次性设置（与 Go `dbcore.SetBlobSink` 对齐）。
+//! 构造期一次性设置（与 Go `dbcore.SetBlobSink` 对齐）。使用引用计数
+//! 管理生命周期：每次 `set_blob_sink` 递增计数，`clear_blob_sink` 递减，
+//! 归零时才真正清除——多实例下销毁一个不会误清另一个的 sink。
+//! `AppCore` 的 `Drop` 调用 `clear_blob_sink` 提供自动逆（此前从不清除，
+//! 销毁后全局 sink 仍指向已释放的 BlobStore）。
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -20,30 +24,72 @@ pub trait BlobSink: Send + Sync {
     fn put_blob(&self, data: &[u8]) -> Option<String>;
 }
 
-static BLOB_SINK: RwLock<Option<Arc<dyn BlobSink>>> = RwLock::new(None);
-
-/// 注入落盘端（`AppCore` 构造期调用；重复调用以最后一次为准）。
-pub fn set_blob_sink(sink: Arc<dyn BlobSink>) {
-    *BLOB_SINK.write().unwrap_or_else(|e| e.into_inner()) = Some(sink);
+/// 全局 sink 状态：引用计数 + 当前 sink。
+struct SinkState {
+    count: usize,
+    sink: Option<Arc<dyn BlobSink>>,
 }
 
-/// 清除落盘端（测试隔离用；生产路径只在 `AppCore` 构造时设置一次）。
+static BLOB_SINK: RwLock<SinkState> = RwLock::new(SinkState {
+    count: 0,
+    sink: None,
+});
+
+/// 注入落盘端（`AppCore` 构造期调用；重复调用以最后一次为准）。
+/// 递增引用计数；计数归零前 `clear_blob_sink` 不会真正清除。
+pub fn set_blob_sink(sink: Arc<dyn BlobSink>) {
+    let mut guard = BLOB_SINK.write().unwrap_or_else(|e| e.into_inner());
+    guard.sink = Some(sink);
+    guard.count += 1;
+}
+
+/// 清除落盘端（`AppCore` 的 `Drop` 调用；测试隔离用）。
+/// 递减引用计数；归零时真正清除。
 pub fn clear_blob_sink() {
-    *BLOB_SINK.write().unwrap_or_else(|e| e.into_inner()) = None;
+    let mut guard = BLOB_SINK.write().unwrap_or_else(|e| e.into_inner());
+    if guard.count > 0 {
+        guard.count -= 1;
+        if guard.count == 0 {
+            guard.sink = None;
+        }
+    }
+}
+
+/// 读取当前 sink（克隆 Arc，释放锁后再用）。
+fn current_sink() -> Option<Arc<dyn BlobSink>> {
+    BLOB_SINK
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .sink
+        .clone()
+}
+
+/// 测试辅助：当前 sink 引用计数（非公开 API，仅供测试观察全局状态）。
+/// 生产代码不应依赖此函数。
+#[doc(hidden)]
+pub fn sink_ref_count() -> usize {
+    BLOB_SINK.read().unwrap_or_else(|e| e.into_inner()).count
 }
 
 /// sink 感知的二进制单元格编码——**驱动层唯一入口**。
 /// 与 Go `dbcore.BlobValue` 对齐：小值内联，大值旁路，降级回占位。
+///
+/// 降级（sink 缺失或落盘失败）时在 inner object 里加 `"truncated": true`，
+/// 客户端可据此感知数据内容丢失——此前静默返回仅 len 占位，无任何标记，
+/// >1MB BLOB 内容凭空消失且客户端无从察觉。
 pub fn blob_value(bytes: &[u8]) -> Value {
     if bytes.len() <= MAX_INLINE_BLOB_BYTES {
         return inline_blob_value(bytes);
     }
     let mut inner = HashMap::new();
     inner.insert("len".to_string(), Value::Integer(bytes.len() as i64));
-    {
-        let sink = BLOB_SINK.read().unwrap_or_else(|e| e.into_inner());
-        if let Some(id) = sink.as_ref().and_then(|s| s.put_blob(bytes)) {
+    match current_sink().and_then(|s| s.put_blob(bytes)) {
+        Some(id) => {
             inner.insert("ref".to_string(), Value::String(id));
+        }
+        None => {
+            // 降级：显式标记 truncated，让客户端知道数据内容未落盘。
+            inner.insert("truncated".to_string(), Value::Bool(true));
         }
     }
     let mut outer = HashMap::new();
@@ -102,9 +148,12 @@ mod tests {
 
     fn run_with_sink(sink: Option<Arc<dyn BlobSink>>, f: impl FnOnce()) {
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        match sink {
-            Some(s) => set_blob_sink(s),
-            None => clear_blob_sink(),
+        // 强制清除可能的残留 sink（如前一个测试 panic 后未清理）。
+        while BLOB_SINK.read().unwrap_or_else(|e| e.into_inner()).count > 0 {
+            clear_blob_sink();
+        }
+        if let Some(s) = sink {
+            set_blob_sink(s);
         }
         f();
         clear_blob_sink();
@@ -151,25 +200,65 @@ mod tests {
     }
 
     #[test]
-    fn over_threshold_without_sink_emits_len_only() {
+    fn over_threshold_without_sink_emits_len_and_truncated() {
         run_with_sink(None, || {
             let v = blob_value(&vec![0u8; MAX_INLINE_BLOB_BYTES + 1]);
             let (_, inner) = blob_fields(&v);
             let inner = inner.unwrap();
-            assert_eq!(inner.len(), 1);
+            assert_eq!(inner.len(), 2);
             assert!(inner.contains_key("len"));
+            assert_eq!(inner["truncated"], Value::Bool(true));
             assert!(!inner.contains_key("ref"));
         });
     }
 
     #[test]
-    fn over_threshold_sink_failure_falls_back_to_len_only() {
+    fn over_threshold_sink_failure_falls_back_with_truncated_marker() {
         run_with_sink(Some(Arc::new(FakeSink::failing())), || {
             let v = blob_value(&vec![0u8; MAX_INLINE_BLOB_BYTES + 1]);
             let (_, inner) = blob_fields(&v);
             let inner = inner.unwrap();
-            assert_eq!(inner.len(), 1);
+            assert_eq!(inner.len(), 2);
             assert!(!inner.contains_key("ref"));
+            assert_eq!(inner["truncated"], Value::Bool(true));
+        });
+    }
+
+    #[test]
+    fn ref_count_multiple_sets_require_matching_clears() {
+        run_with_sink(None, || {
+            let sink = Arc::new(FakeSink::ok());
+            let payload = vec![7u8; MAX_INLINE_BLOB_BYTES + 1];
+
+            // 两次 set：count=2，sink 可用。
+            set_blob_sink(sink.clone());
+            set_blob_sink(sink.clone());
+            let v = blob_value(&payload);
+            let (_, inner) = blob_fields(&v);
+            assert!(inner.unwrap().contains_key("ref"), "sink should be active");
+
+            // 一次 clear：count=1，sink 仍在。
+            clear_blob_sink();
+            let v = blob_value(&payload);
+            let (_, inner) = blob_fields(&v);
+            assert!(
+                inner.unwrap().contains_key("ref"),
+                "sink should survive one clear (count=1)"
+            );
+
+            // 第二次 clear：count=0，sink 清除。
+            clear_blob_sink();
+            let v = blob_value(&payload);
+            let (_, inner) = blob_fields(&v);
+            let inner = inner.unwrap();
+            assert!(
+                !inner.contains_key("ref"),
+                "sink should be cleared at count=0"
+            );
+            assert_eq!(inner["truncated"], Value::Bool(true));
+
+            // 过度 clear（count 已为 0）不应 panic。
+            clear_blob_sink();
         });
     }
 }

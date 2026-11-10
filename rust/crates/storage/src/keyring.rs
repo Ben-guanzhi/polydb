@@ -123,8 +123,21 @@ impl FileKeyring {
             fs::create_dir_all(parent)
                 .map_err(|e| CoreError::Keyring(format!("mkdir {}: {e}", parent.display())))?;
         }
-        fs::write(&self.path, data)
-            .map_err(|e| CoreError::Keyring(format!("write {}: {e}", self.path.display())))?;
+        // 原子替换而非就地覆写：写一半时崩溃/断电会留下截断或半新半旧的密文，
+        // GCM 校验随即永久失败，已存的全部机密一次性报废（server 启动把 keyring
+        // 打不开当 fatal）。先写同目录临时文件再 rename——同目录 rename 在
+        // Windows 与 POSIX 上都是原子的，k.path 处任何时刻要么是完整的旧密文
+        // 要么是完整的新密文。与 Go 端 save 的修复（file.go 同轮）对齐。
+        let tmp = self.path.with_extension("bin.tmp");
+        fs::write(&tmp, data)
+            .map_err(|e| CoreError::Keyring(format!("write {}: {e}", tmp.display())))?;
+        if let Err(e) = fs::rename(&tmp, &self.path) {
+            let _ = fs::remove_file(&tmp);
+            return Err(CoreError::Keyring(format!(
+                "rename {}: {e}",
+                self.path.display()
+            )));
+        }
         Ok(())
     }
 }
@@ -248,6 +261,30 @@ mod tests {
         let k = FileKeyring::open(&dir, "right").unwrap();
         k.set("k", "v").unwrap();
         assert!(FileKeyring::open(&dir, "wrong").is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // 保存必须原子替换（temp + rename）：写一半崩溃留下残缺密文，GCM 校验
+    // 从此永久失败，全部机密一次性报废。可观测契约：每次 Set 成功后磁盘上的
+    // 文件都能完整解开，且不留临时文件。
+    #[test]
+    fn save_is_atomic() {
+        let dir = tmp_dir();
+        let k = FileKeyring::open(&dir, "pw").unwrap();
+        for i in 0..5 {
+            k.set(&format!("k{i}"), "v").unwrap();
+            // 每次写入后从零重开：残缺文件在这里直接报错。
+            let k2 = FileKeyring::open(&dir, "pw").unwrap();
+            for j in 0..=i {
+                assert!(k2.get(&format!("k{j}")).is_ok(), "k{j} after set {i}");
+            }
+        }
+        // 成功的 rename 不会留下 .tmp 残留。
+        for entry in fs::read_dir(&dir).unwrap() {
+            let name = entry.unwrap().file_name();
+            let name = name.to_string_lossy();
+            assert!(!name.ends_with(".tmp"), "temp file left behind: {name}");
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 }

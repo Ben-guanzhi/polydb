@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use polydb_core::{RedisKeyType, RedisValue, RedisZSetMember};
 use polydb_db_core::{KvDriver, RedisValueLimit, RedisValueWindow};
@@ -31,12 +31,17 @@ enum BdData {
 
 struct BdFake {
     data: HashMap<String, BdData>,
+    cmds: Arc<Mutex<Vec<String>>>,
 }
 
-fn start_fake(data: HashMap<String, BdData>) -> String {
+fn start_fake(data: HashMap<String, BdData>) -> (String, Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let addr = listener.local_addr().expect("local_addr").to_string();
-    let fake = Arc::new(BdFake { data });
+    let cmds = Arc::new(Mutex::new(Vec::new()));
+    let fake = Arc::new(BdFake {
+        data,
+        cmds: Arc::clone(&cmds),
+    });
     let f = Arc::clone(&fake);
     std::thread::spawn(move || {
         for stream in listener.incoming() {
@@ -48,13 +53,27 @@ fn start_fake(data: HashMap<String, BdData>) -> String {
             });
         }
     });
-    addr
+    (addr, cmds)
 }
 
 // ─── RESP 构造 ───
 
 fn bulk(s: &str) -> String {
     format!("${}\r\n{}\r\n", s.len(), s)
+}
+
+/// Byte-exact bulk reply: RESP bulk strings are binary safe, and GETRANGE can
+/// legitimately cut a multi-byte UTF-8 character in half. Going through
+/// `String::from_utf8_lossy` would replace the dangling bytes with U+FFFD
+/// before the wire, and the client would then see corrupted bytes that real
+/// Redis never sends. The reply carries raw bytes; `String` only holds them.
+fn bulk_bytes(b: &[u8]) -> String {
+    let mut out = format!("${}\r\n", b.len()).into_bytes();
+    out.extend_from_slice(b);
+    out.extend_from_slice(b"\r\n");
+    // The writer does write_all(reply.as_bytes()), so reinterpreting the bytes
+    // as UTF-8 is lossless by construction (String -> as_bytes -> write).
+    unsafe { String::from_utf8_unchecked(out) }
 }
 fn nil() -> String {
     "$-1\r\n".to_string()
@@ -112,6 +131,9 @@ fn serve(f: Arc<BdFake>, stream: TcpStream) {
 }
 
 fn dispatch(f: &BdFake, args: &[String]) -> String {
+    if let Ok(mut log) = f.cmds.lock() {
+        log.push(args[0].to_uppercase());
+    }
     match args[0].to_uppercase().as_str() {
         "PING" => simple("PONG"),
         "TYPE" => type_reply(f, &args[1]),
@@ -172,7 +194,7 @@ fn getrange_reply(f: &BdFake, key: &str, start: &str, end: &str) -> String {
     if s > e {
         return bulk("");
     }
-    bulk(&String::from_utf8_lossy(&bytes[s as usize..=e as usize]))
+    bulk_bytes(&bytes[s as usize..=e as usize])
 }
 
 fn llen(f: &BdFake, key: &str) -> i64 {
@@ -314,7 +336,15 @@ fn open_fake(addr: &str) -> RedisConn {
 }
 
 fn mk(data: HashMap<String, BdData>) -> RedisConn {
-    open_fake(&start_fake(data))
+    let (addr, _cmds) = start_fake(data);
+    open_fake(&addr)
+}
+
+/// Same as `mk`, but also hands back the fake server's command log so a test can
+/// assert which Redis commands were issued.
+fn mk_logged(data: HashMap<String, BdData>) -> (RedisConn, Arc<Mutex<Vec<String>>>) {
+    let (addr, cmds) = start_fake(data);
+    (open_fake(&addr), cmds)
 }
 
 async fn window(
@@ -425,6 +455,41 @@ async fn bounded_string_under_limit_returns_full() {
     assert!(!w.truncated);
     assert_eq!(as_str(&w.value), "hello");
     assert_eq!(w.next_cursor, "");
+}
+
+/// A bounded string window must issue GETRANGE, not a whole-value GET followed by
+/// a Rust-side trim. The latter makes memory and bandwidth O(S) in the string
+/// size instead of O(cap) — exactly what a bounded window read exists to prevent,
+/// and what the Go kernel does with GetRange. The fake server records commands,
+/// so the property is asserted directly rather than inferred from the output.
+#[tokio::test]
+async fn bounded_string_uses_getrange_not_get() {
+    let mut data = HashMap::new();
+    data.insert("k".to_string(), BdData::Str("x".repeat(1024)));
+    let (c, cmds) = mk_logged(data);
+
+    let w = window(
+        &c,
+        "k",
+        RedisValueLimit {
+            max_string_bytes: 64,
+            max_entries: 0,
+        },
+        "",
+    )
+    .await;
+    assert_eq!(w.total, 1024, "STRLEN is the full byte count");
+    assert!(w.truncated, "1024 > 64 must be truncated");
+
+    let seen: Vec<String> = cmds.lock().expect("cmds").clone();
+    assert!(
+        seen.iter().any(|c| c == "GETRANGE"),
+        "GETRANGE must be used, saw {seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|c| c == "GET"),
+        "GET must not be used for a bounded read, saw {seen:?}"
+    );
 }
 
 #[tokio::test]
@@ -699,4 +764,27 @@ async fn bounded_key_type_dispatch() {
     assert_eq!(c.key_type("l").await.unwrap(), RedisKeyType::List);
     assert_eq!(c.key_type("z").await.unwrap(), RedisKeyType::Zset);
     assert_eq!(c.key_type("nope").await.unwrap(), RedisKeyType::None);
+}
+
+/// set_value 对 stream 按 **XADD 追加**处理（PD-25，2026-11-10）——与 Go 侧一致。
+///
+/// 背景：本用例此前断言 `set_value` 对 stream 返回 `ErrNotSupported`
+/// （"streams are append-only, set_value replaces the key"）。那个判断本身
+/// 没错，但**只改了 Rust 一端**——Go 侧（`dbredis.go:165` 走内核
+/// `AppendRow` → `XADD key * data <value>`）一直支持追加，于是两端行为分叉
+/// （Go 成功、Rust 报 NOT_SUPPORTED），契约测试 `TestContractRedis` 的
+/// "set stream" 步骤随即红。
+///
+/// 语义上"set_value 不该写 Stream"属于**契约变更**（spec 未规定 stream 的
+/// set_value），必须两端同时改并同步 spec/契约断言。本波选择对齐 Go 侧
+/// （两端都支持 XADD 追加）：改动面小、语义无损（追加不覆盖已有条目）。
+#[tokio::test]
+async fn set_value_stream_appends_via_xadd() {
+    let mut data = HashMap::new();
+    data.insert("s".to_string(), BdData::Stream(vec![]));
+    let c = mk(data);
+    // 不再返回 NotSupported：按 XADD 追加一条。
+    c.set_value("s", RedisValue::Stream("some data".to_string()))
+        .await
+        .expect("stream set_value must append via XADD, not fail");
 }

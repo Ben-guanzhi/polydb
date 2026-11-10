@@ -14,6 +14,8 @@ use polydb_transport::{LocalTransport, Transport};
 /// `AppCore::with_keyring` 都会 `set_blob_sink`：并行跑时 A 的查询可能把大字段
 /// 写进 B 的 BlobStore，随后 A 的 `get_blob` 查不到（BlobNotFound）。
 /// 整组用例串行进出，与 `db-core/blobsink.rs` 单测的 `LOCK` 同一范式。
+/// （wave 48 引入引用计数 + `AppCore::drop` 调 `clear_blob_sink`：销毁后不再
+/// 悬垂，但并发存活期间仍共享全局——confinement 深层修复需驱动注入点改造。）
 static SINK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// `setup()` 的返回值：解引用到 `Arc<AppCore>`，同时持有串行锁直到用例结束。

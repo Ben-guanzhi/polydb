@@ -5870,6 +5870,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "dirs",
  "parking_lot",
  "polydb-core",
  "polydb-db-core",
@@ -5907,10 +5908,15 @@ name = "polydb-db-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
+ "parking_lot",
  "polydb-core",
  "polydb-protocol",
+ "polydb-rt",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
+ "tracing",
 ]
 
 [[package]]
@@ -5925,6 +5931,7 @@ dependencies = [
  "polydb-db-core",
  "polydb-protocol",
  "polydb-rt",
+ "serde_json",
  "thiserror 2.0.20",
  "tiberius",
  "tokio",
@@ -5942,6 +5949,7 @@ dependencies = [
  "polydb-core",
  "polydb-db-core",
  "polydb-protocol",
+ "serde_json",
  "sqlx",
  "thiserror 2.0.20",
  "tokio",
@@ -6060,6 +6068,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "bytes",
+ "dirs",
  "futures-util",
  "polydb-app-core",
  "polydb-core",

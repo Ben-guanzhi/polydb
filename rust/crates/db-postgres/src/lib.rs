@@ -10,23 +10,25 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use sqlx::postgres::{PgPool, PgPoolOptions, PgRow};
 use sqlx::types::uuid::Uuid;
 use sqlx::types::Json;
-use sqlx::{Column, Row, TypeInfo, ValueRef};
+use sqlx::{Column, Executor, Row, Statement, TypeInfo, ValueRef};
 
 use polydb_core::error_classify::{driver_error, DriverClass};
 use polydb_core::{
     ColumnInfo, CoreError, CoreResult, DatabaseKind, ForeignKeyInfo, IndexInfo, IsolationLevel,
     QueryResult, ResultColumn, SchemaInfo, StatementType, TableInfo, TableType, Value,
 };
-use polydb_db_core::{DatabaseDriver, SqlDriver, TxMode};
+use polydb_db_core::{has_returning_clause, DatabaseDriver, SqlDriver, TxMode};
 
 pub struct PostgresConn {
     pool: PgPool,
     _dsn: String,
 }
 
-/// 事务句柄，包装 sqlx::Transaction。
+/// 事务句柄，包装 sqlx::Transaction。P1-2 修复：内部用 Option 承载，
+/// 使 commit/rollback 在 `&mut` 签名下能用 take() 取出 Transaction
+/// （sqlx::Transaction::commit 按值接收，无法在 `&mut` 上直接调用）。
 #[derive(Debug)]
-pub struct PostgresTxHandle(pub sqlx::Transaction<'static, sqlx::Postgres>);
+pub struct PostgresTxHandle(pub Option<sqlx::Transaction<'static, sqlx::Postgres>>);
 
 impl PostgresConn {
     /// DSN 形如 postgres://user@host:port/dbname（不含密码）。懒连接：真正建连发生在首次查询。
@@ -60,9 +62,23 @@ impl PostgresConn {
             Value::Null => q.bind(Option::<i64>::None),
             Value::Bool(b) => q.bind(*b),
             Value::Integer(i) => q.bind(*i),
+            Value::U64(u) => {
+                // sqlx Postgres 的 BIGINT 是 i64——u64 > i64::MAX 无法
+                // 原生绑定。≤ i64::MAX 绑为 i64，> i64::MAX 绑为 f64
+                // （≥2^53 丢失整数精度，但 Postgres NUMERIC 列的高精值
+                // 走 String 路径不受影响）。
+                if *u <= i64::MAX as u64 {
+                    q.bind(*u as i64)
+                } else {
+                    q.bind(*u as f64)
+                }
+            }
             Value::Float(f) => q.bind(*f),
             Value::String(s) => q.bind(s.clone()),
-            _ => q.bind(format!("{v:?}")),
+            // Array/Object（含 $blob Object）跨线协议统一为 JSON 文本——与 Go
+            // 侧 ValueToDriver 的 string(v.Raw()) 对齐。此前用 Debug repr，
+            // 与其他引擎漂移。
+            Value::Array(_) | Value::Object(_) => q.bind(json_text_param(v)),
         }
     }
 
@@ -107,10 +123,24 @@ impl PostgresConn {
             return Value::String(v.0.to_string());
         }
         if let Ok(v) = row.try_get::<DateTime<Utc>, _>(i) {
-            return Value::String(v.format("%Y-%m-%d %H:%M:%S").to_string());
+            // RFC3339Nano —— 与 Go 侧同形（PD-20，2026-11-10）。
+            //
+            // 旧的 "%Y-%m-%d %H:%M:%S" 是 Rust 侧独有的形态：Go 侧的
+            // time.Time 走 RFC3339Nano（pdb.DriverToValue 的 time.Time 分支），
+            // 而 pgx 把无时区的 PG `timestamp` 按 **UTC 挂钟**解读
+            // （pgtype/timestamp.go:120 ParseInLocation(..., time.UTC)）
+            // —— 故此处 to_rfc3339 断言的 UTC 与 Go 侧是同一语义，不是编造。
+            //
+            // 权威侧的依据见 WORKSPACE §132：元数据时间（created_at 等）
+            // 两端本就是 RFC3339（Rust to_rfc3339 / Go time.Time 序列化），
+            // spec 的 format:date-time 亦同源；数据列跟元数据走，
+            // 全局只有一个时间拼写。
+            return Value::String(v.to_rfc3339());
         }
         if let Ok(v) = row.try_get::<NaiveDateTime, _>(i) {
-            return Value::String(v.format("%Y-%m-%d %H:%M:%S").to_string());
+            // 同上：PG `timestamp`（无时区）被两端都按 UTC 挂钟解读，
+            // 故补 Z 后缀是陈述既有假设。
+            return Value::String(v.and_utc().to_rfc3339());
         }
         if let Ok(v) = row.try_get::<NaiveDate, _>(i) {
             return Value::String(v.to_string());
@@ -139,8 +169,15 @@ impl PostgresConn {
         let Some(first) = rows.first() else {
             return vec![];
         };
-        first
-            .columns()
+        Self::columns_from_row(first)
+    }
+
+    /// Column metadata from one row's cursor description. sqlx carries the
+    /// column list on every Row even when the result set is empty, so a
+    /// zero-row SELECT keeps its columns (the Go kernel reads ColumnTypes()
+    /// before iterating — same contract).
+    fn columns_from_row(row: &PgRow) -> Vec<ResultColumn> {
+        row.columns()
             .iter()
             .map(|c| ResultColumn {
                 name: c.name().to_string(),
@@ -175,25 +212,47 @@ impl PostgresConn {
             None => self.pool.begin().await,
         };
         let tx = tx.map_err(|e| CoreError::Driver(format!("begin tx failed: {e}")))?;
-        Ok(PostgresTxHandle(tx))
+        Ok(PostgresTxHandle(Some(tx)))
     }
 
-    pub async fn commit(&self, tx: PostgresTxHandle) -> CoreResult<()> {
-        tx.0.commit()
+    pub async fn commit(&self, tx: &mut PostgresTxHandle) -> CoreResult<()> {
+        // P1-2：take() 取出 Transaction（sqlx commit 按值接收）。
+        // 失败时 Transaction 已消费，但 handle 仍留在 entry 里（Box 未被
+        // 取出），rollback 会得到 "tx handle already consumed" 而非
+        // 误导性的 "tx already rolled back"。
+        let inner =
+            tx.0.take()
+                .ok_or_else(|| CoreError::Internal("tx handle already consumed".into()))?;
+        inner
+            .commit()
             .await
             .map_err(|e| CoreError::Driver(format!("commit failed: {e}")))?;
         Ok(())
     }
 
-    pub async fn rollback(&self, tx: PostgresTxHandle) -> CoreResult<()> {
-        tx.0.rollback()
+    pub async fn rollback(&self, tx: &mut PostgresTxHandle) -> CoreResult<()> {
+        let inner =
+            tx.0.take()
+                .ok_or_else(|| CoreError::Internal("tx handle already consumed".into()))?;
+        inner
+            .rollback()
             .await
             .map_err(|e| CoreError::Driver(format!("rollback failed: {e}")))?;
         Ok(())
     }
 
     /// 在给定 executor（pool 或 transaction）上跑一条 SQL。
-    async fn execute_on<'e, E>(executor: E, sql: &str, params: &[Value]) -> CoreResult<QueryResult>
+    ///
+    /// `describe_pool` 是零行结果集的列元数据回落：sqlx 的 `fetch` 消耗掉
+    /// executor，无法在其上再 prepare；但 pool 可以（`&Pool` 实现 Executor）。
+    /// 事务路径传 None——空结果的列列表是当时诚实的答案，稍后可以在提交前
+    /// 用另一条连接补。
+    async fn execute_on<'e, E>(
+        executor: E,
+        sql: &str,
+        params: &[Value],
+        describe_pool: Option<&sqlx::PgPool>,
+    ) -> CoreResult<QueryResult>
     where
         E: sqlx::Executor<'e, Database = sqlx::Postgres>,
     {
@@ -204,7 +263,14 @@ impl PostgresConn {
             q = Self::bind_value(q, v);
         }
 
-        if stmt_type == StatementType::Select || stmt_type == StatementType::Other {
+        // SELECT, and any DML carrying RETURNING, produces a result set: the
+        // RETURNING rows are the answer, not a side effect. Routing them to
+        // q.execute() silently dropped the generated ids (the Go kernel's
+        // IsReadQuery routes RETURNING to the query path the same way).
+        let wants_rows = stmt_type == StatementType::Select
+            || stmt_type == StatementType::Other
+            || has_returning_clause(sql);
+        if wants_rows {
             // 物化上限（polydb_db_core::row_cap，behavior.md §5）：流式 fetch
             // 到上限即停——fetch_all 会先把整个结果集拉进内存，大表在 server
             // 层截断之前就 OOM。truncated/has_more 与 apply_max_rows 同义。
@@ -220,7 +286,39 @@ impl PostgresConn {
                 }
                 rows.push(row);
             }
-            let columns = Self::columns_of(&rows);
+            let mut columns = Self::columns_of(&rows);
+            if columns.is_empty() {
+                // A zero-row result still carries its column list: the grid
+                // needs the shape to render an empty table. sqlx's Executor::
+                // prepare returns the statement's column metadata without
+                // executing it, so the empty case recovers what the Go kernel
+                // reads from rows.ColumnTypes() before iterating. Only the
+                // pool path can do this (the executor itself was consumed by
+                // fetch); a transaction's empty result keeps its empty column
+                // list.
+                if let Some(pool) = describe_pool {
+                    match pool.prepare(sql).await {
+                        Ok(stmt) => {
+                            columns = stmt
+                                .columns()
+                                .iter()
+                                .map(|c| ResultColumn {
+                                    name: c.name().to_string(),
+                                    table: None,
+                                    data_type: c.type_info().name().to_string(),
+                                    generic_type: None,
+                                    nullable: Some(true),
+                                })
+                                .collect();
+                        }
+                        Err(_) => {
+                            // PREPARE can fail for statements the engine
+                            // cannot prepare (e.g. multi-statement text);
+                            // the empty column list is then the honest answer.
+                        }
+                    }
+                }
+            }
             let data = rows
                 .iter()
                 .map(|r| (0..r.len()).map(|i| Self::pg_value(r, i)).collect())
@@ -259,7 +357,12 @@ impl PostgresConn {
         sql: &str,
         params: &[Value],
     ) -> CoreResult<QueryResult> {
-        Self::execute_on(tx.0.as_mut(), sql, params).await
+        let inner =
+            tx.0.as_mut()
+                .ok_or_else(|| CoreError::Internal("tx handle already consumed".into()))?;
+        // sqlx 0.8: &mut Transaction 不实现 Executor，但 &mut PgConnection 实现。
+        // Transaction 通过 Deref 暴露 PgConnection，所以 &mut **inner 即可。
+        Self::execute_on(&mut **inner, sql, params, None).await
     }
 }
 
@@ -345,22 +448,22 @@ impl SqlDriver for PostgresConn {
         PostgresConn::execute_in_tx(self, h, sql, params).await
     }
 
-    async fn commit(&self, tx: Box<dyn Any + Send>) -> CoreResult<()> {
+    async fn commit(&self, tx: &mut Box<dyn Any + Send>) -> CoreResult<()> {
         let h = tx
-            .downcast::<PostgresTxHandle>()
-            .map_err(|_| CoreError::Internal("tx handle downcast failed".into()))?;
-        PostgresConn::commit(self, *h).await
+            .downcast_mut::<PostgresTxHandle>()
+            .ok_or_else(|| CoreError::Internal("tx handle downcast failed".into()))?;
+        PostgresConn::commit(self, h).await
     }
 
-    async fn rollback(&self, tx: Box<dyn Any + Send>) -> CoreResult<()> {
+    async fn rollback(&self, tx: &mut Box<dyn Any + Send>) -> CoreResult<()> {
         let h = tx
-            .downcast::<PostgresTxHandle>()
-            .map_err(|_| CoreError::Internal("tx handle downcast failed".into()))?;
-        PostgresConn::rollback(self, *h).await
+            .downcast_mut::<PostgresTxHandle>()
+            .ok_or_else(|| CoreError::Internal("tx handle downcast failed".into()))?;
+        PostgresConn::rollback(self, h).await
     }
 
     async fn execute(&self, sql: &str, params: &[Value]) -> CoreResult<QueryResult> {
-        Self::execute_on(&self.pool, sql, params).await
+        Self::execute_on(&self.pool, sql, params, Some(&self.pool)).await
     }
 
     async fn list_schemas(&self) -> CoreResult<Vec<SchemaInfo>> {
@@ -783,4 +886,56 @@ fn db_err(e: &sqlx::Error, what: &str) -> CoreError {
         return driver_error(db.code().as_deref(), None, kind, &text);
     }
     driver_error(None, None, None, &text)
+}
+
+/// Array/Object（含 $blob Object）参数的绑定形态：跨线协议统一为 JSON 文本——
+/// 与 Go 侧 ValueToDriver 的 string(v.Raw()) 对齐。此前用 Debug repr，与其他
+/// 引擎漂移。NaN/Inf 先经 polydb_db_core::value_to_json_text 替换为字符串，
+/// 避免 serde_json 静默转 null（P2-3）。
+/// 独立成纯函数供口径测试下探。
+fn json_text_param(v: &Value) -> String {
+    polydb_db_core::value_to_json_text(v)
+}
+
+#[cfg(test)]
+mod bind_contract_tests {
+    use super::*;
+
+    /// P1-4 口径钉子：Array 绑 JSON 文本（[1,"x"]），不是 Debug repr
+    /// （[Integer(1), String("x")]）；$blob Object 同样以 JSON 文本走。
+    #[test]
+    fn array_and_object_bind_as_json_text() {
+        let arr = Value::Array(vec![Value::Integer(1), Value::String("x".into())]);
+        assert_eq!(json_text_param(&arr), r#"[1,"x"]"#);
+        let blob = polydb_db_core::blob_value(&[0u8, 1, 2]);
+        let s = json_text_param(&blob);
+        assert!(
+            s.starts_with('{') && s.contains("$blob"),
+            "blob bind = {s:?}"
+        );
+        // Debug repr 的特征串不得出现：那是修复前的漂移形态。
+        assert!(
+            !json_text_param(&arr).contains("Integer"),
+            "debug repr leaked"
+        );
+    }
+
+    /// P2-3 回归：Array/Object 中的 NaN/Inf 必须序列化为字符串值，
+    /// 不能被 serde_json 静默转为 null（数据丢失）。
+    #[test]
+    fn array_with_nan_inf_serializes_as_string() {
+        let arr = Value::Array(vec![
+            Value::Float(1.5),
+            Value::Float(f64::NAN),
+            Value::Float(f64::INFINITY),
+        ]);
+        let json = json_text_param(&arr);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed[0], 1.5);
+        assert_eq!(
+            parsed[1], "NaN",
+            "NaN must be preserved as string, not null"
+        );
+        assert_eq!(parsed[2], "Infinity");
+    }
 }

@@ -19,7 +19,73 @@ use polydb_core::{
     IndexType, IsolationLevel, QueryResult, ResultColumn, SchemaInfo, StatementType, TableInfo,
     TableType, Value,
 };
-use polydb_db_core::{DatabaseDriver, SqlDriver, TxMode};
+use polydb_db_core::{has_returning_clause, DatabaseDriver, SqlDriver, TxMode};
+
+/// 把 oracle crate 的 [`OracleType`] 映射成 **Oracle SQL 类型名**（PD-28，
+/// 2026-11-10）。
+///
+/// ## 为什么不再用 `format!("{:?}", …)`
+///
+/// spec/schemas/query.json 对 `ResultColumn.type` 的定义是
+/// **"Database-specific type name"**。`Debug` 形态（`Varchar2(50)`、
+/// `Number(10, 0)`）既不是类型名（带上了长度/精度），大小写也与其它引擎
+/// 不一致（PG 报 `INT4`、MySQL 报 `VARCHAR`、MSSQL 报 `NVARCHAR`，都是
+/// 大写的裸类型名）。
+///
+/// 去掉长度/精度与其它引擎一致：MySQL 的 `DECIMAL(10,2)` 也只报 `DECIMAL`。
+///
+/// ## 分辨率上限（与 Go 侧对齐的取舍）
+///
+/// oracle crate 能区分 `Varchar2`/`NVarchar2`/`Char`/`NChar` 四个变体
+/// （`sql_type/oracle_type.rs:205`），但 Go 侧经 `database/sql.ColumnType`
+/// 只能拿到 go-ora 的 TNS 码族（`CHAR` 族含 CHAR+NCHAR、`NCHAR` 名其实是
+/// VARCHAR 族），**拿不到字符集形态**。故两侧统一归到**族名**：
+/// 字符型 ⇒ `VARCHAR2` / `CHAR`，`NCLOB` 亦归 `CLOB`。
+/// 这是两端可达成一致的最大分辨率，不是哪一侧的缺陷。
+///
+/// 未识别类型在 **Go 侧**回落到 `"OTHER"`（那边拿到的是字符串，什么都可能有）；
+/// **Rust 侧不需要这个回落**——`OracleType` 是闭合枚举，本 match 已穷尽所有
+/// 变体（故没有 `_` 臂；clippy 的 `unreachable_pattern` 会挡住多余分支）。
+/// 将来 crate 新增变体时，这里会**编译失败**，逼着补映射，而不是静默漂移。
+/// 详见 Go 侧 `pkg/dboracle/typename.go` 的文件头说明。
+fn oracle_type_name(t: &oracle::sql_type::OracleType) -> &'static str {
+    use oracle::sql_type::OracleType as T;
+    match t {
+        // 字符族（族名，不含长度/字符集；见上「分辨率上限」）。
+        T::Varchar2(_) | T::NVarchar2(_) => "VARCHAR2",
+        T::Char(_) | T::NChar(_) => "CHAR",
+
+        // 数值。Int64/UInt64 在 Oracle 里由 NUMBER 承载。
+        T::Number(_, _) | T::Int64 | T::UInt64 => "NUMBER",
+        T::Float(_) => "FLOAT",
+
+        // 日期时间。
+        T::Date => "DATE",
+        T::Timestamp(_) => "TIMESTAMP",
+        T::TimestampTZ(_) => "TIMESTAMP WITH TIME ZONE",
+        T::TimestampLTZ(_) => "TIMESTAMP WITH LOCAL TIME ZONE",
+        T::IntervalYM(_) => "INTERVAL YEAR TO MONTH",
+        T::IntervalDS(_, _) => "INTERVAL DAY TO SECOND",
+
+        // 二进制与大对象。NCLOB 归 CLOB（Go 侧无独立变体）。
+        T::Raw(_) => "RAW",
+        T::Long => "LONG",
+        T::LongRaw => "LONG RAW",
+        T::CLOB | T::NCLOB => "CLOB",
+        T::BLOB => "BLOB",
+        T::BFILE => "BFILE",
+
+        // 其它。
+        T::Rowid => "ROWID",
+        T::BinaryFloat => "BINARY_FLOAT",
+        T::BinaryDouble => "BINARY_DOUBLE",
+        T::Boolean => "BOOLEAN",
+        T::Json => "JSON",
+        T::Xml => "XMLTYPE",
+        T::RefCursor => "REF CURSOR",
+        T::Object(_) => "OBJECT",
+    }
+}
 
 /// Oracle 自带维护 schema，默认不展示（对应 Go 侧 maintainedSchemas）。
 const MAINTAINED: &[&str] = &[
@@ -84,6 +150,15 @@ impl OracleConn {
         v.iter()
             .map(|val| match val {
                 Value::Integer(i) => Box::new(*i) as Box<dyn ToSql>,
+                Value::U64(u) => {
+                    // Oracle NUMBER 可表示 u64，但 oracle crate 的 ToSql 不支持
+                    // u64——≤ i64::MAX 绑为 i64，> i64::MAX 绑为 f64。
+                    if *u <= i64::MAX as u64 {
+                        Box::new(*u as i64) as Box<dyn ToSql>
+                    } else {
+                        Box::new(*u as f64) as Box<dyn ToSql>
+                    }
+                }
                 Value::Float(f) => Box::new(*f) as Box<dyn ToSql>,
                 Value::Bool(b) => Box::new(*b) as Box<dyn ToSql>,
                 Value::String(s) => Box::new(s.clone()) as Box<dyn ToSql>,
@@ -94,10 +169,17 @@ impl OracleConn {
                 // JSON 字符串绑定，与 Go 侧 ValueToDriver 的 json.Marshal 对齐。
                 // 此前兜底成 0i64 会把 JSON/blob 列的数据静默写成 0。
                 Value::Array(_) | Value::Object(_) => {
-                    Box::new(serde_json::to_string(val).unwrap_or_default()) as Box<dyn ToSql>
+                    Box::new(Self::json_text_param(val)) as Box<dyn ToSql>
                 }
             })
             .collect()
+    }
+
+    /// Array/Object（含 $blob Object）的绑定形态：跨线协议统一为 JSON 文本。
+    /// NaN/Inf 先经 polydb_db_core::value_to_json_text 替换为字符串，
+    /// 避免 serde_json 静默转 null（P2-3）。
+    fn json_text_param(val: &Value) -> String {
+        polydb_db_core::value_to_json_text(val)
     }
 
     fn param_refs(boxes: &[Box<dyn ToSql>]) -> Vec<&dyn ToSql> {
@@ -105,6 +187,12 @@ impl OracleConn {
     }
 
     /// SqlValue 在 0.6 是结构体：先判空，再按 数值→字符串→原始字节 顺序尝试转换。
+    ///
+    /// 顺序有讲究：oracle crate 的 NUMBER 原生形态是**文本**（InnerValue::Number
+    /// 是 &str，i64/f64 都走 str.parse）。String 必须先于 f64 尝试——否则
+    /// NUMBER(38,10) 的精确文本（i64 parse 失败、f64 parse 成功）被 f64 静默
+    /// 吞掉精度。go-ora（Go 侧）同样把 NUMBER 交给宿主的是 num.String() 的
+    /// 精确文本，这里对齐后两端同值。
     fn or_value(v: &SqlValue) -> Value {
         if v.is_null().unwrap_or(true) {
             return Value::Null;
@@ -112,14 +200,15 @@ impl OracleConn {
         if let Ok(i) = v.get::<i64>() {
             return Value::Integer(i);
         }
+        // Number 的精确文本先于 f64：见上。
+        if let Ok(s) = v.get::<String>() {
+            return Value::String(s);
+        }
         if let Ok(f) = v.get::<f64>() {
             return Value::Float(f);
         }
         if let Ok(b) = v.get::<bool>() {
             return Value::Bool(b);
-        }
-        if let Ok(s) = v.get::<String>() {
-            return Value::String(s);
         }
         if let Ok(bytes) = v.get::<Vec<u8>>() {
             return polydb_db_core::blob_value(&bytes);
@@ -234,7 +323,10 @@ impl OracleConn {
                 .build()
                 .map_err(|e| db_err(&e, "prepare failed"))?;
 
-            if stmt_type == StatementType::Select || stmt_type == StatementType::Other {
+            let wants_rows = stmt_type == StatementType::Select
+                || stmt_type == StatementType::Other
+                || has_returning_clause(&sql);
+            if wants_rows {
                 let mut rows = stmt.query(&refs).map_err(|e| db_err(&e, "query failed"))?;
                 let columns = rows
                     .column_info()
@@ -374,18 +466,18 @@ impl SqlDriver for OracleConn {
         OracleConn::execute_in_tx(self, h, sql, params).await
     }
 
-    async fn commit(&self, tx: Box<dyn Any + Send>) -> CoreResult<()> {
-        let mut h = tx
-            .downcast::<OracleTxHandle>()
-            .map_err(|_| CoreError::Internal("tx handle downcast failed".into()))?;
-        OracleConn::commit(self, &mut h).await
+    async fn commit(&self, tx: &mut Box<dyn Any + Send>) -> CoreResult<()> {
+        let h = tx
+            .downcast_mut::<OracleTxHandle>()
+            .ok_or_else(|| CoreError::Internal("tx handle downcast failed".into()))?;
+        OracleConn::commit(self, h).await
     }
 
-    async fn rollback(&self, tx: Box<dyn Any + Send>) -> CoreResult<()> {
-        let mut h = tx
-            .downcast::<OracleTxHandle>()
-            .map_err(|_| CoreError::Internal("tx handle downcast failed".into()))?;
-        OracleConn::rollback(self, &mut h).await
+    async fn rollback(&self, tx: &mut Box<dyn Any + Send>) -> CoreResult<()> {
+        let h = tx
+            .downcast_mut::<OracleTxHandle>()
+            .ok_or_else(|| CoreError::Internal("tx handle downcast failed".into()))?;
+        OracleConn::rollback(self, h).await
     }
 
     async fn execute(&self, sql: &str, params: &[Value]) -> CoreResult<QueryResult> {
@@ -410,7 +502,10 @@ impl SqlDriver for OracleConn {
                 .build()
                 .map_err(|e| db_err(&e, "prepare failed"))?;
 
-            if stmt_type == StatementType::Select || stmt_type == StatementType::Other {
+            let wants_rows = stmt_type == StatementType::Select
+                || stmt_type == StatementType::Other
+                || has_returning_clause(&sql);
+            if wants_rows {
                 let mut rows = stmt.query(&refs).map_err(|e| db_err(&e, "query failed"))?;
                 let columns = rows
                     .column_info()
@@ -418,7 +513,7 @@ impl SqlDriver for OracleConn {
                     .map(|c| ResultColumn {
                         name: c.name().to_string(),
                         table: None,
-                        data_type: format!("{:?}", c.oracle_type()),
+                        data_type: oracle_type_name(c.oracle_type()).to_string(),
                         generic_type: None,
                         nullable: Some(true),
                     })
@@ -757,6 +852,107 @@ fn db_err(e: &oracle::Error, what: &str) -> CoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oracle::sql_type::OracleType as T;
+
+    /// 列类型名映射逐类钉住（PD-28，2026-11-10）。
+    ///
+    /// 规范形态是 **Oracle SQL 类型名、全大写、不含长度/精度**——与其它
+    /// 引擎同口径（PG `INT4`、MySQL `VARCHAR`、MSSQL `NVARCHAR`），且符合
+    /// spec 对 `ResultColumn.type` 的 "Database-specific type name" 定义。
+    #[test]
+    fn oracle_type_names_are_sql_type_names() {
+        // 字符族：四个变体归成两个族名（Go 侧拿不到字符集形态，
+        // 见函数文档的「分辨率上限」）。
+        assert_eq!(oracle_type_name(&T::Varchar2(50)), "VARCHAR2");
+        assert_eq!(oracle_type_name(&T::NVarchar2(50)), "VARCHAR2");
+        assert_eq!(oracle_type_name(&T::Char(10)), "CHAR");
+        assert_eq!(oracle_type_name(&T::NChar(10)), "CHAR");
+
+        // 数值。
+        assert_eq!(oracle_type_name(&T::Number(10, 2)), "NUMBER");
+        assert_eq!(oracle_type_name(&T::Int64), "NUMBER");
+        assert_eq!(oracle_type_name(&T::UInt64), "NUMBER");
+        assert_eq!(oracle_type_name(&T::Float(63)), "FLOAT");
+
+        // 日期时间。
+        assert_eq!(oracle_type_name(&T::Date), "DATE");
+        assert_eq!(oracle_type_name(&T::Timestamp(6)), "TIMESTAMP");
+        assert_eq!(
+            oracle_type_name(&T::TimestampTZ(6)),
+            "TIMESTAMP WITH TIME ZONE"
+        );
+        assert_eq!(
+            oracle_type_name(&T::TimestampLTZ(6)),
+            "TIMESTAMP WITH LOCAL TIME ZONE"
+        );
+        assert_eq!(
+            oracle_type_name(&T::IntervalYM(2)),
+            "INTERVAL YEAR TO MONTH"
+        );
+        assert_eq!(
+            oracle_type_name(&T::IntervalDS(2, 6)),
+            "INTERVAL DAY TO SECOND"
+        );
+
+        // 二进制与大对象。NCLOB 归 CLOB（Go 侧无独立变体）。
+        assert_eq!(oracle_type_name(&T::Raw(16)), "RAW");
+        assert_eq!(oracle_type_name(&T::Long), "LONG");
+        assert_eq!(oracle_type_name(&T::LongRaw), "LONG RAW");
+        assert_eq!(oracle_type_name(&T::CLOB), "CLOB");
+        assert_eq!(oracle_type_name(&T::NCLOB), "CLOB");
+        assert_eq!(oracle_type_name(&T::BLOB), "BLOB");
+        assert_eq!(oracle_type_name(&T::BFILE), "BFILE");
+
+        // 其它。
+        assert_eq!(oracle_type_name(&T::Rowid), "ROWID");
+        assert_eq!(oracle_type_name(&T::BinaryFloat), "BINARY_FLOAT");
+        assert_eq!(oracle_type_name(&T::BinaryDouble), "BINARY_DOUBLE");
+        assert_eq!(oracle_type_name(&T::Boolean), "BOOLEAN");
+        assert_eq!(oracle_type_name(&T::Json), "JSON");
+        assert_eq!(oracle_type_name(&T::Xml), "XMLTYPE");
+        assert_eq!(oracle_type_name(&T::RefCursor), "REF CURSOR");
+    }
+
+    /// 映射结果必须全大写（与 PG/MySQL/MSSQL 的列类型拼写同口径）。
+    #[test]
+    fn oracle_type_names_are_uppercase() {
+        let all = [
+            T::Varchar2(1),
+            T::NVarchar2(1),
+            T::Char(1),
+            T::NChar(1),
+            T::Number(1, 0),
+            T::Float(1),
+            T::Date,
+            T::Timestamp(1),
+            T::TimestampTZ(1),
+            T::TimestampLTZ(1),
+            T::IntervalYM(1),
+            T::IntervalDS(1, 1),
+            T::Raw(1),
+            T::Long,
+            T::LongRaw,
+            T::CLOB,
+            T::NCLOB,
+            T::BLOB,
+            T::BFILE,
+            T::Rowid,
+            T::BinaryFloat,
+            T::BinaryDouble,
+            T::Boolean,
+            T::Json,
+            T::Xml,
+            T::RefCursor,
+        ];
+        for t in all {
+            let name = oracle_type_name(&t);
+            assert_eq!(
+                name,
+                name.to_uppercase(),
+                "{t:?} 的规范名 {name:?} 不是全大写"
+            );
+        }
+    }
 
     /// 编译期证据：spawn_blocking 闭包只捕获 `Arc<Mutex<Connection>>`，而
     /// `OracleConn` / `OracleTxHandle` 必须满足 Send + Sync + 'static 才能
@@ -812,5 +1008,66 @@ mod tests {
             !sql.starts_with("ALTER SESSION"),
             "ALTER SESSION 拼写不是 Oracle 语法: {sql}"
         );
+    }
+
+    /// P2-3 回归：Array/Object 中的 NaN/Inf 必须序列化为字符串值，
+    /// 不能被 serde_json 静默转为 null（数据丢失）。
+    #[test]
+    fn json_text_param_array_with_nan_inf_serializes_as_string() {
+        let arr = Value::Array(vec![
+            Value::Float(1.5),
+            Value::Float(f64::NAN),
+            Value::Float(f64::INFINITY),
+        ]);
+        let json = OracleConn::json_text_param(&arr);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed[0], 1.5);
+        assert_eq!(
+            parsed[1], "NaN",
+            "NaN must be preserved as string, not null"
+        );
+        assert_eq!(parsed[2], "Infinity");
+    }
+    /// PD-19（2026-11-10）回归：Rust 侧 TIMESTAMP 读取走 oracle crate
+    /// Timestamp 的 Display（"Y-M-D H:M:S[.prec][ ±HH:MM]"）——这是两端
+    /// 对齐的**锚点形态**（Go 侧 DriverToValueTyped 的 TIMESTAMP 分支已按
+    /// 本格式实现，见 go/pkg/dbcore/valueconv_orats_test.go）。
+    ///
+    /// 缺陷背景：Go 侧旧链对 Oracle TIMESTAMP* 走 time.Time ⇒ RFC3339Nano
+    /// （"2026-01-02T15:04:05.5+08:00"），与本格式不同——同一列两端
+    /// wire 值不同（AGENTS.md §14 红线）。
+    ///
+    /// or_value 链对 Timestamp 的命中路径：to_string 分支
+    /// （oracle-0.6.3 sql_value.rs:1035 NativeType::Timestamp ⇒
+    /// get_timestamp_unchecked().to_string()）。本用例把 crate Display
+    /// 的关键样例钉在此处（取自 oracle-0.6.3 timestamp.rs:533-545 与
+    /// 文档 :49-95 的既有断言），防止实现侧改动读取顺序后漂移。
+    #[test]
+    fn or_timestamp_display_contract() {
+        use oracle::sql_type::Timestamp;
+        // 生产路径的 precision 来自列类型（from_dpi_timestamp：
+        // OracleType::Timestamp(prec) ⇒ precision=prec；DATE ⇒ 0），
+        // 而 Timestamp::new 固定 precision=9（timestamp.rs:229）——
+        // 故每条都显式 and_prec 对齐真实读取路径。
+        let ts = Timestamp::new(2012, 3, 4, 5, 6, 7, 0)
+            .unwrap()
+            .and_prec(0)
+            .unwrap();
+        assert_eq!(ts.to_string(), "2012-03-04 05:06:07");
+        let ts = Timestamp::new(2012, 3, 4, 5, 6, 7, 800000000)
+            .unwrap()
+            .and_prec(1)
+            .unwrap();
+        assert_eq!(ts.to_string(), "2012-03-04 05:06:07.8");
+        let ts = Timestamp::new(2012, 3, 4, 5, 6, 7, 890000000)
+            .unwrap()
+            .and_prec(3)
+            .unwrap();
+        assert_eq!(ts.to_string(), "2012-03-04 05:06:07.890");
+        let ts = Timestamp::new(2012, 3, 4, 5, 6, 7, 890123000)
+            .unwrap()
+            .and_prec(6)
+            .unwrap();
+        assert_eq!(ts.to_string(), "2012-03-04 05:06:07.890123");
     }
 }

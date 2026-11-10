@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::extract::{Path, State};
 use axum::http::header::{
     ACCEPT_RANGES, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
     ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_MAX_AGE, CONTENT_RANGE, CONTENT_TYPE, HOST, ORIGIN,
@@ -20,7 +20,7 @@ use polydb_core::protocol::error::PolyDBError;
 use polydb_core::protocol::{
     BatchQueryRequest, BatchQueryResult, BatchResultItem, BeginTransactionRequest, ConnectionId,
     ConnectionStatus, CreateConnectionRequest, QueryRequest, QueryResult, TableCountResult,
-    TableRowsRequest, UpdateConnectionRequest,
+    TableRowsRequest, UpdateConnectionRequest, Value,
 };
 use polydb_core::{
     CoreError, CoreResult, RedisExecCommandRequest, RedisScanRequest, RedisSelectDbRequest,
@@ -35,11 +35,56 @@ const CONTENT_MSGPACK: &str = "application/msgpack";
 const CONTENT_JSON: &str = "application/json";
 const HEADER_X_QUERY_ID: &str = "X-Query-ID";
 
-// 请求体上限，与 Go 侧 maxBodyBytes 对齐。axum 缺省只有 2 MiB；请求体只装 SQL
-// 文本与参数，16 MiB 远超正常量级又不至于成为放大器。大文件走 blobs 旁路。
-// 注意 axum 的 413 不带 PolyDB 错误包络（Go 侧会带），这是有意的取舍：换取
-// DefaultBodyLimit 在收包阶段就掐断，不用为了包络自己重放整个请求。
+// 请求体上限，与 Go 侧 maxBodyBytes 对齐。请求体只装 SQL 文本与参数，16 MiB
+// 远超正常量级又不至于成为放大器。大文件走 blobs 旁路。
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+/// body_limit_middleware 与 Go 侧 bodyLimitMiddleware 逐语义对齐：先把请求体
+/// 完整读入内存并检查上限，超限回 413 + POLYDB_ERR_PAYLOAD_TOO_LARGE 包络。
+/// 之前用 axum 的 DefaultBodyLimit，它直接掐断连接回一个裸 413（无 PolyDB
+/// 错误包络），前端拿不到 code/message，与 Go 侧契约漂移。
+///
+/// 与 Go 一致的两点细节：声明 Content-Length 超限在读任何字节之前就拒绝
+/// （占满连接与带宽的攻击面）；chunked 无声明长度时整体读入后判超限。
+async fn body_limit_middleware(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let declared = req
+        .headers()
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok());
+    if let Some(n) = declared {
+        if n > MAX_BODY_BYTES {
+            return payload_too_large(format!(
+                "request body too large: {n} bytes exceeds {MAX_BODY_BYTES}"
+            ));
+        }
+    }
+    let (parts, body) = req.into_parts();
+    match axum::body::to_bytes(body, MAX_BODY_BYTES + 1).await {
+        Ok(data) => {
+            if data.len() > MAX_BODY_BYTES {
+                return payload_too_large(format!(
+                    "request body too large: more than {MAX_BODY_BYTES} bytes"
+                ));
+            }
+            let req = axum::extract::Request::from_parts(parts, axum::body::Body::from(data));
+            next.run(req).await
+        }
+        Err(_) => payload_too_large(format!(
+            "request body too large: more than {MAX_BODY_BYTES} bytes"
+        )),
+    }
+}
+
+fn payload_too_large(msg: String) -> Response {
+    json_response(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        PolyDBError::new(codes::PAYLOAD_TOO_LARGE, msg),
+    )
+}
 
 /// Application state passed via Axum's `State` extractor.
 ///
@@ -52,9 +97,19 @@ const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 struct AppState {
     app: Arc<AppCore>,
     registry: Arc<Mutex<HashMap<Uuid, Arc<Notify>>>>,
+    // HTTP 查询并发闸门（behavior.md §6.1 对齐项）：与 WS 的 per-session
+    // WS_MAX_IN_FLIGHT=16 对齐。此前 HTTP 路径对每个请求直接 tokio::spawn，
+    // 无上限——单个 HTTP 客户端可开无上限并发查询，打满 DB 连接与内存；Go 侧
+    // 已有 httpMaxConcurrentQueries=16 的同款闸门（等待 30s 后 429），Rust
+    // 单侧缺席是登记册漏登的漂移。容量 16 与 Go/WS 一致。
+    http_gate: Arc<tokio::sync::Semaphore>,
     // Some(token) 时启用 Bearer 鉴权（behavior.md §12.1）。
     token: Option<String>,
 }
+
+// HTTP_MAX_CONCURRENT_QUERIES 与 Go 侧 httpMaxConcurrentQueries、WS 侧
+// WS_MAX_IN_FLIGHT 三者一致：16。
+const HTTP_MAX_CONCURRENT_QUERIES: usize = 16;
 
 impl std::ops::Deref for AppState {
     type Target = AppCore;
@@ -77,6 +132,7 @@ pub fn router_with_token(app: Arc<AppCore>, token: Option<String>) -> Router {
     let state = AppState {
         app,
         registry: Arc::new(Mutex::new(HashMap::new())),
+        http_gate: Arc::new(tokio::sync::Semaphore::new(HTTP_MAX_CONCURRENT_QUERIES)),
         token,
     };
     let typed = Router::<AppState>::new()
@@ -155,7 +211,7 @@ pub fn router_with_token(app: Arc<AppCore>, token: Option<String>) -> Router {
             state.clone(),
             auth_middleware,
         ))
-        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(axum::middleware::from_fn(body_limit_middleware))
         .layer(axum::middleware::from_fn(cors_middleware));
     typed.with_state(state)
 }
@@ -275,7 +331,7 @@ fn error_response(e: CoreError) -> Response {
         codes::CONNECTION_FAILED => StatusCode::BAD_GATEWAY,
         codes::NOT_SUPPORTED | codes::DRIVER_NOT_AVAILABLE => StatusCode::NOT_IMPLEMENTED,
         codes::INVALID_PARAM => StatusCode::BAD_REQUEST,
-        "POLYDB_ERR_TRANSACTION_NOT_FOUND" => StatusCode::NOT_FOUND,
+        codes::TRANSACTION_NOT_FOUND => StatusCode::NOT_FOUND,
         codes::QUERY_NOT_FOUND => StatusCode::NOT_FOUND,
         codes::BLOB_NOT_FOUND => StatusCode::NOT_FOUND,
         // 408：取消与超时都属"请求未在预期时间内完成"（与 Go 侧 errToStatus 一致）。
@@ -813,6 +869,29 @@ async fn execute_query(
     let conn_id = req.connection_id.unwrap_or(path_id);
     let query_id = req.query_id.unwrap_or_else(Uuid::new_v4);
 
+    // HTTP 并发闸门：超限时等待最多 30s（与 Go 侧一致），仍无空位回 429
+    // 包络。槽位由 worker 任务持有到查询真正结束（而不是 handler 返回时）——
+    // 超时/取消路径提前返回后被放弃的查询还占着 DB 连接，只有它真正结束才
+    // 腾出门控名额。permit 在 worker spawn 之前取得，spawn 本身受限。
+    let gate_permit = match tokio::time::timeout(
+        Duration::from_secs(30),
+        state.http_gate.clone().acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => Some(permit),
+        Ok(Err(_)) => None, // semaphore closed：server 正在关停，直接回 503
+        Err(_) => {
+            return msgpack_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                PolyDBError::new(
+                    codes::QUERY_FAILED,
+                    format!("too many concurrent queries (max {HTTP_MAX_CONCURRENT_QUERIES})"),
+                ),
+            );
+        }
+    };
+
     // Register an in-flight query so POST /api/queries/{query_id}/cancel can reach us.
     let cancel = Arc::new(Notify::new());
     {
@@ -833,6 +912,8 @@ async fn execute_query(
     let worker_sql = req.sql.clone();
     let worker_params = req.params.clone();
     let worker = tokio::spawn(async move {
+        // permit move 进任务：查询结束（自然完成/驱动出错）即释放槽位。
+        let _gate = gate_permit;
         worker_app
             .execute(conn_id, &worker_sql, &worker_params)
             .await
@@ -907,15 +988,64 @@ pub(crate) fn query_row_limit(req: &QueryRequest) -> u64 {
 
 // apply_max_rows 按 behavior.md §5 截断结果行：超过 limit 时截断并置
 // truncated=true、total_rows 记录原始行数（不额外 count）。
+//
+// 行上限之外还有响应字节上限（与 Go 侧 maxResponseBytes 对齐）：行数封了
+// 10000 但每行可携带内联 blob（§5.1 允许 ≤1MB），10000 行 × 1MB = 10GB 的
+// 响应会在序列化前把 server OOM。超过字节上限时同样截断。
 pub(crate) fn apply_max_rows(mut result: QueryResult, limit: u64) -> QueryResult {
-    if result.rows.len() as u64 <= limit {
-        return result;
-    }
     let total = result.rows.len() as u64;
-    result.rows.truncate(limit as usize);
-    result.truncated = true;
-    result.total_rows = Some(total);
+    if total > limit {
+        result.rows.truncate(limit as usize);
+        result.truncated = true;
+        result.total_rows = Some(total);
+    }
+    if res_bytes(&result) > MAX_RESPONSE_BYTES {
+        let mut keep = 0usize;
+        let mut acc = 0u64;
+        for row in &result.rows {
+            acc += row_bytes(row);
+            keep += 1;
+            if acc >= MAX_RESPONSE_BYTES {
+                break;
+            }
+        }
+        if keep < result.rows.len() {
+            result.rows.truncate(keep);
+            result.truncated = true;
+            if result.total_rows.is_none() {
+                result.total_rows = Some(total);
+            }
+        }
+    }
     result
+}
+
+// maxResponseBytes 的 Rust 对应：单个查询响应的载荷字节上限（256MB）。超过
+// 它的响应在 msgpack 序列化之前就把 server 拖进 OOM，截断是唯一的防线。
+const MAX_RESPONSE_BYTES: u64 = 256 << 20;
+
+// row_bytes 与 Go 侧 rowBytes 同式：msgpack 由 Value 再编，字符串长度就是
+// 负载下界（blob 编码里 base64 已放大 4/3，估计偏保守但截断方向正确）。
+fn value_bytes(v: &Value) -> u64 {
+    match v {
+        Value::String(s) => s.len() as u64,
+        Value::Array(a) => a.iter().map(value_bytes).sum::<u64>() + 8,
+        Value::Object(m) => {
+            m.iter()
+                .map(|(k, v)| (k.len() as u64) + value_bytes(v))
+                .sum::<u64>()
+                + 8
+        }
+        _ => 8,
+    }
+}
+
+fn row_bytes(row: &[Value]) -> u64 {
+    row.iter().map(value_bytes).sum::<u64>() + 8
+}
+
+fn res_bytes(res: &QueryResult) -> u64 {
+    res.rows.iter().map(|r| row_bytes(r)).sum::<u64>() + 64
 }
 
 /// Cancel an in-flight HTTP query registered under /api/connections/{id}/query.
@@ -1154,5 +1284,79 @@ async fn kv_exec_command(
     match app.exec_command(id, &req.args).await {
         Ok(reply) => msgpack_response(StatusCode::OK, reply),
         Err(e) => error_response(e),
+    }
+}
+
+#[cfg(test)]
+mod response_cap_tests {
+    use super::*;
+    use polydb_core::protocol::Value;
+
+    // 超过 MAX_RESPONSE_BYTES 的响应在行数限制之内也会被截断：10 行各 100MB
+    // 的内联 blob，行数上限 10000 拦不住，字节上限拦住。
+    #[test]
+    fn oversized_rows_truncate_by_bytes() {
+        let big = "x".repeat(100 * 1024 * 1024); // 100MB 字符串 ≈ 100MB 负载
+        let rows: Vec<Vec<Value>> = (0..10).map(|_| vec![Value::String(big.clone())]).collect();
+        let result = QueryResult {
+            columns: vec![],
+            rows,
+            affected_rows: 0,
+            execution_time_ms: 0.0,
+            truncated: false,
+            total_rows: None,
+            has_more: false,
+            statement_type: None,
+        };
+        let out = apply_max_rows(result, 10_000);
+        assert!(out.truncated, "byte cap must truncate");
+        assert!(
+            out.rows.len() < 10,
+            "rows = {}, must be cut below 10",
+            out.rows.len()
+        );
+        assert_eq!(out.total_rows, Some(10));
+    }
+
+    // 正常大小不受影响：25 行小值直接通过，truncated 不置位。
+    #[test]
+    fn normal_sized_result_passes_through() {
+        let rows: Vec<Vec<Value>> = (0..25).map(|i| vec![Value::Integer(i)]).collect();
+        let result = QueryResult {
+            columns: vec![],
+            rows,
+            affected_rows: 0,
+            execution_time_ms: 0.0,
+            truncated: false,
+            total_rows: None,
+            has_more: false,
+            statement_type: None,
+        };
+        let out = apply_max_rows(result, 10_000);
+        assert!(!out.truncated);
+        assert_eq!(out.rows.len(), 25);
+        assert_eq!(out.total_rows, None);
+    }
+
+    // 行上限与字节上限同时命中：先按行截到 limit，再按字节截。total_rows
+    // 记录的是最初的总行数。
+    #[test]
+    fn row_cap_then_byte_cap_keeps_original_total() {
+        let big = "x".repeat(60 * 1024 * 1024); // 60MB：5 行 300MB 超 256MB
+        let rows: Vec<Vec<Value>> = (0..8).map(|_| vec![Value::String(big.clone())]).collect();
+        let result = QueryResult {
+            columns: vec![],
+            rows,
+            affected_rows: 0,
+            execution_time_ms: 0.0,
+            truncated: false,
+            total_rows: None,
+            has_more: false,
+            statement_type: None,
+        };
+        let out = apply_max_rows(result, 5);
+        assert!(out.truncated);
+        assert!(out.rows.len() <= 5);
+        assert_eq!(out.total_rows, Some(8), "total must be the original 8");
     }
 }

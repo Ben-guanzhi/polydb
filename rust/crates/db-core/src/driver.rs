@@ -83,6 +83,12 @@ pub trait SqlDriver: DatabaseDriver {
     /// （sqlx::Transaction 或驱动自持的 TxHandle 结构）；调用方通过 downcast
     /// 拿到内部具体引用。所有方法都是 async（由 async_trait 统一包装）；
     /// 各驱动的实现内部可能直接调用同步 inherent 或 await 异步 inherent。
+    ///
+    /// P1-2 修复：commit/rollback 用 `&mut Box<dyn Any + Send>` 而非按值接收。
+    /// 按值接收时，commit 失败（约束冲突/连接断）后 handle 已被消费，
+    /// `?` 提前返回导致 TxEntryGuard::drop 回插 entry 时 handle 为 None——
+    /// 之后 rollback_transaction 报 "tx already rolled back"，底层数据库
+    /// 事务永远无法回滚。与 execute_in_tx 的 `&mut` 签名一致。
     async fn begin_tx(&self, mode: TxMode) -> CoreResult<Box<dyn Any + Send>>;
     async fn execute_in_tx(
         &self,
@@ -90,8 +96,8 @@ pub trait SqlDriver: DatabaseDriver {
         sql: &str,
         params: &[Value],
     ) -> CoreResult<QueryResult>;
-    async fn commit(&self, tx: Box<dyn Any + Send>) -> CoreResult<()>;
-    async fn rollback(&self, tx: Box<dyn Any + Send>) -> CoreResult<()>;
+    async fn commit(&self, tx: &mut Box<dyn Any + Send>) -> CoreResult<()>;
+    async fn rollback(&self, tx: &mut Box<dyn Any + Send>) -> CoreResult<()>;
 
     /// 返回指向 self 的共享 Arc<dyn SqlDriver>。各驱动在 clone_arc 里克隆自身
     /// （共享底层池/连接），向上转型为 trait object，供 app-core 在脱离

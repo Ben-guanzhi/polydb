@@ -9,4 +9,13 @@ polydb-core = { workspace = true }
 polydb-protocol = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
+# PD-05：无主事务回收器（tx.rs 的 TxManager）从 app-core 下沉到内核，
+# 需要 chrono（idle 判定）与 parking_lot（与 app-core 同款锁纪律）。
+chrono = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+polydb-rt = { workspace = true }

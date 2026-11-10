@@ -13,6 +13,7 @@ thiserror = { workspace = true }
 sqlx = { workspace = true }
 chrono = { workspace = true }
 bigdecimal = { version = "0.4", default-features = false }
+serde_json = { workspace = true }
 futures-util = "0.3"
 
 [dev-dependencies]

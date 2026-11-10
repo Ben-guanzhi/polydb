@@ -153,7 +153,7 @@ async fn p1_ddl_in_transaction_rolls_back_whole() {
         }
     );
 
-    if let Err(e) = c.rollback(tx).await {
+    if let Err(e) = c.rollback(&mut tx).await {
         panic!("rollback：{e}");
     }
     let after = count_objects(&c, &schema, &["p1"]).await;

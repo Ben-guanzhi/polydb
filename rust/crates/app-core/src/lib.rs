@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock};
@@ -13,11 +14,12 @@ use polydb_core::{
     TableRowsResult, TableType, TransactionInfo, TransactionStatus, UpdateConnectionRequest, Value,
 };
 use polydb_db_core::{
-    set_blob_sink, BlobSink, Connection, DatabaseDriver, RedisValueLimit, RedisValueWindow,
-    SqlDriver, TxMode,
+    set_blob_sink, clear_blob_sink, BlobSink, Connection, DatabaseDriver, RedisValueLimit, RedisValueWindow,
+    SqlDriver, TxManager, TxMode, Sweepable,
 };
 use polydb_protocol::common::SshTunnelConfig;
 use polydb_protocol::error::{codes, PolyDBError};
+use polydb_rt::block_on;
 use polydb_schema_diff as schema_diff;
 use polydb_storage::{keyring_ref, BlobStore, FileKeyring, Keyring, Storage};
 
@@ -153,6 +155,9 @@ use sshtunnel::Tunnel;
 /// 与 Connection 内的驱动共享底层池/连接；handle 由具体驱动内部决定形态
 /// （sqlx::Transaction / 隐式事务标记结构等），以 `Box<dyn Any + Send>` 承载，
 /// 由 SqlDriver::execute_in_tx / commit / rollback 负责 downcast。
+///
+/// `last_active` 供无主事务回收器（P2-B）判定 idle 超时：每次
+/// execute_in_transaction 成功后刷新，与 Go 侧 txEntry.lastActive 同构。
 struct TxEntry {
     id: uuid::Uuid,
     connection_id: ConnectionId,
@@ -160,6 +165,7 @@ struct TxEntry {
     handle: Option<Box<dyn Any + Send>>,
     isolation_level: IsolationLevel,
     started_at: DateTime<Utc>,
+    last_active: DateTime<Utc>,
 }
 
 impl TxEntry {
@@ -192,8 +198,11 @@ impl TxEntry {
 /// 提前返回、future 在 `await` 点被取消/drop。旧写法是 remove → await →
 /// insert，取消时最后的 insert 不执行——事务永久失踪、handle drop 静默回滚。
 /// `txs` 用 `Arc` 承载，让守卫可以 clone 一份跨过 `await`（`&Mutex` 不可 Send）。
+///
+/// PD-05（2026-11-09）：注册表与回收器已下沉到内核 `polydb_db_core::TxManager`，
+/// 守卫持有的是 `Arc<TxManager<TxEntry>>`；app-core 不再自造 sweeper。
 struct TxEntryGuard {
-    txs: Arc<Mutex<HashMap<String, TxEntry>>>,
+    manager: Arc<TxManager<TxEntry>>,
     id: String,
     entry: Option<TxEntry>,
 }
@@ -214,8 +223,40 @@ impl TxEntryGuard {
 impl Drop for TxEntryGuard {
     fn drop(&mut self) {
         if let Some(entry) = self.entry.take() {
-            self.txs.lock().insert(self.id.clone(), entry);
+            self.manager.insert(self.id.clone(), entry);
         }
+    }
+}
+
+/// 内核 `TxManager` 的条目能力实现（PD-05）：回收器只依赖 `last_active` 与
+/// `rollback` 两个能力，条目类型与驱动细节留在 app-core。
+///
+/// `rollback` 在注册表锁外执行（由内核 `TxManager::sweep` 保证）：取走句柄后
+/// 调驱动 rollback，失败也照常移除条目——事务已无主，留条目只会让后续
+/// commit/rollback 报误导性错误。
+impl Sweepable for TxEntry {
+    fn last_active(&self) -> DateTime<Utc> {
+        self.last_active
+    }
+
+    fn rollback(&mut self) {
+        if let Some(mut handle) = self.handle.take() {
+            let driver = self.driver.clone();
+            let _ = block_on(driver.rollback(&mut handle));
+        }
+    }
+}
+
+impl Drop for AppCore {
+    fn drop(&mut self) {
+        // P2-B / PD-05：停掉后台 sweeper 线程。sweeper 持有 Arc<TxManager> 的
+        // 克隆，不持有 Arc<Self>——看到 stop 后退出。字段随后按声明序 drop：
+        // txs → connections → ... 各驱动句柄的 Drop 隐式 rollback/close。
+        self.txs.stop();
+        // P2-E：清除进程级 BLOB_SINK（引用计数递减，归零时真正清除）。
+        // 此前 AppCore 构造时 set_blob_sink 但从不 clear——销毁后全局 sink
+        // 仍指向已释放的 BlobStore（悬垂），多实例互相覆盖。
+        clear_blob_sink();
     }
 }
 
@@ -269,7 +310,11 @@ pub struct AppCore {
     // "已断开"、后台却每 30s 对同一台死主机重建连接）。显式 connect 清除。
     user_disconnected: RwLock<std::collections::HashSet<ConnectionId>>,
     tunnels: RwLock<HashMap<ConnectionId, Arc<Tunnel>>>,
-    txs: Arc<Mutex<HashMap<String, TxEntry>>>,
+    // 事务注册表 + 无主事务回收器（PD-05，2026-11-09）：本体在内核
+    // `polydb_db_core::TxManager`，与 Go 侧委托 `dbcore.TxManager` 同构。
+    // 此前 Rust 端在 app-core 自造 sweeper（txs map + tx_idle_ttl +
+    // tx_max_entries + tx_sweeper_stop 四个字段），与 Go 端结构漂移。
+    txs: Arc<TxManager<TxEntry>>,
     // 已打开连接的只读标志快照（behavior.md §12.3）；disconnect 时移除。
     read_only: RwLock<std::collections::HashSet<ConnectionId>>,
     // 懒连接并发归并（Go 侧 connectSF 同款）：同一 id 的并发首次使用只拨
@@ -304,6 +349,10 @@ impl AppCore {
         let blobs = Arc::new(BlobStore::new(storage.data_dir()));
         blobs.sweep();
         set_blob_sink(Arc::new(StoreSink(blobs.clone())));
+        // 默认 30min idle 超时、1024 容量上限（与 Go TxManager 一致）。
+        // PD-05：回收器由内核 TxManager 提供，构造时启动其后台 sweeper。
+        let txs = TxManager::<TxEntry>::new();
+        txs.spawn();
         Self {
             storage,
             blobs,
@@ -312,7 +361,7 @@ impl AppCore {
             user_disconnected: RwLock::new(std::collections::HashSet::new()),
             connect_flights: Mutex::new(HashMap::new()),
             tunnels: RwLock::new(HashMap::new()),
-            txs: Arc::new(Mutex::new(HashMap::new())),
+            txs,
             read_only: RwLock::new(std::collections::HashSet::new()),
         }
     }
@@ -444,12 +493,69 @@ impl AppCore {
             }
         }
         self.store_ssh_secrets_update(id, &mut req.ssh_tunnel)?;
-        self.storage.connections().update(id, &req)
+        let result = self.storage.connections().update(id, &req)?;
+        // 同步内存 read_only 快照：update_connection 之前只写 storage，
+        // 已连接连接（在 self.connections map 里）的 is_read_only 判定会
+        // 直接返回 false（因为 self.read_only set 不含该 id），导致把已连接
+        // 连接改成只读后、直到下次重连前，写语句不被 reject_write_on_read_only
+        // 拦截——只读红线（behavior.md §12.3）的静默绕过。
+        // req.read_only 为 None 表示不修改该字段，storage 里保持原值，
+        // 内存快照也不应变动。
+        if req.read_only.is_some() {
+            if req.read_only == Some(true) {
+                self.read_only.write().insert(id);
+            } else {
+                self.read_only.write().remove(&id);
+            }
+        }
+        Ok(result)
     }
 
     pub fn delete_connection(&self, id: ConnectionId) -> CoreResult<bool> {
         self.disconnect(id);
-        self.storage.connections().delete(id)
+        // PD-07（2026-11-09）：先取回凭据引用再删行。keyring 是独立存储，
+        // DELETE 不级联——不留这一步的话删除连接后 keyring 里仍残留可复用的
+        // 明文密码，等于把「删除」做成了只删元数据的假删除（与 Go 侧
+        // appcore.DeleteConnection 的 secretRefs + revokeSecrets 同纪律）。
+        let refs = self.secret_refs(id)?;
+        let deleted = self.storage.connections().delete(id)?;
+        self.revoke_secrets(&refs);
+        Ok(deleted)
+    }
+
+    // secret_refs 收集连接在 keyring 里的全部凭据引用（连接密码 + SSH 密码/私钥口令）。
+    // 连接不存在时返回已收集到的空集合而不是错误——delete 对不存在的 id 幂等返回 false。
+    fn secret_refs(&self, id: ConnectionId) -> CoreResult<Vec<String>> {
+        let mut refs: Vec<String> = Vec::new();
+        if let Some(r) = self.storage.connections().get_password_ref(id)? {
+            if !r.is_empty() {
+                refs.push(r);
+            }
+        }
+        if let Some(info) = self.storage.connections().get(id)? {
+            if let Some(ssh) = info.ssh_tunnel.as_ref() {
+                if let Some(r) = ssh.password_ref.clone().filter(|r| !r.is_empty()) {
+                    refs.push(r);
+                }
+                if let Some(r) = ssh.private_key_passphrase_ref.clone().filter(|r| !r.is_empty()) {
+                    refs.push(r);
+                }
+            }
+        }
+        Ok(refs)
+    }
+
+    // revoke_secrets 摘除 keyring 里的凭据；删除失败只记录（不掩盖行删除结果），
+    // 避免凭据残留静默（与 Go 侧 revokeSecrets 一致）。
+    fn revoke_secrets(&self, refs: &[String]) {
+        for r in refs {
+            if r.is_empty() {
+                continue;
+            }
+            if let Err(e) = self.kr.delete(r) {
+                tracing::warn!("pd07: revoke secret {r} failed: {e}");
+            }
+        }
     }
 
     pub fn connect(&self, id: ConnectionId) -> CoreResult<()> {
@@ -502,14 +608,45 @@ impl AppCore {
             }
         };
 
+        // P2-C：重连前回滚并清理该连接上的旧事务。此前 connect 完全不触碰
+        // txs，直接重连会留下旧 TxEntry 持有旧驱动的 Arc——旧事务在连接
+        // 被覆盖后仍可 commit/rollback，违反"卸载前先失活依赖"的 guard
+        // ¬ relied_n(γ)。与 Go 侧 staleMgr.RollbackAll 对齐。
+        let tx_ids: Vec<String> = self.txs.ids_matching(|t| t.connection_id == id);
+        for tid in tx_ids {
+            if let Ok(mut guard) = self.take_tx(&tid) {
+                if let Some(mut handle) = guard.entry().handle.take() {
+                    let _ = block_on(guard.entry().driver.rollback(&mut handle));
+                }
+                guard.finish();
+            }
+        }
+
+        // 旧驱动显式关闭（与 Go 侧 staleDriver.Close 对齐）：先取 Arc 再覆盖，
+        // close 幂等，后续 Drop 再触发也安全。
+        let stale_driver = self.connections.read().get(&id).map(|c| c.driver_arc());
+
         self.connections.write().insert(id, Connection::new(driver));
         if info.read_only == Some(true) {
             self.read_only.write().insert(id);
         } else {
             self.read_only.write().remove(&id);
         }
+        // 被顶替的旧隧道必须显式摘除：新配置有隧道时下面的 insert 覆盖旧条目
+        // （旧 Arc Drop 关闭）；新配置**没有**隧道时旧条目既不 delete 也不
+        // close——SSH 会话与 127.0.0.1 监听端口就永久泄漏，每重连一次漏一个。
+        // 与 Go 侧 appcore.go 的 prevTunnel 处理（delete + 锁外 Close）同纪律。
+        let stale_tunnel = self.tunnels.write().remove(&id);
         if let Some(t) = tunnel {
             self.tunnels.write().insert(id, t);
+        }
+        // 先关旧驱动（依赖隧道），再关旧隧道。
+        if let Some(d) = stale_driver {
+            let _ = block_on(d.close());
+        }
+        if let Some(t) = stale_tunnel {
+            // close 起线程断开 SSH 会话，不持锁做（close 自身不锁 tunnels）。
+            t.close();
         }
         Ok(())
     }
@@ -608,9 +745,10 @@ impl AppCore {
             }
             DatabaseKind::Redis => {
                 let (host, port) = net_addr(conn_info, 6379);
+                let db_idx = redis_db_index(orig)?;
                 Ok(Arc::new(polydb_db_redis::RedisConn::open(
                     &format!("{host}:{port}"),
-                    redis_db_index(orig),
+                    db_idx,
                     password,
                 )?))
             }
@@ -618,21 +756,33 @@ impl AppCore {
     }
 
     pub fn disconnect(&self, id: ConnectionId) {
-        // 先回收该连接上的所有活动事务（避免悬挂事务；驱动 drop 后 tx 会静默失败）。
-        let tx_ids: Vec<String> = self
-            .txs
-            .lock()
-            .iter()
-            .filter(|(_, t)| t.connection_id == id)
-            .map(|(k, _)| k.clone())
-            .collect();
+        // 先回收该连接上的所有活动事务——先 rollback 再移除，避免服务器端
+        // 事务悬挂（P2-5：旧写法只从 map 移除不调 driver.rollback，连接
+        // 被 drop 后事务靠驱动隐式回滚，行为不保证且错误被静默吞掉）。
+        let tx_ids: Vec<String> = self.txs.ids_matching(|t| t.connection_id == id);
         for tid in tx_ids {
-            // 静默失败：driver 已被 drop 或连接断开，直接丢弃即可。
-            self.txs.lock().remove(&tid);
+            if let Ok(mut guard) = self.take_tx(&tid) {
+                let driver = guard.entry().driver.clone();
+                if let Some(mut handle) = guard.entry().handle.take() {
+                    // rollback 失败也要移除 tx（连接已断开，事务无法重试）。
+                    let _ = block_on(driver.rollback(&mut handle));
+                }
+                guard.finish();
+            }
         }
+        // P1-A：显式关闭驱动。此前 driver.close() 是死 API（全仓零调用），
+        // 连接卸载的逆完全依赖底层库 Drop（sqlx Pool / rusqlite / tiberius
+        // / ODPI-C 会话关闭），未被类型系统或应用层审计。先 clone 驱动 Arc
+        // 再从 map 移除；close 幂等（Pool::close / client.close / redis drop
+        // / oracle close），后续 Drop 再触发也安全。驱动依赖隧道，故先关
+        // 驱动再关隧道（依赖序）。
+        let driver = self.connections.read().get(&id).map(|c| c.driver_arc());
         self.connections.write().remove(&id);
         self.read_only.write().remove(&id);
         self.user_disconnected.write().insert(id);
+        if let Some(d) = driver {
+            let _ = block_on(d.close());
+        }
         if let Some(t) = self.tunnels.write().remove(&id) {
             t.close();
         }
@@ -945,6 +1095,29 @@ impl AppCore {
         conn.as_kv()?.exec_command(args).await
     }
 
+    // ─── 无主事务回收器（P2-B）────────────────────────────────
+    //
+    // PD-05（2026-11-09）：回收器本体已下沉到内核 `polydb_db_core::TxManager`
+    // （`tx.rs`），app-core 不再自造 sweeper 线程——此前 Rust 端有 txs map +
+    // ttl + max + stop 四个字段与一段独立线程，与 Go 端委托 `dbcore.TxManager`
+    // 的路径结构漂移。现在这些方法只是内核注册表的透传。
+
+    /// 立即回收无主事务（idle 超时 + 容量上限）。测试与手动 GC 可直接调用，
+    /// 后台 sweeper 线程调用同一逻辑。返回被回收的事务数。
+    pub fn sweep_idle_txs(&self) -> usize {
+        self.txs.sweep()
+    }
+
+    /// 覆盖 idle 回收阈值（测试/嵌入式调优用）。
+    pub fn set_tx_idle_ttl(&self, ttl: Duration) {
+        self.txs.set_idle_ttl(ttl)
+    }
+
+    /// 覆盖事务容量上限。
+    pub fn set_tx_max_entries(&self, max: usize) {
+        self.txs.set_max_entries(max)
+    }
+
     // ─── 事务（M25）─────────────────────────────────────────
 
     pub async fn begin_transaction(
@@ -956,28 +1129,29 @@ impl AppCore {
         let driver = conn.sql_driver_arc()?;
         let iso = req.isolation_level.unwrap_or(IsolationLevel::ReadCommitted);
         let handle = driver.begin_tx(TxMode::new(iso)).await?;
+        let now = Utc::now();
         let entry = TxEntry {
             id: uuid::Uuid::new_v4(),
             connection_id: req.connection_id,
             driver,
             handle: Some(handle),
             isolation_level: iso,
-            started_at: Utc::now(),
+            started_at: now,
+            last_active: now,
         };
         let info = entry.info();
-        self.txs.lock().insert(info.id.to_string(), entry);
+        self.txs.insert(info.id.to_string(), entry);
         Ok(info)
     }
 
-    /// 从 map 里借出事务条目并释放锁；不存在报 TRANSACTION_NOT_FOUND。
+    /// 从注册表里借出事务条目并释放锁；不存在报 TRANSACTION_NOT_FOUND。
     fn take_tx(&self, txn_id: &str) -> CoreResult<TxEntryGuard> {
         let entry = self
             .txs
-            .lock()
-            .remove(txn_id)
+            .take(txn_id)
             .ok_or_else(|| CoreError::TransactionNotFound(txn_id.to_string()))?;
         Ok(TxEntryGuard {
-            txs: self.txs.clone(),
+            manager: Arc::clone(&self.txs),
             id: txn_id.to_string(),
             entry: Some(entry),
         })
@@ -997,40 +1171,80 @@ impl AppCore {
         let entry = guard.entry();
         // 只读拦截（behavior.md §12.3）：按事务所属连接判定。
         self.reject_write_on_read_only(&entry.connection_id, sql)?;
-        match entry.handle.as_mut() {
+        let result = match entry.handle.as_mut() {
             Some(handle) => entry.driver.execute_in_tx(handle, sql, params).await,
             None => Err(CoreError::Internal("tx already committed".into())),
+        };
+        // P2-B：成功执行刷新 last_active，供回收器判定活跃度（与 Go 侧
+        // ExecuteInTx 成功时更新 lastActive 同构）。失败不刷新——事务可能
+        // 处于不确定状态，回收器可更安全地将其作为 idle 候选。
+        if result.is_ok() {
+            entry.last_active = Utc::now();
         }
+        result
     }
 
     pub async fn commit_transaction(&self, txn_id: &str) -> CoreResult<TransactionInfo> {
         let mut guard = self.take_tx(txn_id)?;
         let info = guard.entry().info_finalized(TransactionStatus::Committed);
         let driver = guard.entry().driver.clone();
-        let handle = guard
-            .entry()
-            .handle
-            .take()
-            .ok_or_else(|| CoreError::Internal("tx already committed".into()))?;
-        // 事务终结：守卫不再回插（与 Go 侧一致，commit/rollback 只 remove）。
-        // 放在 await 之前，取消或失败都不会把已终结的事务留在 map 里。
-        guard.finish();
-        driver.commit(handle).await?;
-        Ok(info)
+        // P1-2：用 &mut 引用而非 take()——handle 在调用期间保持 Some。
+        // P3-A：commit 失败后事务终结（从注册表移除），不再留可 rollback 的
+        // 条目。PG 的 commit 用 tx.0.take() 消费 Transaction，失败后 sqlx
+        // 隐式 rollback，handle 内层已为 None；若留条目在注册表，后续
+        // rollback 报 "tx handle already consumed"（误导性），且数据库状态
+        // 已不确定（可能已回滚、可能未回滚）。与 Go 侧 CommitTransaction
+        // 失败时 delete(a.txMeta, txID) 同构。
+        let commit_result = {
+            let handle = guard
+                .entry()
+                .handle
+                .as_mut()
+                .ok_or_else(|| CoreError::Internal("tx already committed".into()))?;
+            driver.commit(handle).await
+        };
+        match commit_result {
+            Ok(()) => {
+                guard.entry().handle = None;
+                guard.finish();
+                Ok(info)
+            }
+            Err(e) => {
+                // commit 失败：事务终结（从注册表移除），错误透传。
+                // 不回插条目——PG 的 handle 内层已被消费，留条目只会让
+                // 后续 rollback 报误导性错误。
+                guard.finish();
+                Err(e)
+            }
+        }
     }
 
     pub async fn rollback_transaction(&self, txn_id: &str) -> CoreResult<TransactionInfo> {
         let mut guard = self.take_tx(txn_id)?;
         let info = guard.entry().info_finalized(TransactionStatus::RolledBack);
         let driver = guard.entry().driver.clone();
-        let handle = guard
-            .entry()
-            .handle
-            .take()
-            .ok_or_else(|| CoreError::Internal("tx already rolled back".into()))?;
-        guard.finish();
-        driver.rollback(handle).await?;
-        Ok(info)
+        // P1-2：用 &mut 引用而非 take()。
+        // P3-A：rollback 失败后事务终结（从注册表移除），与 Go 侧同构。
+        let rollback_result = {
+            let handle = guard
+                .entry()
+                .handle
+                .as_mut()
+                .ok_or_else(|| CoreError::Internal("tx already rolled back".into()))?;
+            driver.rollback(handle).await
+        };
+        match rollback_result {
+            Ok(()) => {
+                guard.entry().handle = None;
+                guard.finish();
+                Ok(info)
+            }
+            Err(e) => {
+                // rollback 失败：事务终结（从注册表移除），错误透传。
+                guard.finish();
+                Err(e)
+            }
+        }
     }
 
     // ─── 机密辅助（与 Go 侧 appcore 对齐） ───────────────────
@@ -1117,10 +1331,12 @@ fn data_dir() -> String {
     if let Ok(d) = std::env::var("POLYDB_DATA_DIR") {
         return d;
     }
-    let base = std::env::var("APPDATA")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| ".".into());
-    std::path::Path::new(&base)
+    // 与 Go 的 os.UserConfigDir() 对齐（dirs::config_dir 等价）。此前用
+    // APPDATA/HOME 直接拼 "polydb"，Linux 下解析到 ~/polydb，与 Go 的
+    // ~/.config/polydb 不同——Rust server 与 Go TUI/Web 读写不同的
+    // polydb.db / keyring.bin / blobs/，连接与密码静默分叉。
+    dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join("polydb")
         .to_string_lossy()
         .into_owned()
@@ -1183,14 +1399,42 @@ fn mysql_dsn(info: &ConnectionInfo, password: &str) -> String {
     )
 }
 
-// redis_db_index：info.database 视为 db 编号（与 Go 侧一致），非数字视为 0。
-fn redis_db_index(info: &ConnectionInfo) -> u32 {
-    info.database
-        .as_deref()
-        .and_then(|d| d.trim().parse::<u32>().ok())
-        .unwrap_or(0)
+// redis_db_index：info.database 视为 db 编号（与 Go 侧 dbIndex 一致）。
+//
+// 解析纪律（PD-16，2026-11-09）：**非法输入必须报错，不得静默回落 0**。
+// 静默回落会让用户连到 db 0 而不是他自己填的库——数据写进错误的库，且
+// 无任何提示。原实现用 `unwrap_or(0)`：Rust 侧 `parse::<u32>()` 对超出
+// u32 上界的输入溢出即 Err，回落 0；而 Go 侧当时用 int 累加，会得到一个
+// 巨大的 db 号交给 Redis 报 "ERR DB index is out of range"。两端行为
+// 因此不一致（AGENTS.md §14 红线）。
+//
+// 规则（两端逐字一致）：空串 → 0；纯十进制数字 → 该值；其余（含空白、
+// 正负号、小数点、非 ASCII 数字、超出 u32 上界）→ 报错。
+fn redis_db_index(info: &ConnectionInfo) -> CoreResult<u32> {
+    let raw = match info.database.as_deref() {
+        None | Some("") => return Ok(0),
+        Some(d) => d,
+    };
+    // 注意：不 trim——空白不是合法 db 号，Go 侧 strconv.ParseUint 同样
+    // 拒绝带空白的输入，两端行为一致。
+    //
+    // 另：Rust 的 `u32::from_str` **接受前导 '+'**（"+3" -> Ok(3)），
+    // 而 Go 的 `strconv.ParseUint` 拒绝 '+'。故此处显式要求「纯 ASCII
+    // 十进制数字」，把两端接受集钉成完全一致（AGENTS.md §14 红线）。
+    if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(invalid_redis_db_number(raw));
+    }
+    raw.parse::<u32>().map_err(|_| invalid_redis_db_number(raw))
 }
 
+/// 非法 Redis db 编号的统一错误（与 Go 侧 dbIndex 的错误码、文案一致）。
+fn invalid_redis_db_number(raw: &str) -> CoreError {
+    // 错误码与 Go 侧一致：POLYDB_ERR_INVALID_PARAM（protocol::error::codes::INVALID_PARAM）。
+    CoreError::Protocol(Box::new(PolyDBError::new(
+        codes::INVALID_PARAM,
+        format!("invalid redis db number {raw:?} (expected 0..4294967295)"),
+    )))
+}
 // target_host_port 返回隧道目标地址（含各驱动默认端口；与 Go 侧一致）。
 fn target_host_port(info: &ConnectionInfo) -> (String, u16) {
     (
@@ -1208,4 +1452,105 @@ fn split_local_addr(addr: &str) -> CoreResult<(String, u16)> {
         .parse::<u16>()
         .map_err(|e| CoreError::SshTunnel(format!("bad tunnel local port {port}: {e}")))?;
     Ok((host.to_string(), port))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::data_dir;
+
+    /// F1 回归：data_dir 必须与 Go 的 os.UserConfigDir()/polydb 解析一致。
+    /// 此前用 APPDATA/HOME 直接拼 "polydb"，Linux 下解析到 ~/polydb
+    /// （Go 解析到 ~/.config/polydb），Rust server 与 Go TUI/Web 读写
+    /// 不同的 polydb.db / keyring.bin，连接与密码静默分叉。
+    #[test]
+    fn data_dir_uses_config_dir_not_home() {
+        // POLYDB_DATA_DIR 优先
+        std::env::set_var("POLYDB_DATA_DIR", "/tmp/polydb-test");
+        assert_eq!(data_dir(), "/tmp/polydb-test");
+        std::env::remove_var("POLYDB_DATA_DIR");
+
+        // 未设置时必须走 dirs::config_dir()（= Go os.UserConfigDir()）
+        let expected = dirs::config_dir()
+            .expect("dirs::config_dir should resolve on all platforms")
+            .join("polydb");
+        assert_eq!(data_dir(), expected.to_string_lossy().into_owned());
+    }
+
+    /// PD-07 回归（Rust 端镜像，与 Go 侧 appcore 的 TestDeleteConnectionRevokesKeyringSecrets 对齐）：
+    /// 删除连接必须把 keyring 里由 password_ref 指向的凭据一并摘掉。此前
+    /// `delete_connection` 只删 `connections` 行，password_ref 指向的明文密码
+    /// 留在 keyring 里仍可复用——删除被做成了「只删元数据的假删除」，且两端
+    /// 行为分叉（Go 已 revokeSecrets，Rust 未 revoke）。
+    #[test]
+    fn pd07_delete_connection_revokes_keyring_secrets() {
+        use super::*;
+
+        let dir = std::env::temp_dir().join(format!("polydb-pd07-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(dir.join("test.db").to_str().unwrap()).unwrap();
+        let kr_path = dir.to_string_lossy().to_string();
+        let kr = FileKeyring::open(&kr_path, "").unwrap();
+        let app = AppCore::with_keyring(storage, std::sync::Arc::new(kr));
+
+        let info = app
+            .create_connection(&CreateConnectionRequest {
+                name: "pd07".to_string(),
+                kind: DatabaseKind::Sqlite,
+                host: None,
+                port: None,
+                database: Some(":memory:".to_string()),
+                username: None,
+                password_ref: None,
+                password: Some("conn-secret".to_string()),
+                options: Default::default(),
+                ssh_tunnel: Some(SshTunnelConfig {
+                    host: "127.0.0.1".to_string(),
+                    port: 22,
+                    username: "ssh-user".to_string(),
+                    password_ref: None,
+                    password: Some("ssh-secret".to_string()),
+                    private_key_path: None,
+                    private_key_passphrase_ref: None,
+                    private_key_passphrase: Some("passphrase-secret".to_string()),
+                }),
+                default_schema: None,
+                read_only: None,
+                group: None,
+                color: None,
+            })
+            .unwrap();
+
+        // 第二个句柄用于删除后断言凭据是否被摘掉。必须在 create 之后打开：
+        // FileKeyring::open 在文件尚不存在时生成随机 salt，先打开的观察句柄
+        // 会拿到与写入方不同的 salt 而无法解密。FileKeyring 每次读写都重载文件，
+        // 因此后开的句柄能读到 create 写入的内容。
+        let observer = FileKeyring::open(&kr_path, "").unwrap();
+
+        let conn_ref = app
+            .storage
+            .connections()
+            .get_password_ref(info.id)
+            .unwrap()
+            .filter(|r| !r.is_empty())
+            .expect("conn password_ref must be non-empty");
+        let ssh = info.ssh_tunnel.as_ref().unwrap();
+        let refs: Vec<String> = vec![
+            conn_ref,
+            ssh.password_ref.clone().unwrap_or_default(),
+            ssh.private_key_passphrase_ref.clone().unwrap_or_default(),
+        ];
+        assert!(refs.iter().all(|r| !r.is_empty()), "refs must be non-empty: {refs:?}");
+        for r in &refs {
+            assert!(observer.get(r).is_ok(), "secret {r} readable before delete");
+        }
+
+        assert!(app.delete_connection(info.id).unwrap());
+
+        for r in &refs {
+            assert!(
+                observer.get(r).is_err(),
+                "secret {r} still readable after delete (PD-07: 凭据必须随行删除)"
+            );
+        }
+    }
 }

@@ -77,17 +77,19 @@ pub(crate) fn is_lob_type(t: &str) -> bool {
     LOBS.iter().any(|p| lt.contains(p))
 }
 
-/// 标识符引用：语义对齐 Web alterSql.quoteIdent——统一双引号，oracle 小写。
-pub(crate) fn quote_ident(kind: &str, s: &str) -> String {
-    if kind == "oracle" {
-        format!("\"{}\"", s.to_lowercase())
-    } else {
-        format!("\"{s}\"")
-    }
-}
+/// 标识符引用由调用方注入：方言知识（backtick/bracket/大小写）留在
+/// changes::quote_ident 一份实现，画像层只消费。此前本模块自带一份
+/// 「oracle 小写 + 双引号、其余双引号不转义」——与 Web 画像路径
+/// （changes.dialectFor，Oracle 原样大小写）漂移，且不转义嵌入引号。
+///
+/// 小写化本身在 Oracle 上就是错的：未加引号的标识符按大写存储，把目录上报的
+/// `USER_ID` 引用成 `"user_id"` 指向的是另一个不存在的标识符（引号内大小写
+/// 敏感）。quote 闭包签名对齐 Web `buildProfilePlan(quote, tableExpr, columns)`
+/// 的形态。
+pub(crate) type QuoteFn<'a> = &'a dyn Fn(&str) -> String;
 
 pub(crate) fn build_profile_plan(
-    kind: &str,
+    quote: QuoteFn<'_>,
     table_expr: &str,
     columns: &[ProfileColumn],
 ) -> ProfilePlan {
@@ -95,7 +97,7 @@ pub(crate) fn build_profile_plan(
     let mut metrics: Vec<MetricSlot> = Vec::new();
     let mut idx = 1usize;
     for col in columns {
-        let q = quote_ident(kind, &col.name);
+        let q = quote(&col.name);
         let numeric = is_numeric_type(&col.data_type);
         let lob = !numeric && is_lob_type(&col.data_type);
 
@@ -164,6 +166,7 @@ pub(crate) struct ProfileResult {
 fn as_i64(v: &Value) -> Option<i64> {
     match v {
         Value::Integer(i) => Some(*i),
+        Value::U64(u) => Some(*u as i64),
         Value::Float(f) => Some(*f as i64),
         Value::String(s) => s.trim().parse().ok(),
         _ => None,
@@ -221,10 +224,23 @@ mod tests {
         assert!(!is_lob_type("varchar"));
     }
 
+    /// 方言引用来自注入的闭包（真实调用方 app.rs 传 changes::quote_ident）：
+    /// 画像层不再自带方言知识。这里直接用 changes::quote_ident 作为注入闭包
+    /// 测端到端语义——Oracle 未引号标识符按大写存储，目录上报什么就引用什么，
+    /// 小写化会把引用指向另一个不存在的标识符（引号内大小写敏感）。
     #[test]
-    fn oracle_ident_lowercased() {
-        assert_eq!(quote_ident("oracle", "USER"), "\"user\"");
-        assert_eq!(quote_ident("postgres", "User"), "\"User\"");
+    fn quote_come_from_injected_closure() {
+        use crate::changes::quote_ident;
+        use polydb_core::DatabaseKind;
+        let cols = vec![col("USER_ID", "INTEGER")];
+        let quote = |s: &str| quote_ident(DatabaseKind::Oracle, s);
+        let plan = build_profile_plan(&quote, "\"MAIN\".\"T\"", &cols);
+        assert!(plan.sql.contains("\"USER_ID\""), "sql = {}", plan.sql);
+        assert!(!plan.sql.contains("\"user_id\""), "sql = {}", plan.sql);
+        // 嵌入引号被转义（旧实现会产出坏 SQL）。
+        let weird = vec![col("a\"b", "TEXT")];
+        let plan2 = build_profile_plan(&quote, "t", &weird);
+        assert!(plan2.sql.contains("\"a\"\"b\""), "sql = {}", plan2.sql);
     }
 
     #[test]
@@ -234,7 +250,8 @@ mod tests {
             col("name", "TEXT"),
             col("data", "BLOB"),
         ];
-        let plan = build_profile_plan("sqlite", "\"main\".\"t\"", &cols);
+        let ansi = |s: &str| format!("\"{s}\"");
+        let plan = build_profile_plan(&ansi, "\"main\".\"t\"", &cols);
         // id: nulls@1 distinct@2 min@3 max@4 avg@5；name(TEXT)/data(BLOB) 均为 LOB → 只出 nulls@6/@7。
         let slots: Vec<(usize, &str, MetricKind)> = plan
             .metrics
@@ -262,7 +279,8 @@ mod tests {
     #[test]
     fn parse_roundtrip() {
         let cols = vec![col("id", "INTEGER"), col("name", "TEXT")];
-        let plan = build_profile_plan("sqlite", "t", &cols);
+        let ansi = |s: &str| format!("\"{s}\"");
+        let plan = build_profile_plan(&ansi, "t", &cols);
         // COUNT(*)=10；id: nulls@1=2 distinct@2=9 min@3=1 max@4=10 avg@5=5.5；name(TEXT,LOB): nulls@6=0
         let row = vec![
             Value::Integer(10),

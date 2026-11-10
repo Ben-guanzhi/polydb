@@ -36,10 +36,10 @@ fn register_regexp_fn(conn: &RusqliteConnection) -> CoreResult<()> {
         2,
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
         |ctx: &Context| -> rusqlite::Result<Option<bool>> {
-            let Some(pattern) = arg_text(ctx.get_raw(0)) else {
+            let Some(pattern) = arg_text(ctx.get_raw(0))? else {
                 return Ok(None);
             };
-            let Some(text) = arg_text(ctx.get_raw(1)) else {
+            let Some(text) = arg_text(ctx.get_raw(1))? else {
                 return Ok(None);
             };
             let re = regex::Regex::new(&pattern).map_err(|e| {
@@ -52,14 +52,21 @@ fn register_regexp_fn(conn: &RusqliteConnection) -> CoreResult<()> {
     Ok(())
 }
 
-fn arg_text(v: rusqlite::types::ValueRef) -> Option<String> {
+fn arg_text(v: rusqlite::types::ValueRef) -> rusqlite::Result<Option<String>> {
     use rusqlite::types::ValueRef as R;
-    Some(match v {
-        R::Text(b) | R::Blob(b) => String::from_utf8_lossy(b).into_owned(),
+    Ok(Some(match v {
+        // P2-6 回归：此前用 from_utf8_lossy 静默替换非法 UTF-8 为 U+FFFD，
+        // 与 F5（row_to_values）修复前的同一缺陷。SQLite TEXT/BLOB 列不强制
+        // UTF-8，非法字节若静默替换会改变正则匹配结果而用户无法察觉。
+        R::Text(b) | R::Blob(b) => String::from_utf8(b.to_vec()).map_err(|e| {
+            rusqlite::Error::UserFunctionError(
+                format!("invalid UTF-8 in REGEXP argument: {e}").into(),
+            )
+        })?,
         R::Integer(i) => i.to_string(),
         R::Real(f) => f.to_string(),
-        R::Null => return None,
-    })
+        R::Null => return Ok(None),
+    }))
 }
 
 /// `PRAGMA foreign_key_list` 的 on_update/on_delete 是 SQL 文本（如 `NO ACTION`、
@@ -78,15 +85,31 @@ fn fk_action(raw: &str) -> Option<ForeignKeyAction> {
 /// 事务句柄。SQLite 本身没有独立的事务对象，事务由底层 Connection 的
 /// BEGIN IMMEDIATE 句柄只是不透明标记；实际 begin/commit/rollback 与执行
 /// 都通过 self.conn 上的 execute_batch 完成。
+///
+/// `active` 标记事务是否仍处于活跃状态：commit/rollback 成功后置为 false。
+/// execute_in_tx / commit / rollback 在 handle 已不活跃时返回错误而非静默
+/// 操作——commit 后 execute_in_tx 会以自动提交模式运行 SQL（BEGIN 已结束），
+/// 调用方误以为事务性执行而实际不在事务内。
 #[derive(Clone, Debug)]
-pub struct SqliteTxHandle;
+pub struct SqliteTxHandle {
+    active: bool,
+}
 
 impl SqliteConn {
     pub fn open(path: &str) -> CoreResult<Self> {
         let conn = RusqliteConnection::open(path)
             .map_err(|e| CoreError::Driver(format!("sqlite open failed: {e}")))?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
-            .map_err(|e| CoreError::Driver(format!("sqlite pragma failed: {e}")))?;
+        // busy_timeout makes a second writer wait (up to 5s) instead of failing
+        // immediately with SQLITE_BUSY, and synchronous=NORMAL is the WAL-mode
+        // pairing the Go kernel uses (dbcore/sqlite/spec.go). All queries on
+        // this driver serialize through the single connection's mutex, but a
+        // concurrent writer from another process (or another client of the
+        // same file) still shares the file lock — the timeout is what keeps
+        // that contention a wait instead of an error.
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=NORMAL;",
+        )
+        .map_err(|e| CoreError::Driver(format!("sqlite pragma failed: {e}")))?;
         register_regexp_fn(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -109,10 +132,30 @@ impl SqliteConn {
             Value::Null => Box::new(rusqlite::types::Null),
             Value::Bool(b) => Box::new(*b),
             Value::Integer(i) => Box::new(*i),
+            Value::U64(u) => {
+                // SQLite 整数是 i64——u64 值 > i64::MAX 无法原生存储。
+                // ≤ i64::MAX 绑为 i64（保持整数精度）；> i64::MAX 绑为
+                // f64（SQLite 唯一能容纳的更大数值类型，≥2^53 丢失精度）。
+                if *u <= i64::MAX as u64 {
+                    Box::new(*u as i64)
+                } else {
+                    Box::new(*u as f64)
+                }
+            }
             Value::Float(f) => Box::new(*f),
             Value::String(s) => Box::new(s.clone()),
-            _ => Box::new(serde_json::to_string(v).unwrap_or_default()),
+            // Array/Object（含 $blob Object）跨线协议统一为 JSON 文本——与 Go
+            // 侧 ValueToDriver 的 string(v.Raw()) 对齐。serde_json 默认把
+            // NaN/Inf 序列化为 null，导致 Array/Object 中的 NaN/Inf 静默
+            // 丢失——序列化前先将 NaN/Inf 替换为字符串值。
+            _ => Box::new(Self::value_to_json_text(v)),
         }
+    }
+
+    /// 将 Value 序列化为 JSON 文本，NaN/Inf 先替换为字符串值再序列化。
+    /// 实现统一在 polydb_db_core::value_json，五个驱动共用同一口径。
+    fn value_to_json_text(v: &Value) -> String {
+        polydb_db_core::value_to_json_text(v)
     }
 
     fn row_to_values(row: &rusqlite::Row, col_count: usize) -> rusqlite::Result<Vec<Value>> {
@@ -123,7 +166,17 @@ impl SqliteConn {
                 rusqlite::types::ValueRef::Integer(i) => Value::Integer(i),
                 rusqlite::types::ValueRef::Real(f) => Value::Float(f),
                 rusqlite::types::ValueRef::Text(b) => {
-                    Value::String(String::from_utf8_lossy(b).into_owned())
+                    // F5 回归：此前用 from_utf8_lossy 静默替换非法 UTF-8 为
+                    // U+FFFD——与 Go 侧保留原始字节的行为不对称，且用户无法
+                    // 察觉数据已被篡改。SQLite TEXT 列虽不强制 UTF-8，但
+                    // 跨线协议要求 UTF-8 文本，非法字节应显式报错而非静默替换。
+                    Value::String(String::from_utf8(b.to_vec()).map_err(|e| {
+                        rusqlite::Error::InvalidColumnType(
+                            i,
+                            format!("invalid UTF-8 in TEXT column: {e}"),
+                            rusqlite::types::Type::Text,
+                        )
+                    })?)
                 }
                 rusqlite::types::ValueRef::Blob(b) => polydb_db_core::blob_value(b),
             };
@@ -160,7 +213,22 @@ impl SqliteConn {
             .map(|i| ResultColumn {
                 name: stmt.column_name(i).unwrap_or("?").to_string(),
                 table: None,
-                data_type: "TEXT".to_string(),
+                // 真实声明类型（PD-21，2026-11-10）：此前硬编码 "TEXT"，而 Go 侧
+                // 走 modernc 的 decltypes 报真实类型（dbsqlite.go:180
+                // `pdb.DeclTypeOf(ct)`），两端对同一查询给出的 type 不同——
+                // 契约测试为此专门做了 `onlyColumnNames` 归一化容忍，把列类型
+                // 这一可观测行为整个放弃。
+                //
+                // 开启 rusqlite 的 `column_decltype` feature 后可读
+                // sqlite3_column_decltype（rusqlite-0.32.1 src/column.rs:27
+                // `Column::decl_type`）。表达式/函数结果没有声明类型 ⇒ None，
+                // 此时回落 "TEXT"（与 Go 侧 DeclTypeOf 的空串回落同形）。
+                data_type: stmt
+                    .columns()
+                    .get(i)
+                    .and_then(|c| c.decl_type())
+                    .unwrap_or("TEXT")
+                    .to_string(),
                 generic_type: None,
                 nullable: Some(true),
             })
@@ -231,7 +299,7 @@ impl SqliteConn {
             guard
                 .execute_batch("BEGIN IMMEDIATE")
                 .map_err(|e| CoreError::Driver(format!("begin tx failed: {e}")))?;
-            Ok(SqliteTxHandle)
+            Ok(SqliteTxHandle { active: true })
         })
         .await
         .map_err(|e| CoreError::Internal(format!("sqlite task join: {e}")))?
@@ -239,10 +307,18 @@ impl SqliteConn {
 
     pub async fn execute_in_tx_impl(
         &self,
-        _tx: &mut SqliteTxHandle,
+        tx: &mut SqliteTxHandle,
         sql: &str,
         params: &[Value],
     ) -> CoreResult<QueryResult> {
+        // P2 F11：commit/rollback 后 handle 的 active=false，此时执行会以
+        // 自动提交模式跑 SQL（BEGIN 已结束），调用方误以为事务性执行而实际
+        // 不在事务内。拒绝而非静默。
+        if !tx.active {
+            return Err(CoreError::TransactionNotFound(
+                "transaction already committed or rolled back".into(),
+            ));
+        }
         let conn = Arc::clone(&self.conn);
         let sql = sql.to_string();
         let params = params.to_vec();
@@ -254,9 +330,16 @@ impl SqliteConn {
         .map_err(|e| CoreError::Internal(format!("sqlite task join: {e}")))?
     }
 
-    pub async fn commit_impl(&self, _tx: &mut SqliteTxHandle) -> CoreResult<()> {
+    pub async fn commit_impl(&self, tx: &mut SqliteTxHandle) -> CoreResult<()> {
+        // P2 F11：commit 后置 active=false——防止二次 commit/execute_in_tx
+        // 以自动提交模式静默运行。
+        if !tx.active {
+            return Err(CoreError::TransactionNotFound(
+                "transaction already committed or rolled back".into(),
+            ));
+        }
         let conn = Arc::clone(&self.conn);
-        tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || -> CoreResult<()> {
             let guard = conn.lock();
             guard
                 .execute_batch("COMMIT")
@@ -264,12 +347,22 @@ impl SqliteConn {
             Ok(())
         })
         .await
-        .map_err(|e| CoreError::Internal(format!("sqlite task join: {e}")))?
+        .map_err(|e| CoreError::Internal(format!("sqlite task join: {e}")))??;
+        tx.active = false;
+        Ok(())
     }
 
-    pub async fn rollback_impl(&self, _tx: &mut SqliteTxHandle) -> CoreResult<()> {
+    pub async fn rollback_impl(&self, tx: &mut SqliteTxHandle) -> CoreResult<()> {
+        // P2 F11：rollback 成功后置 active=false——防止二次 rollback/execute_in_tx
+        // 以自动提交模式静默运行。commit 失败路径不置 false（P1-2：commit 失败后
+        // rollback 仍须成功——事务在 SQL 层仍然活跃）。
+        if !tx.active {
+            return Err(CoreError::TransactionNotFound(
+                "transaction already committed or rolled back".into(),
+            ));
+        }
         let conn = Arc::clone(&self.conn);
-        tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || -> CoreResult<()> {
             let guard = conn.lock();
             guard
                 .execute_batch("ROLLBACK")
@@ -277,7 +370,9 @@ impl SqliteConn {
             Ok(())
         })
         .await
-        .map_err(|e| CoreError::Internal(format!("sqlite task join: {e}")))?
+        .map_err(|e| CoreError::Internal(format!("sqlite task join: {e}")))??;
+        tx.active = false;
+        Ok(())
     }
 }
 
@@ -364,18 +459,18 @@ impl SqlDriver for SqliteConn {
         self.execute_in_tx_impl(h, sql, params).await
     }
 
-    async fn commit(&self, tx: Box<dyn Any + Send>) -> CoreResult<()> {
-        let mut h = tx
-            .downcast::<SqliteTxHandle>()
-            .map_err(|_| CoreError::Internal("tx handle downcast failed".into()))?;
-        self.commit_impl(&mut h).await
+    async fn commit(&self, tx: &mut Box<dyn Any + Send>) -> CoreResult<()> {
+        let h = tx
+            .downcast_mut::<SqliteTxHandle>()
+            .ok_or_else(|| CoreError::Internal("tx handle downcast failed".into()))?;
+        self.commit_impl(h).await
     }
 
-    async fn rollback(&self, tx: Box<dyn Any + Send>) -> CoreResult<()> {
-        let mut h = tx
-            .downcast::<SqliteTxHandle>()
-            .map_err(|_| CoreError::Internal("tx handle downcast failed".into()))?;
-        self.rollback_impl(&mut h).await
+    async fn rollback(&self, tx: &mut Box<dyn Any + Send>) -> CoreResult<()> {
+        let h = tx
+            .downcast_mut::<SqliteTxHandle>()
+            .ok_or_else(|| CoreError::Internal("tx handle downcast failed".into()))?;
+        self.rollback_impl(h).await
     }
 
     async fn execute(&self, sql: &str, params: &[Value]) -> CoreResult<QueryResult> {
@@ -905,6 +1000,28 @@ mod tests {
             let res = polydb_rt::block_on(sql_driver.execute(sql, &[])).unwrap();
             assert_eq!(res.rows[0][0], Value::Integer(1), "sql: {sql}");
         }
+    }
+
+    #[test]
+    fn regexp_udf_rejects_invalid_utf8() {
+        let conn = SqliteConn::open(":memory:").unwrap();
+        let sql_driver: &dyn SqlDriver = conn.as_sql().unwrap();
+        // X'FF' 是单字节 BLOB（0xFF 非法 UTF-8）。此前 from_utf8_lossy
+        // 会静默替换为 U+FFFD，正则匹配结果被篡改而用户无法察觉。
+        // 修复后应显式报错。pattern 侧和 text 侧都要测。
+        for sql in ["SELECT 'hello' REGEXP X'FF'", "SELECT X'FF' REGEXP '.'"] {
+            assert!(
+                polydb_rt::block_on(sql_driver.execute(sql, &[])).is_err(),
+                "sql: {sql} should error on invalid UTF-8"
+            );
+        }
+        // 合法 UTF-8 的 BLOB 仍应正常工作：X'68' 是 'h'，应匹配 'hello'。
+        let res = polydb_rt::block_on(sql_driver.execute(
+            "SELECT CASE WHEN 'hello' REGEXP X'68' THEN 1 ELSE 0 END",
+            &[],
+        ))
+        .unwrap();
+        assert_eq!(res.rows[0][0], Value::Integer(1));
     }
 
     #[test]

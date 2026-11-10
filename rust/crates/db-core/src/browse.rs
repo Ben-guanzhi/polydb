@@ -206,6 +206,7 @@ fn value_to_text(v: &Value) -> Option<String> {
     Some(match v {
         Value::String(s) => s.clone(),
         Value::Integer(i) => i.to_string(),
+        Value::U64(u) => u.to_string(),
         Value::Float(f) => f.to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Null | Value::Array(_) | Value::Object(_) => return None,
@@ -261,11 +262,24 @@ pub fn glob_quote_text(s: &str) -> String {
 
 /// LIKE 家族条件：同一份值的两种模式形态 + 是否取反 + 是否带 ESCAPE 子句。
 /// SQLite 强制区分大小写时走 `glob`，其余方言走 `like`——两套转义符互不通用。
+/// `raw`/`wrap` 记录包裹类 op 的未转义值与通配符形态：MSSQL 的 LIKE 没有
+/// ESCAPE 子句（见 `render_like`），必须据此用方括号字符类重算模式。
 struct TextCond {
     like: String,
     glob: String,
     neg: bool,
     escaped: bool,
+    raw: String,
+    wrap: LikeWrap,
+}
+
+/// 包裹类 op 的通配符形态：contains 两侧加 %，starts/ends 单侧加。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LikeWrap {
+    None,
+    Contains,
+    StartsWith,
+    EndsWith,
 }
 
 /// 由 op 与值构造 [`TextCond`]。`like`/`not_like` 原样透传（既有语义不变），
@@ -282,30 +296,40 @@ fn text_cond(op: polydb_protocol::FilterOperator, v: &Value) -> CoreResult<TextC
             glob: like_pattern_to_glob(&raw),
             neg: false,
             escaped: false,
+            raw,
+            wrap: LikeWrap::None,
         },
         Op::NotLike => TextCond {
             like: raw.clone(),
             glob: like_pattern_to_glob(&raw),
             neg: true,
             escaped: false,
+            raw,
+            wrap: LikeWrap::None,
         },
         Op::Contains => TextCond {
             like: format!("%{e}%"),
             glob: format!("*{g}*"),
             neg: false,
             escaped: true,
+            raw,
+            wrap: LikeWrap::Contains,
         },
         Op::StartsWith => TextCond {
             like: format!("{e}%"),
             glob: format!("{g}*"),
             neg: false,
             escaped: true,
+            raw,
+            wrap: LikeWrap::StartsWith,
         },
         Op::EndsWith => TextCond {
             like: format!("%{e}"),
             glob: format!("*{g}"),
             neg: false,
             escaped: true,
+            raw,
+            wrap: LikeWrap::EndsWith,
         },
         _ => return Err(invalid_param("not a like-family op")),
     })
@@ -346,10 +370,18 @@ fn render_like(
             Value::String(tc.glob.clone()),
         );
     }
-    let esc_clause = if tc.escaped {
+    // T-SQL 的 LIKE 没有 ESCAPE 子句，反斜杠也不是转义符：包裹类 op 用方括号
+    // 字符类重算模式，且绝不拼 ESCAPE（否则整条语句被 SQL Server 判为语法
+    // 错误，过滤条件静默失效）。
+    let esc_clause = if tc.escaped && d.flavor != BrowseFlavor::MsSql {
         format!(" ESCAPE '{LIKE_ESCAPE}'")
     } else {
         String::new()
+    };
+    let pattern = if tc.escaped && d.flavor == BrowseFlavor::MsSql {
+        mssql_like_pattern(&tc.raw, tc.wrap)
+    } else {
+        tc.like.clone()
     };
     let sql = match (d.flavor, cs) {
         (BrowseFlavor::Pg, Some(false)) => {
@@ -367,7 +399,28 @@ fn render_like(
         }
         (_, _) => format!("{col} {not}LIKE {p}{esc_clause}"),
     };
-    (sql, Value::String(tc.like.clone()))
+    (sql, Value::String(pattern))
+}
+
+/// 用方括号字符类把包裹类 op 的字面值转成 T-SQL LIKE 模式（[%] [_] [[] 三个
+/// 模式字符的字面形态）。T-SQL 的 LIKE 没有 ESCAPE 子句，反斜杠也不是转义符，
+/// 所以 `escape_like_text` 的 `!` 转义与 ESCAPE 子句在 SQL Server 上都是语法错误。
+fn mssql_like_pattern(raw: &str, wrap: LikeWrap) -> String {
+    let mut out = String::with_capacity(raw.len() + 8);
+    for ch in raw.chars() {
+        match ch {
+            '[' => out.push_str("[[]"),
+            '%' => out.push_str("[%]"),
+            '_' => out.push_str("[_]"),
+            _ => out.push(ch),
+        }
+    }
+    match wrap {
+        LikeWrap::Contains => format!("%{out}%"),
+        LikeWrap::StartsWith => format!("{out}%"),
+        LikeWrap::EndsWith => format!("%{out}"),
+        LikeWrap::None => out,
+    }
 }
 
 /// 渲染 `regex` 条件；无原生正则的方言显式 NOT_SUPPORTED，绝不静默降级。
@@ -594,6 +647,7 @@ pub fn count_result_to_u64(res: polydb_protocol::QueryResult) -> CoreResult<u64>
         .ok_or_else(|| CoreError::Driver("count query returned no rows".into()))?;
     match v {
         Value::Integer(i) if i >= 0 => Ok(i as u64),
+        Value::U64(u) => Ok(u),
         Value::Float(f) if f >= 0.0 => Ok(f as u64),
         Value::String(s) => s
             .trim()
@@ -696,6 +750,31 @@ mod tests {
             r#""x" LIKE :1 ESCAPE '!'"#,
             s("%a!!b"),
         );
+        // T-SQL 的 LIKE 没有 ESCAPE 子句，反斜杠也不是转义符：包裹类 op 用
+        // 方括号字符类重转义，且绝不拼 ESCAPE。
+        one(
+            DIALECT_MSSQL,
+            cond("x", Op::Contains, s("a%b")),
+            "[x] LIKE @P1",
+            s("%a[%]b%"),
+        );
+        one(
+            DIALECT_MSSQL,
+            with_cs(cond("x", Op::StartsWith, s("a_b")), Some(true)),
+            "[x] COLLATE Latin1_General_CS_AS LIKE @P1",
+            s("a[_]b%"),
+        );
+    }
+
+    #[test]
+    fn mssql_like_family_never_emits_escape_clause() {
+        for op in [Op::Contains, Op::StartsWith, Op::EndsWith] {
+            let (sql, _) = where_of(DIALECT_MSSQL, cond("x", op, s("a%b"))).expect("render ok");
+            assert!(
+                !sql.contains("ESCAPE"),
+                "MSSQL op {op:?} emits the invalid ESCAPE clause: {sql}"
+            );
+        }
     }
 
     #[test]
@@ -1204,6 +1283,21 @@ mod tests {
             statement_type: None,
         };
         assert_eq!(count_result_to_u64(qr).unwrap(), 99);
+    }
+
+    #[test]
+    fn count_result_from_u64() {
+        let qr = polydb_protocol::QueryResult {
+            columns: vec![],
+            rows: vec![vec![Value::U64(9_000_000_000_000_000_000)]],
+            affected_rows: 0,
+            execution_time_ms: 0.0,
+            truncated: false,
+            total_rows: None,
+            has_more: false,
+            statement_type: None,
+        };
+        assert_eq!(count_result_to_u64(qr).unwrap(), 9_000_000_000_000_000_000);
     }
 
     #[test]

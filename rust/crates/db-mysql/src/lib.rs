@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use bigdecimal::BigDecimal;
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use sqlx::mysql::{MySqlPool, MySqlPoolOptions, MySqlRow};
-use sqlx::{Column, Row, TransactionManager, TypeInfo, ValueRef};
+use sqlx::{Column, Executor, Row, Statement, TransactionManager, TypeInfo, ValueRef};
 
 use polydb_core::error_classify::{driver_error, DriverClass};
 use polydb_core::{
@@ -16,7 +16,7 @@ use polydb_core::{
     IndexType, IsolationLevel, QueryResult, ResultColumn, SchemaInfo, StatementType, TableInfo,
     TableType, Value,
 };
-use polydb_db_core::{DatabaseDriver, SqlDriver, TxMode};
+use polydb_db_core::{has_returning_clause, DatabaseDriver, SqlDriver, TxMode};
 
 pub struct MySqlConn {
     pool: MySqlPool,
@@ -80,9 +80,23 @@ impl MySqlConn {
             Value::Null => q.bind(Option::<i64>::None),
             Value::Bool(b) => q.bind(*b),
             Value::Integer(i) => q.bind(*i),
+            Value::U64(u) => {
+                // sqlx MySQL 原生支持 u64（BIGINT UNSIGNED），但为与
+                // SQLite/Oracle/MSSQL 一致——这些引擎的整数是 i64——
+                // ≤ i64::MAX 绑为 i64，> i64::MAX 绑为 f64。
+                if *u <= i64::MAX as u64 {
+                    q.bind(*u as i64)
+                } else {
+                    q.bind(*u as f64)
+                }
+            }
             Value::Float(f) => q.bind(*f),
             Value::String(s) => q.bind(s.clone()),
-            _ => q.bind(format!("{v:?}")),
+            // Array/Object（含 $blob Object）跨线协议统一为 JSON 文本——与 Go
+            // 侧 ValueToDriver 的 string(v.Raw()) 对齐。此前用 Debug repr
+            // （format!("{v:?}")，形如 Object {"$blob": …}），与 JSON 同形不同
+            // 义，且与其他引擎（SQLite/Oracle 同为 JSON 文本、MSSQL 绑 0）漂移。
+            Value::Array(_) | Value::Object(_) => q.bind(json_text_param(v)),
         }
     }
 
@@ -98,6 +112,20 @@ impl MySqlConn {
         if let Ok(v) = row.try_get::<i64, _>(i) {
             return Value::Integer(v);
         }
+        // BIGINT UNSIGNED（u64）：sqlx 的 i64 兼容检查明确排除 UNSIGNED flag
+        // （sqlx-mysql types/int.rs:int_compatible 的 `&& !ty.flags.contains(
+        // ColumnFlags::UNSIGNED)`），故 try_get::<i64> 对该列必然失败；而
+        // try_get::<f64> 也失败（float.rs:real_compatible 只接受 Float|Double）。
+        // 此前整条读取链对该列全部落空，最终掉到下面的 `<LongLong>` 占位符
+        // ——用户看到的是类型名，**数据完全丢失**。
+        //
+        // Go 侧同场景走 DriverToValueTyped（go/pkg/dbcore/valueconv.go）：
+        // ParseInt 超 i64 失败 ⇒ 末尾 NewStringValue(string(b)) ⇒
+        // **精确十进制字符串**。故此处同样产出字符串形态，保持两端一致
+        // （AGENTS.md §14 红线）。
+        if let Ok(v) = row.try_get::<u64, _>(i) {
+            return unsigned_bigint_value(v);
+        }
         if let Ok(v) = row.try_get::<f64, _>(i) {
             return Value::Float(v);
         }
@@ -105,7 +133,17 @@ impl MySqlConn {
             return Value::String(v.to_string());
         }
         if let Ok(v) = row.try_get::<NaiveDateTime, _>(i) {
-            return Value::String(v.format("%Y-%m-%d %H:%M:%S").to_string());
+            // RFC3339Nano —— 与 Go 侧同形（PD-20，2026-11-10）。
+            //
+            // 旧的 "%Y-%m-%d %H:%M:%S" 是 Rust 侧独有的形态。sqlx 的
+            // MySQL NaiveDateTime 注释明写「assumes the connection's
+            // `time_zone` is set to `+00:00` (UTC)」
+            // （sqlx-mysql-0.8.6 src/types/chrono.rs:23），故此处
+            // and_utc() 断言的 UTC 与驱动假设一致，不是编造。
+            //
+            // 权威侧依据见 WORKSPACE §132：元数据时间两端本就是 RFC3339，
+            // spec 的 format:date-time 亦同源；数据列跟元数据走。
+            return Value::String(v.and_utc().to_rfc3339());
         }
         if let Ok(v) = row.try_get::<NaiveDate, _>(i) {
             return Value::String(v.to_string());
@@ -183,7 +221,7 @@ impl MySqlConn {
         })
     }
 
-    pub async fn commit(&self, mut tx: MySqlTxHandle) -> CoreResult<()> {
+    pub async fn commit(&self, tx: &mut MySqlTxHandle) -> CoreResult<()> {
         let conn = tx.conn.as_mut().expect("tx conn present");
         sqlx::mysql::MySqlTransactionManager::commit(conn)
             .await
@@ -192,7 +230,7 @@ impl MySqlConn {
         Ok(())
     }
 
-    pub async fn rollback(&self, mut tx: MySqlTxHandle) -> CoreResult<()> {
+    pub async fn rollback(&self, tx: &mut MySqlTxHandle) -> CoreResult<()> {
         let conn = tx.conn.as_mut().expect("tx conn present");
         sqlx::mysql::MySqlTransactionManager::rollback(conn)
             .await
@@ -201,7 +239,12 @@ impl MySqlConn {
         Ok(())
     }
 
-    async fn execute_on<'e, E>(executor: E, sql: &str, params: &[Value]) -> CoreResult<QueryResult>
+    async fn execute_on<'e, E>(
+        executor: E,
+        sql: &str,
+        params: &[Value],
+        describe_pool: Option<&sqlx::MySqlPool>,
+    ) -> CoreResult<QueryResult>
     where
         E: sqlx::Executor<'e, Database = sqlx::MySql>,
     {
@@ -212,7 +255,10 @@ impl MySqlConn {
             q = Self::bind_value(q, v);
         }
 
-        if stmt_type == StatementType::Select || stmt_type == StatementType::Other {
+        let wants_rows = stmt_type == StatementType::Select
+            || stmt_type == StatementType::Other
+            || has_returning_clause(sql);
+        if wants_rows {
             // 物化上限（polydb_db_core::row_cap，behavior.md §5）：流式 fetch
             // 到上限即停——fetch_all 会先把整个结果集拉进内存，大表在 server
             // 层截断之前就 OOM。truncated/has_more 与 apply_max_rows 同义。
@@ -228,7 +274,27 @@ impl MySqlConn {
                 }
                 rows.push(row);
             }
-            let columns = Self::columns_of(&rows);
+            let mut columns = Self::columns_of(&rows);
+            if columns.is_empty() {
+                // A zero-row result still carries its column list (see the PG
+                // driver): only the pool path can prepare-after-fetch, since
+                // `fetch` consumes the executor.
+                if let Some(pool) = describe_pool {
+                    if let Ok(stmt) = pool.prepare(sql).await {
+                        columns = stmt
+                            .columns()
+                            .iter()
+                            .map(|c| ResultColumn {
+                                name: c.name().to_string(),
+                                table: None,
+                                data_type: c.type_info().name().to_string(),
+                                generic_type: None,
+                                nullable: Some(true),
+                            })
+                            .collect();
+                    }
+                }
+            }
             let data = rows
                 .iter()
                 .map(|r| (0..r.len()).map(|i| Self::my_value(r, i)).collect())
@@ -268,7 +334,7 @@ impl MySqlConn {
         params: &[Value],
     ) -> CoreResult<QueryResult> {
         let conn = tx.conn.as_mut().expect("tx conn present");
-        Self::execute_on(&mut **conn, sql, params).await
+        Self::execute_on(&mut **conn, sql, params, None).await
     }
 }
 
@@ -356,22 +422,22 @@ impl SqlDriver for MySqlConn {
         MySqlConn::execute_in_tx(self, h, sql, params).await
     }
 
-    async fn commit(&self, tx: Box<dyn Any + Send>) -> CoreResult<()> {
+    async fn commit(&self, tx: &mut Box<dyn Any + Send>) -> CoreResult<()> {
         let h = tx
-            .downcast::<MySqlTxHandle>()
-            .map_err(|_| CoreError::Internal("tx handle downcast failed".into()))?;
-        MySqlConn::commit(self, *h).await
+            .downcast_mut::<MySqlTxHandle>()
+            .ok_or_else(|| CoreError::Internal("tx handle downcast failed".into()))?;
+        MySqlConn::commit(self, h).await
     }
 
-    async fn rollback(&self, tx: Box<dyn Any + Send>) -> CoreResult<()> {
+    async fn rollback(&self, tx: &mut Box<dyn Any + Send>) -> CoreResult<()> {
         let h = tx
-            .downcast::<MySqlTxHandle>()
-            .map_err(|_| CoreError::Internal("tx handle downcast failed".into()))?;
-        MySqlConn::rollback(self, *h).await
+            .downcast_mut::<MySqlTxHandle>()
+            .ok_or_else(|| CoreError::Internal("tx handle downcast failed".into()))?;
+        MySqlConn::rollback(self, h).await
     }
 
     async fn execute(&self, sql: &str, params: &[Value]) -> CoreResult<QueryResult> {
-        Self::execute_on(&self.pool, sql, params).await
+        Self::execute_on(&self.pool, sql, params, Some(&self.pool)).await
     }
 
     async fn list_schemas(&self) -> CoreResult<Vec<SchemaInfo>> {
@@ -608,4 +674,176 @@ fn db_err(e: &sqlx::Error, what: &str) -> CoreError {
         return driver_error(db.code().as_deref(), None, kind, &text);
     }
     driver_error(None, None, None, &text)
+}
+
+/// Array/Object（含 $blob Object）参数的绑定形态：跨线协议统一为 JSON 文本——
+/// 与 Go 侧 ValueToDriver 的 string(v.Raw()) 对齐。此前用 Debug repr
+/// （format!("{v:?}")，形如 Object {"$blob": …}），与 JSON 同形不同义。
+/// NaN/Inf 先经 polydb_db_core::value_to_json_text 替换为字符串，避免
+/// serde_json 静默转 null（P2-3：非 SQLite 驱动此前缺此 sanitize）。
+/// 独立成纯函数供口径测试下探。
+fn json_text_param(v: &Value) -> String {
+    polydb_db_core::value_to_json_text(v)
+}
+
+/// unsigned_bigint_value 把 MySQL `BIGINT UNSIGNED` 的 u64 值转成协议 Value。
+///
+/// 形态纪律（PD-17，2026-11-09）：**精确十进制字符串**，与 Go 侧
+/// `DriverToValueTyped`（`go/pkg/dbcore/valueconv.go`）对齐——Go 侧对
+/// 超 i64 的 BIGINT UNSIGNED，`ParseInt` 失败后落到末尾的
+/// `NewStringValue(string(b))`，即字符串形态。
+///
+/// 为什么不返回 `Value::U64`：`Value::U64` 在 wire 上是**数字**，而 Go 侧
+/// 同一场景发的是**字符串**；两端 wire 形态必须一致（AGENTS.md §14 双实现
+/// 一致性红线），故此处用字符串。
+///
+/// 为什么不返回 `Value::Float`：f64 只有 53 位尾数，`u64::MAX`
+/// （18446744073709551615）会被舍入成 18446744073709552000——静默丢精度。
+fn unsigned_bigint_value(v: u64) -> Value {
+    Value::String(v.to_string())
+}
+
+#[cfg(test)]
+mod bind_contract_tests {
+    use super::*;
+
+    /// P1-4 口径钉子：Array 绑 JSON 文本（[1,"x"]），不是 Debug repr
+    /// （[Integer(1), String("x")]）；$blob Object 同样以 JSON 文本走。
+    #[test]
+    fn array_and_object_bind_as_json_text() {
+        let arr = Value::Array(vec![Value::Integer(1), Value::String("x".into())]);
+        assert_eq!(json_text_param(&arr), r#"[1,"x"]"#);
+        let blob = polydb_db_core::blob_value(&[0u8, 1, 2]);
+        let s = json_text_param(&blob);
+        assert!(
+            s.starts_with('{') && s.contains("$blob"),
+            "blob bind = {s:?}"
+        );
+        // Debug repr 的特征串不得出现：那是修复前的漂移形态。
+        assert!(
+            !json_text_param(&arr).contains("Integer"),
+            "debug repr leaked"
+        );
+    }
+
+    /// P2-3 回归：Array/Object 中的 NaN/Inf 必须序列化为字符串值，
+    /// 不能被 serde_json 静默转为 null（数据丢失）。
+    #[test]
+    fn array_with_nan_inf_serializes_as_string() {
+        let arr = Value::Array(vec![
+            Value::Float(1.5),
+            Value::Float(f64::NAN),
+            Value::Float(f64::INFINITY),
+        ]);
+        let json = json_text_param(&arr);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed[0], 1.5);
+        assert_eq!(
+            parsed[1], "NaN",
+            "NaN must be preserved as string, not null"
+        );
+        assert_eq!(parsed[2], "Infinity");
+    }
+
+    #[test]
+    fn object_with_nan_serializes_as_string() {
+        let mut map = std::collections::HashMap::new();
+        map.insert("v".to_string(), Value::Float(f64::NAN));
+        let json = json_text_param(&Value::Object(map));
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["v"], "NaN");
+    }
+
+    /// PD-17 回归：`BIGINT UNSIGNED` 超 i64::MAX 的值必须以**精确十进制
+    /// 字符串**产出，不得丢精度、不得落回类型名占位符。
+    ///
+    /// 缺陷背景：sqlx 的 i64 兼容检查排除 UNSIGNED flag
+    /// （sqlx-mysql types/int.rs:int_compatible 的
+    /// `&& !ty.flags.contains(ColumnFlags::UNSIGNED)`），try_get::<f64>
+    /// 又只接受 Float|Double（float.rs:real_compatible）——整条读取链对
+    /// 该列全部落空，旧实现最终返回 `Value::String("<LongLong>")`
+    /// （类型名占位符，**数据完全丢失**）。
+    ///
+    /// Go 侧同场景产出精确十进制字符串（DriverToValueTyped ⇒
+    /// NewStringValue），故 Rust 侧必须一致（AGENTS.md §14 红线）。
+    ///
+    /// 本用例锁定**产出形态**（不依赖真实 MySQL：本机无 MySQL 服务，
+    /// 端到端由 test/contract 的 MySQL 场景覆盖，无服务时 soft-skip）。
+    #[test]
+    fn bigint_unsigned_overflow_keeps_exact_decimal_text() {
+        // u64::MAX —— 超出 i64::MAX，且远超 f64 的 53 位尾数精度。
+        let got = unsigned_bigint_value(u64::MAX);
+        assert_eq!(
+            got,
+            Value::String("18446744073709551615".to_string()),
+            "BIGINT UNSIGNED 超 i64 必须保留精确十进制文本"
+        );
+
+        // 不得是浮点（会丢低位）：u64::MAX 转 f64 得 18446744073709552000。
+        assert_ne!(
+            got,
+            Value::Float(u64::MAX as f64),
+            "不得用 f64 承载超 i64 的整数（静默丢精度）"
+        );
+
+        // 不得是类型名占位符（旧实现返回 "<LongLong>"）。
+        let s = match &got {
+            Value::String(s) => s.clone(),
+            other => panic!("expected String, got {other:?}"),
+        };
+        assert!(
+            !s.starts_with('<') || !s.ends_with('>'),
+            "不得落回类型名占位符：{s}"
+        );
+
+        // i64::MAX + 1（恰好多 1，f64 已无法区分）也要精确。
+        let just_over = i64::MAX as u64 + 1;
+        assert_eq!(
+            unsigned_bigint_value(just_over),
+            Value::String("9223372036854775808".to_string()),
+            "i64::MAX+1 必须精确（f64 在此已丢精度）"
+        );
+
+        // 范围内的值同样走字符串形态（与 Go 侧对 BIGINT UNSIGNED 的
+        // 处理一致：Go 侧 ParseInt 成功 ⇒ NewIntValue 数字形态；
+        // 但 Rust 侧 u64 分支只在 UNSIGNED 列命中，范围内值会被上面的
+        // i64 分支先接住——故此处只断言超界值）。
+    }
+
+    /// PD-17 回归（读取链）：`my_value` 的读取链必须**真的**含 u64 分支。
+    ///
+    /// 上一条只测纯函数，把调用点删掉它仍会绿——变异证明实测如此。故此处
+    /// 直接钉住读取链的源码形态：u64 分支必须在 i64 分支之后、f64 分支
+    /// 之前，且其返回值必须经 `unsigned_bigint_value`（字符串形态）。
+    #[test]
+    fn my_value_read_chain_has_u64_branch() {
+        let src = include_str!("lib.rs");
+        let branch = "if let Ok(v) = row.try_get::<u64, _>(i) {\n            return unsigned_bigint_value(v);\n        }";
+        let pos = src
+            .find(branch)
+            .unwrap_or_else(|| panic!("读取链缺少 u64 分支（或未走 unsigned_bigint_value）"));
+
+        // 顺序：i64 分支 < u64 分支 < f64 分支。
+        // （顺序有意义：u64 必须在 f64 之前，否则超界值会被 f64 先抢走。）
+        let i64_pos = src.find("try_get::<i64, _>").expect("缺少 i64 分支");
+        let f64_pos = src.find("try_get::<f64, _>").expect("缺少 f64 分支");
+        assert!(
+            i64_pos < pos,
+            "u64 分支必须排在 i64 分支之后（否则普通整数会被 u64 抢走）"
+        );
+        assert!(
+            pos < f64_pos,
+            "u64 分支必须排在 f64 分支之前（否则超界值会被 f64 先抢走并丢精度）"
+        );
+
+        // 兜底占位符仍在（未匹配任何类型时的最后手段）——但 u64 分支必须
+        // 在它之前，避免超界整数落到占位符。
+        let placeholder = src
+            .find("format!(\"<{}>\", raw.type_info().name())")
+            .expect("缺少类型名占位符兜底");
+        assert!(
+            pos < placeholder,
+            "u64 分支必须排在类型名占位符之前（否则超界整数落回占位符，数据全丢）"
+        );
+    }
 }

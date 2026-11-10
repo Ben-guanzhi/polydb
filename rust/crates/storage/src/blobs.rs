@@ -40,8 +40,14 @@ impl BlobStore {
         fs::create_dir_all(&self.dir)
             .map_err(|e| CoreError::Storage(format!("create blob dir: {e}")))?;
         let id = uuid::Uuid::new_v4().to_string();
-        fs::write(self.dir.join(&id), data)
-            .map_err(|e| CoreError::Storage(format!("write blob: {e}")))?;
+        // 原子写：先写 .tmp 再 fs::rename。此前直接 fs::write 目标文件，
+        // 崩溃/断电会留下截断文件——size() 报截断长度，read_range 在 EOF
+        // 处 read_exact 失败，引用 $polydb_blob:<uuid> 永久不可用且无自愈。
+        let tmp = self.dir.join(format!("{id}.tmp"));
+        fs::write(&tmp, data)
+            .map_err(|e| CoreError::Storage(format!("write blob tmp: {e}")))?;
+        fs::rename(&tmp, self.dir.join(&id))
+            .map_err(|e| CoreError::Storage(format!("rename blob: {e}")))?;
         self.sweep();
         Ok(format!("{BLOB_REF_PREFIX}{id}"))
     }
@@ -53,7 +59,17 @@ impl BlobStore {
     }
 
     /// 读取文件区间 `[start, start+length)`；长度由调用方按 `size` 钳位。
+    /// F9 回归：此前直接 `vec![0u8; length]` 无界分配，调用方传大 length
+    /// 即 OOM。现在先 `size()` 校验 `start <= size && start+length <= size`，
+    /// 越界返回 INVALID_PARAM。P2-4 回归：`start + length` 在 u64 溢出时
+    /// 回绕为小值绕过检查——改用 `saturating_add`。
     pub fn read_range(&self, id: &str, start: u64, length: u64) -> CoreResult<Vec<u8>> {
+        let file_size = self.size(id)?;
+        if start > file_size || start.saturating_add(length) > file_size {
+            return Err(CoreError::Storage(format!(
+                "blob range [{start}, {length}) exceeds file size {file_size}"
+            )));
+        }
         let mut f = fs::File::open(self.path(id)).map_err(|e| self.not_found(id, e))?;
         f.seek(SeekFrom::Start(start))
             .map_err(|e| CoreError::Storage(format!("seek blob: {e}")))?;
@@ -160,6 +176,29 @@ mod tests {
         ));
     }
 
+    /// P2-4 回归：`start + length` 在 u64 溢出时回绕为小值绕过越界检查。
+    /// 旧写法 `start + length > file_size` 在 start=u64::MAX、length=1 时
+    /// 回绕为 0，检查通过 → `vec![0u8; 1]` + `seek(Start(u64::MAX))` 读越界。
+    /// 改用 `saturating_add` 后溢出值饱和为 u64::MAX，正确拒绝。
+    #[test]
+    fn read_range_u64_overflow_is_rejected() {
+        let (_g, store) = temp_store();
+        let ref_id = store.put_blob(&[1, 2, 3]).unwrap();
+        let id = ref_id.trim_start_matches(BLOB_REF_PREFIX).to_string();
+        // start + length 溢出：start=u64::MAX 回绕为 0，旧写法会绕过检查。
+        let err = store.read_range(&id, u64::MAX, 1).unwrap_err();
+        assert!(
+            matches!(err, CoreError::Storage(_)),
+            "overflow must be rejected with Storage error, got {err:?}"
+        );
+        // start 本身合法但 start+length 溢出也应拒绝。
+        let err2 = store.read_range(&id, 2, u64::MAX).unwrap_err();
+        assert!(
+            matches!(err2, CoreError::Storage(_)),
+            "2 + u64::MAX overflow must be rejected, got {err2:?}"
+        );
+    }
+
     #[test]
     fn sweep_removes_expired_keeps_fresh() {
         let (_g, store) = temp_store();
@@ -190,5 +229,24 @@ mod tests {
         let (_g, store) = temp_store();
         store.sweep(); // 目录未建：空操作不报错
         assert!(!store.dir().exists());
+    }
+
+    // F8 回归：put_blob 必须原子写（.tmp + rename），成功后不留 .tmp 文件。
+    // 此前直接 fs::write 目标文件，崩溃留下截断 blob——size() 报截断长度，
+    // 引用 $polydb_blob:<uuid> 永久不可用。
+    #[test]
+    fn put_blob_leaves_no_tmp_file() {
+        let (_g, store) = temp_store();
+        let ref_id = store.put_blob(b"hello world").unwrap();
+        let id = ref_id.trim_start_matches(BLOB_REF_PREFIX);
+
+        // 目标文件存在且内容完整
+        assert_eq!(store.get(id).unwrap(), b"hello world");
+
+        // 无 .tmp 残留
+        let leftover = fs::read_dir(store.dir()).unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().ends_with(".tmp"));
+        assert!(!leftover, "put_blob 成功后不应留下 .tmp 文件");
     }
 }

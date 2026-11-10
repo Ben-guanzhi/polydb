@@ -785,6 +785,7 @@ fn cell_of(v: &Value) -> String {
 fn cell_int(row: &[Value], i: usize) -> i64 {
     match row.get(i) {
         Some(Value::Integer(n)) => *n,
+        Some(Value::U64(n)) => *n as i64,
         Some(Value::Float(f)) => *f as i64,
         _ => cell_text(row, i).trim().parse().unwrap_or(0),
     }

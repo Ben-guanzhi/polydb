@@ -23,7 +23,7 @@ use polydb_core::{
     IndexType, IsolationLevel, QueryResult, ResultColumn, SchemaInfo, StatementType, TableInfo,
     TableType, Value,
 };
-use polydb_db_core::{DatabaseDriver, SqlDriver, TxMode};
+use polydb_db_core::{has_returning_clause, DatabaseDriver, SqlDriver, TxMode};
 
 // tiberius 0.12 无内置连接/查询超时；不可达主机（防火墙丢包）会让 TCP 握手
 // 挂到系统超时（本机实测 ~4s/地址，tokio 会串行尝试多个地址）。所有 block_on
@@ -51,44 +51,53 @@ impl ToSql for SqlNull {
 /// Debug 输出（"Int4"、"NVarchar"）不是 SQL 拼写，此前直接塞进 data_type。
 /// 变长 "n" 类型的长度信息经 tiberius 的 From 折叠成定长变体（如 Intn(4)
 /// 已是 Int4），无法区分的按最常见拼写给出。
+/// 列类型名（**大写**）——与 Go 侧 go-mssqldb 的 `makeGoLangTypeName`
+/// （types.go:1359 起）逐字一致。
+///
+/// 大小写是该驱动的**规范拼写**：go-mssqldb 的文档明写 "Type names should be
+/// uppercase"（types.go:1360-1362，例子 "VARCHAR"/"NVARCHAR"/"INT"/
+/// "BIGINT"）。本函数此前给**小写**（"int"/"nvarchar"/"bigint"），
+/// 于是两端对同一列给出不同拼写——契约测试为此对 net 场景用
+/// `onlyColumnNames` 把列类型整个裁掉（PD-22，2026-11-10 收窄）。
 fn column_type_name(t: tiberius::ColumnType) -> &'static str {
     use tiberius::ColumnType as T;
     match t {
         T::Null => "",
-        T::Bit | T::Bitn => "bit",
-        T::Int1 => "tinyint",
-        T::Int2 => "smallint",
-        T::Int4 => "int",
-        T::Int8 => "bigint",
+        T::Bit | T::Bitn => "BIT",
+        T::Int1 => "TINYINT",
+        T::Int2 => "SMALLINT",
+        T::Int4 => "INT",
+        T::Int8 => "BIGINT",
         // 变长骨架在长度不落在 1/2/4/8 时保留原样（tiberius 的 From 折叠规则），
-        // 按最常见拼写兜底。
-        T::Intn => "int",
-        T::Datetime4 => "smalldatetime",
-        T::Datetime => "datetime",
-        T::Datetimen => "datetime",
-        T::Datetime2 => "datetime2",
-        T::Daten => "date",
-        T::Timen => "time",
-        T::DatetimeOffsetn => "datetimeoffset",
-        T::Float4 => "real",
-        T::Float8 | T::Floatn => "float",
-        T::Money => "money",
-        T::Money4 => "smallmoney",
-        T::Guid => "uniqueidentifier",
-        T::Decimaln => "decimal",
-        T::Numericn => "numeric",
-        T::BigVarBin => "varbinary",
-        T::BigBinary => "binary",
-        T::BigVarChar => "varchar",
-        T::BigChar => "char",
-        T::NVarchar => "nvarchar",
-        T::NChar => "nchar",
-        T::Xml => "xml",
-        T::Udt => "udt",
-        T::Text => "text",
-        T::Image => "image",
-        T::NText => "ntext",
-        T::SSVariant => "sql_variant",
+        // 按最常见拼写兜底（Go 侧 typeIntN 亦按 size 分派到 1/2/4/8 族）。
+        T::Intn => "INT",
+        T::Datetime4 => "SMALLDATETIME",
+        T::Datetime => "DATETIME",
+        T::Datetimen => "DATETIME",
+        T::Datetime2 => "DATETIME2",
+        T::Daten => "DATE",
+        T::Timen => "TIME",
+        T::DatetimeOffsetn => "DATETIMEOFFSET",
+        T::Float4 => "REAL",
+        T::Float8 | T::Floatn => "FLOAT",
+        T::Money => "MONEY",
+        T::Money4 => "SMALLMONEY",
+        T::Guid => "UNIQUEIDENTIFIER",
+        // Go 侧 typeDecimalN 与 typeNumericN 都返回 "DECIMAL"（types.go
+        // 的 case typeDecimalN, typeNumericN），故此处同样不区分二者。
+        T::Decimaln | T::Numericn => "DECIMAL",
+        T::BigVarBin => "VARBINARY",
+        T::BigBinary => "BINARY",
+        T::BigVarChar => "VARCHAR",
+        T::BigChar => "CHAR",
+        T::NVarchar => "NVARCHAR",
+        T::NChar => "NCHAR",
+        T::Xml => "XML",
+        T::Udt => "UDT",
+        T::Text => "TEXT",
+        T::Image => "IMAGE",
+        T::NText => "NTEXT",
+        T::SSVariant => "SQL_VARIANT",
     }
 }
 
@@ -174,10 +183,27 @@ impl MssqlConn {
         })
     }
 
+    /// Array/Object（含 $blob Object）的绑定形态：跨线协议统一为 JSON 文本——
+    /// 与 Go 侧 ValueToDriver 的 string(v.Raw()) 对齐。此前兜底成 0i64 会把
+    /// JSON/blob 列的数据静默写成 0。NaN/Inf 先经 polydb_db_core::value_to_json_text
+    /// 替换为字符串，避免 serde_json 静默转 null（P2-3）。
+    /// 独立成纯函数供口径测试下探。
+    fn json_text_param(val: &Value) -> String {
+        polydb_db_core::value_to_json_text(val)
+    }
+
     fn tsql_params(v: &[Value]) -> Vec<Box<dyn ToSql>> {
         v.iter()
             .map(|val| match val {
                 Value::Integer(i) => Box::new(*i) as Box<dyn ToSql>,
+                Value::U64(u) => {
+                    // MSSQL BIGINT 是 i64——与 SQLite/Oracle 相同的限制。
+                    if *u <= i64::MAX as u64 {
+                        Box::new(*u as i64) as Box<dyn ToSql>
+                    } else {
+                        Box::new(*u as f64) as Box<dyn ToSql>
+                    }
+                }
                 Value::Float(f) => Box::new(*f) as Box<dyn ToSql>,
                 Value::Bool(b) => Box::new(*b) as Box<dyn ToSql>,
                 Value::String(s) => Box::new(s.clone()) as Box<dyn ToSql>,
@@ -185,7 +211,9 @@ impl MssqlConn {
                 // 承载，None 即 SQL NULL；此前兜底成 0i64 会把 NULL 过滤值
                 // 静默变成 0。
                 Value::Null => Box::new(SqlNull) as Box<dyn ToSql>,
-                _ => Box::new(0i64) as Box<dyn ToSql>,
+                Value::Array(_) | Value::Object(_) => {
+                    Box::new(Self::json_text_param(val)) as Box<dyn ToSql>
+                }
             })
             .collect()
     }
@@ -220,11 +248,36 @@ impl MssqlConn {
         if let Ok(Some(v)) = row.try_get::<Decimal, usize>(i) {
             return Value::String(v.to_string());
         }
+        // UNIQUEIDENTIFIER：tiberius 的 FromSql 有 Uuid 实现
+        // （from_sql.rs:67 `Uuid: ColumnData::Guid(val) => ...`），但此前读取链
+        // 没有该分支，且 `&[u8]`/`Vec<u8>` 只匹配 ColumnData::Binary——Guid 列
+        // 整条链落空，最终掉到下面的 Value::Null，**数据丢失**。
+        //
+        // 产出标准 UUID 小写文本（PD-18），与 Go 侧修复后的形态一致：
+        // go-mssqldb 解码 GUID 列给 16 字节 []byte（types.go:decodeGuid），
+        // Go 旧链把它当 Blob/普通字节串输出——两端都不曾给用户可读的
+        // UUID 文本，本分支按 spec 的字符串语义统一为标准文本形态。
+        if let Ok(Some(v)) = row.try_get::<tiberius::Uuid, usize>(i) {
+            return Value::String(v.to_string());
+        }
         if let Ok(Some(v)) = row.try_get::<NaiveDateTime, usize>(i) {
-            return Value::String(v.format("%Y-%m-%d %H:%M:%S").to_string());
+            // RFC3339Nano —— 与 Go 侧同形（PD-20，2026-11-10）。
+            //
+            // MSSQL 的 datetime 是**无时区挂钟**，哪端都没带时区信息：
+            // tiberius 给裸 NaiveDateTime（tiberius-0.12.3
+            // src/tds/time/chrono.rs:55）；Go 侧 go-mssqldb 用
+            // `encoding.GetTimezone()` 解释同一挂钟
+            // （types.go:354/396/652），而该值在**未显式设置时默认 UTC**
+            // （go-mssqldb timezone.go getTimezone 的兜底 `time.UTC`）。
+            // polydb 两端连接都没设 Timezone（Go 侧连接串无 Timezone 参数，
+            // Rust 侧 Config 未设），故两端都是 UTC 语义——
+            // and_utc() 断言的 UTC 与既有行为一致，不是编造。
+            //
+            // 权威侧依据见 WORKSPACE §132。
+            return Value::String(v.and_utc().to_rfc3339());
         }
         if let Ok(Some(v)) = row.try_get::<DateTime<Utc>, usize>(i) {
-            return Value::String(v.format("%Y-%m-%d %H:%M:%S").to_string());
+            return Value::String(v.to_rfc3339());
         }
         if let Ok(Some(v)) = row.try_get::<NaiveDate, usize>(i) {
             return Value::String(v.to_string());
@@ -248,13 +301,20 @@ impl MssqlConn {
         polydb_db_core::detect_statement_type(sql, Some(DatabaseKind::Mssql))
     }
 
-    fn columns_of(rows: &[Row]) -> Vec<ResultColumn> {
-        let Some(first) = rows.first() else {
-            return vec![];
-        };
-        first
-            .columns()
-            .iter()
+    fn columns_of(rows: &[Row], metadata: Option<Vec<ResultColumn>>) -> Vec<ResultColumn> {
+        // 非空结果集优先用行内列描述（与既有行为一致）；空结果集（rows 为空）
+        // 时回退到 Metadata 捕获的列——空集时它是 stream 里唯一携带列信息的
+        // item（RUST-MSSQL-EMPTY-COLUMNS 修复：此前 query_rows 跳过 Metadata，
+        // 空 SELECT 的列元数据整体丢失）。
+        if let Some(first) = rows.first() {
+            return Self::result_columns_from(first.columns());
+        }
+        metadata.unwrap_or_default()
+    }
+
+    /// tiberius 的列描述 → polydb ResultColumn。
+    fn result_columns_from(cols: &[tiberius::Column]) -> Vec<ResultColumn> {
+        cols.iter()
             .map(|c| ResultColumn {
                 name: c.name().to_string(),
                 table: None,
@@ -265,7 +325,15 @@ impl MssqlConn {
             .collect()
     }
 
-    fn query_rows(&self, sql: &str, refs: &[&dyn ToSql], what: &str) -> CoreResult<Vec<Row>> {
+    /// 结果集行 + 可选的列元数据（stream 里第一个 QueryItem::Metadata）。
+    /// Metadata 是结果集描述：TDS 协议保证它先于行数据到达；空结果集时
+    /// 它是唯一的 item。
+    fn query_rows(
+        &self,
+        sql: &str,
+        refs: &[&dyn ToSql],
+        what: &str,
+    ) -> CoreResult<(Vec<Row>, Option<Vec<ResultColumn>>)> {
         let mut client = self.client.lock();
         let stream = timed_within(
             what,
@@ -279,6 +347,7 @@ impl MssqlConn {
         // 续期：总时长不再有界，但受 cap 与行到达节奏约束，与游标语义一致。
         use futures_util::StreamExt;
         let mut rows: Vec<Row> = Vec::new();
+        let mut metadata: Option<Vec<ResultColumn>> = None;
         let mut stream = stream;
         loop {
             if rows.len() >= polydb_db_core::row_cap() {
@@ -300,12 +369,19 @@ impl MssqlConn {
                 None => break,
             };
             // tiberius 的 Item = QueryItem：Row 是数据行，Metadata（结果集
-            // 描述）跳过继续等下一项。
-            if let tiberius::QueryItem::Row(row) = item {
-                rows.push(row);
+            // 描述）此前被跳过——空结果集时它是唯一携带列信息的 item，改为
+            // 捕获首份描述（多结果集时仅取第一个，与「只显示首个结果集」
+            // 的既有语义一致）。
+            match item {
+                tiberius::QueryItem::Row(row) => rows.push(row),
+                tiberius::QueryItem::Metadata(md) => {
+                    if metadata.is_none() {
+                        metadata = Some(Self::result_columns_from(md.columns()));
+                    }
+                }
             }
         }
-        Ok(rows)
+        Ok((rows, metadata))
     }
 }
 
@@ -375,9 +451,12 @@ impl MssqlConn {
         let boxes = Self::tsql_params(params);
         let refs = Self::param_refs(&boxes);
 
-        if stmt_type == StatementType::Select || stmt_type == StatementType::Other {
-            let rows = self.query_rows(sql, &refs, "query failed")?;
-            let columns = Self::columns_of(&rows);
+        let wants_rows = stmt_type == StatementType::Select
+            || stmt_type == StatementType::Other
+            || has_returning_clause(sql);
+        if wants_rows {
+            let (rows, metadata) = self.query_rows(sql, &refs, "query failed")?;
+            let columns = Self::columns_of(&rows, metadata);
             let data = rows
                 .iter()
                 .map(|r| (0..r.len()).map(|i| Self::mssql_value(r, i)).collect())
@@ -496,18 +575,18 @@ impl SqlDriver for MssqlConn {
         MssqlConn::execute_in_tx(self, h, sql, params).await
     }
 
-    async fn commit(&self, tx: Box<dyn Any + Send>) -> CoreResult<()> {
-        let mut h = tx
-            .downcast::<MssqlTxHandle>()
-            .map_err(|_| CoreError::Internal("tx handle downcast failed".into()))?;
-        MssqlConn::commit(self, &mut h)
+    async fn commit(&self, tx: &mut Box<dyn Any + Send>) -> CoreResult<()> {
+        let h = tx
+            .downcast_mut::<MssqlTxHandle>()
+            .ok_or_else(|| CoreError::Internal("tx handle downcast failed".into()))?;
+        MssqlConn::commit(self, h)
     }
 
-    async fn rollback(&self, tx: Box<dyn Any + Send>) -> CoreResult<()> {
-        let mut h = tx
-            .downcast::<MssqlTxHandle>()
-            .map_err(|_| CoreError::Internal("tx handle downcast failed".into()))?;
-        MssqlConn::rollback(self, &mut h)
+    async fn rollback(&self, tx: &mut Box<dyn Any + Send>) -> CoreResult<()> {
+        let h = tx
+            .downcast_mut::<MssqlTxHandle>()
+            .ok_or_else(|| CoreError::Internal("tx handle downcast failed".into()))?;
+        MssqlConn::rollback(self, h)
     }
 
     async fn execute(&self, sql: &str, params: &[Value]) -> CoreResult<QueryResult> {
@@ -516,9 +595,12 @@ impl SqlDriver for MssqlConn {
         let boxes = Self::tsql_params(params);
         let refs = Self::param_refs(&boxes);
 
-        if stmt_type == StatementType::Select || stmt_type == StatementType::Other {
-            let rows = self.query_rows(sql, &refs, "query failed")?;
-            let columns = Self::columns_of(&rows);
+        let wants_rows = stmt_type == StatementType::Select
+            || stmt_type == StatementType::Other
+            || has_returning_clause(sql);
+        if wants_rows {
+            let (rows, metadata) = self.query_rows(sql, &refs, "query failed")?;
+            let columns = Self::columns_of(&rows, metadata);
             let data = rows
                 .iter()
                 .map(|r| (0..r.len()).map(|i| Self::mssql_value(r, i)).collect())
@@ -558,7 +640,7 @@ impl SqlDriver for MssqlConn {
         // 系统内置对象按精确名单排除（与 Go 内核 sqltext.SchemasQuery 对齐）：
         // db_ 前缀的 9 个固定数据库角色逐个点名，而不是 NOT LIKE 'db[_]%'——
         // 否则 db_admin 这类以 db_ 开头的用户 schema 会被误藏。
-        let rows = self.query_rows(
+        let (rows, _) = self.query_rows(
             "SELECT s.name FROM sys.schemas s \
              WHERE s.name NOT IN ('sys','INFORMATION_SCHEMA','guest',\
                'db_owner','db_accessadmin','db_securityadmin','db_ddladmin',\
@@ -582,7 +664,7 @@ impl SqlDriver for MssqlConn {
     }
 
     async fn list_tables(&self, schema: &str) -> CoreResult<Vec<TableInfo>> {
-        let rows = self.query_rows(
+        let (rows, _) = self.query_rows(
             "SELECT t.name, 'table' AS type FROM sys.tables t WHERE t.schema_id = SCHEMA_ID(@P1) \
              UNION ALL \
              SELECT v.name, 'view' FROM sys.views v WHERE v.schema_id = SCHEMA_ID(@P1) \
@@ -611,7 +693,7 @@ impl SqlDriver for MssqlConn {
     }
 
     async fn list_columns(&self, schema: &str, table: &str) -> CoreResult<Vec<ColumnInfo>> {
-        let rows = self.query_rows(
+        let (rows, _) = self.query_rows(
             "SELECT c.name, \
                     CASE WHEN t.name IN ('nvarchar','nchar','varchar','char','binary','varbinary') \
                          THEN t.name + '(' + CASE WHEN c.max_length = -1 THEN 'max' ELSE CAST(c.max_length AS varchar) END + ')' \
@@ -661,7 +743,7 @@ impl SqlDriver for MssqlConn {
             })
             .collect();
 
-        let pk_rows = self.query_rows(
+        let (pk_rows, _) = self.query_rows(
             "SELECT col.name FROM sys.indexes i \
              JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id \
              JOIN sys.columns col ON col.object_id = ic.object_id AND col.column_id = ic.column_id \
@@ -691,7 +773,7 @@ impl SqlDriver for MssqlConn {
     }
 
     async fn list_indexes(&self, schema: &str, table: &str) -> CoreResult<Vec<IndexInfo>> {
-        let rows = self.query_rows(
+        let (rows, _) = self.query_rows(
             "SELECT i.name, i.is_unique, i.is_primary_key, i.type_desc, \
                     ic.key_ordinal, col.name \
              FROM sys.indexes i \
@@ -769,7 +851,7 @@ impl SqlDriver for MssqlConn {
         schema: &str,
         table: &str,
     ) -> CoreResult<Vec<ForeignKeyInfo>> {
-        let rows = self.query_rows(
+        let (rows, _) = self.query_rows(
             "SELECT fk.name, c.name, rs.name, rt.name, rc.name \
              FROM sys.foreign_keys fk \
              JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id \
@@ -897,30 +979,136 @@ mod tests {
     use super::*;
     use tiberius::ColumnType as T;
 
-    /// Debug 输出（"Int4"）与 SQL 拼写（"int"）的分界：主要类型逐一锁定。
+    /// 列类型名是 **大写**的 SQL 拼写——与 Go 侧 go-mssqldb 的
+    /// `makeGoLangTypeName`（types.go:1359 起）逐字一致（其文档明写
+    /// "Type names should be uppercase"）。
+    ///
+    /// PD-22（2026-11-10）：此前本函数给**小写**（"int"/"nvarchar"…），
+    /// 于是两端对同一列给出不同拼写，契约测试对 net 场景只能用
+    /// `onlyColumnNames` 把列类型整个裁掉。
     #[test]
     fn column_type_names_are_sql_spellings() {
-        assert_eq!(column_type_name(T::Int4), "int");
-        assert_eq!(column_type_name(T::Int8), "bigint");
-        assert_eq!(column_type_name(T::Int1), "tinyint");
-        assert_eq!(column_type_name(T::Int2), "smallint");
-        assert_eq!(column_type_name(T::Bit), "bit");
-        assert_eq!(column_type_name(T::Bitn), "bit");
-        assert_eq!(column_type_name(T::Float4), "real");
-        assert_eq!(column_type_name(T::Float8), "float");
-        assert_eq!(column_type_name(T::NVarchar), "nvarchar");
-        assert_eq!(column_type_name(T::NChar), "nchar");
-        assert_eq!(column_type_name(T::BigVarChar), "varchar");
-        assert_eq!(column_type_name(T::BigVarBin), "varbinary");
-        assert_eq!(column_type_name(T::Decimaln), "decimal");
-        assert_eq!(column_type_name(T::Numericn), "numeric");
-        assert_eq!(column_type_name(T::Datetime2), "datetime2");
-        assert_eq!(column_type_name(T::Daten), "date");
-        assert_eq!(column_type_name(T::Timen), "time");
-        assert_eq!(column_type_name(T::Guid), "uniqueidentifier");
-        assert_eq!(column_type_name(T::Money), "money");
-        assert_eq!(column_type_name(T::Xml), "xml");
-        assert_eq!(column_type_name(T::SSVariant), "sql_variant");
+        assert_eq!(column_type_name(T::Int4), "INT");
+        assert_eq!(column_type_name(T::Int8), "BIGINT");
+        assert_eq!(column_type_name(T::Int1), "TINYINT");
+        assert_eq!(column_type_name(T::Int2), "SMALLINT");
+        assert_eq!(column_type_name(T::Bit), "BIT");
+        assert_eq!(column_type_name(T::Bitn), "BIT");
+        assert_eq!(column_type_name(T::Float4), "REAL");
+        assert_eq!(column_type_name(T::Float8), "FLOAT");
+        assert_eq!(column_type_name(T::NVarchar), "NVARCHAR");
+        assert_eq!(column_type_name(T::NChar), "NCHAR");
+        assert_eq!(column_type_name(T::BigVarChar), "VARCHAR");
+        assert_eq!(column_type_name(T::BigVarBin), "VARBINARY");
+        // Go 侧 `case typeDecimalN, typeNumericN` 统一返回 "DECIMAL"，
+        // 故此处 Decimaln 与 Numericn 同形。
+        assert_eq!(column_type_name(T::Decimaln), "DECIMAL");
+        assert_eq!(column_type_name(T::Numericn), "DECIMAL");
+        assert_eq!(column_type_name(T::Datetime2), "DATETIME2");
+        assert_eq!(column_type_name(T::Daten), "DATE");
+        assert_eq!(column_type_name(T::Timen), "TIME");
+        assert_eq!(column_type_name(T::Guid), "UNIQUEIDENTIFIER");
+        assert_eq!(column_type_name(T::Money), "MONEY");
+        assert_eq!(column_type_name(T::Xml), "XML");
+        assert_eq!(column_type_name(T::SSVariant), "SQL_VARIANT");
         assert_eq!(column_type_name(T::Null), "");
+    }
+
+    /// RUST-MSSQL-EMPTY-COLUMNS：空结果集时列元数据只能来自 stream 的
+    /// QueryItem::Metadata（TDS 协议保证它先于行数据到达；空集时是唯一
+    /// 携带列信息的 item）。columns_of 的空 rows + metadata 兜底路径。
+    #[test]
+    fn columns_of_falls_back_to_metadata_when_rows_empty() {
+        let cols = vec![
+            tiberius::Column::new("id".into(), T::Int8),
+            tiberius::Column::new("name".into(), T::BigVarChar),
+        ];
+        let meta = Some(MssqlConn::result_columns_from(&cols));
+        let out = MssqlConn::columns_of(&[], meta);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].name, "id");
+        assert_eq!(out[0].data_type, "BIGINT");
+        assert_eq!(out[1].name, "name");
+        assert_eq!(out[1].data_type, "VARCHAR");
+
+        // 无 Metadata 也无行 → 空列（与修复前行为一致，仅多了一条兜底路径）。
+        let out2 = MssqlConn::columns_of(&[], None);
+        assert!(out2.is_empty());
+    }
+
+    /// Array/Object 参数跨线协议统一为 JSON 文本（P1-4 口径钉子）：此前兜底
+    /// 成 0i64，把 JSON/blob 列的数据静默写成 0。
+    #[test]
+    fn tsql_params_bind_array_and_object_as_json_text() {
+        let arr = Value::Array(vec![Value::Integer(1), Value::String("x".into())]);
+        let blob = polydb_db_core::blob_value(&[0u8, 1, 2]);
+        assert_eq!(MssqlConn::json_text_param(&arr), r#"[1,"x"]"#);
+        // $blob 对象按 JSON 文本走（与 Go 侧 BlobValue 的 JSON 形态同构）。
+        let s = MssqlConn::json_text_param(&blob);
+        assert!(
+            s.starts_with('{') && s.contains("$blob"),
+            "blob bind = {s:?}"
+        );
+        // 标量不受影响（match 分支仍各自绑定）。
+        let binds = MssqlConn::tsql_params(&[Value::Integer(7)]);
+        assert_eq!(binds.len(), 1);
+    }
+
+    /// P2-3 回归：Array/Object 中的 NaN/Inf 必须序列化为字符串值，
+    /// 不能被 serde_json 静默转为 null（数据丢失）。
+    #[test]
+    fn tsql_params_array_with_nan_inf_serializes_as_string() {
+        let arr = Value::Array(vec![
+            Value::Float(1.5),
+            Value::Float(f64::NAN),
+            Value::Float(f64::INFINITY),
+        ]);
+        let json = MssqlConn::json_text_param(&arr);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed[0], 1.5);
+        assert_eq!(
+            parsed[1], "NaN",
+            "NaN must be preserved as string, not null"
+        );
+        assert_eq!(parsed[2], "Infinity");
+    }
+    /// PD-18（2026-11-10）回归（读取链）：`mssql_value` 必须含 UNIQUEIDENTIFIER
+    /// 分支，且产出标准 UUID 文本。
+    ///
+    /// 缺陷：tiberius 的 `&[u8]`/`Vec<u8>` 只匹配 ColumnData::Binary
+    /// （tiberius from_sql.rs:114-124），Guid 列不匹配；旧读取链没有
+    /// `try_get::<Uuid>` 分支——UNIQUEIDENTIFIER 列整条链落空，掉到链尾的
+    /// `Value::Null`（数据丢失）。Go 侧旧链把 decodeGuid 的 16 字节当普通
+    /// 字节串输出乱码。两端现已统一为标准小写 UUID 文本。
+    ///
+    /// tiberius 的 ColumnData 是 pub(crate)，无法离线构造 Guid 列值，故与
+    /// PD-17 同法：源码形态断言钉住读取链 + 契约测试做端到端（无服务时
+    /// soft-skip）。
+    #[test]
+    fn mssql_value_read_chain_has_uuid_branch() {
+        let src = include_str!("lib.rs");
+
+        // Uuid 分支必须存在，且产出 String 文本（不得是 Null/占位符）。
+        let pos = src
+            .find("row.try_get::<tiberius::Uuid, usize>(i)")
+            .unwrap_or_else(|| panic!("读取链缺少 UNIQUEIDENTIFIER (Uuid) 分支"));
+
+        // 分支体内必须是 v.to_string()（标准 UUID 文本）。
+        let after = &src[pos..];
+        let body_end = after.find("}").expect("Uuid 分支未闭合");
+        let body = &after[..body_end];
+        assert!(
+            body.contains("Value::String(v.to_string())"),
+            "Uuid 分支必须产出 Value::String(v.to_string())，实际：{body}"
+        );
+
+        // 链尾兜底是 Value::Null —— Uuid 分支必须在它之前。
+        let tail = src
+            .rfind("        Value::Null\n    }")
+            .expect("缺少链尾 Null 兜底");
+        assert!(
+            pos < tail,
+            "Uuid 分支必须排在链尾 Value::Null 之前（否则 GUID 落到 Null，数据丢失）"
+        );
     }
 }

@@ -402,6 +402,9 @@ mod tests {
         assert_eq!(normalize_default(Some("   ")), None);
         assert_eq!(normalize_default(Some("NULL")), None);
         assert_eq!(normalize_default(Some("(NULL)")), None);
+        // 空串默认值 `''` 必须与无默认值（None）区分——
+        // Go 侧 normDefault 曾把 `''` 裁成空串与无默认值混同（P3-8 回归）。
+        assert_eq!(normalize_default(Some("''")), Some("''".into()));
         assert_eq!(normalize_default(Some("(('0'))")), Some("'0'".into()));
         assert_eq!(
             normalize_default(Some("'0'::character varying")),

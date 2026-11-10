@@ -24,7 +24,8 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
+dirs = { workspace = true }
+polydb-rt = { workspace = true }
 
 [dev-dependencies]
-polydb-rt = { workspace = true }
 uuid = { workspace = true }

@@ -71,20 +71,28 @@ fn key_of(row_id: &str, rtype: RowChangeType) -> String {
 }
 
 /// 数值跨整型/浮点比较，避免用户回编辑把 `5`（Integer）判成与 `5.0`（Float）不等。
+///
+/// Integer↔Float 不能走 `as f64`：64 位整数只有 53 位尾数，两个不同的
+/// 大于 2^53 的整数会塌成同一个 double 而被误判相等，编辑被当 no-op 静默丢弃。
+/// 整数值经 i128 比较，浮点侧只接受"整数值且落在 i64 范围内"的有限数。
 pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
-    let cross = matches!(
-        (a, b),
-        (Value::Integer(_), Value::Float(_)) | (Value::Float(_), Value::Integer(_))
-    );
-    if cross {
-        let to_f = |v: &Value| match v {
-            Value::Integer(i) => *i as f64,
-            Value::Float(f) => *f,
-            _ => f64::NAN,
-        };
-        return to_f(a) == to_f(b);
+    match (a, b) {
+        (Value::Integer(i), Value::Float(f)) | (Value::Float(f), Value::Integer(i)) => {
+            int_float_equal(*i, *f)
+        }
+        _ => a == b,
     }
-    a == b
+}
+
+fn int_float_equal(i: i64, f: f64) -> bool {
+    if !f.is_finite() || f.fract() != 0.0 {
+        return false;
+    }
+    // 整数值的 float 在 i64 范围内经 i128 转换是精确的；超出范围则整数不可能相等。
+    if f < i64::MIN as f64 || f > i64::MAX as f64 {
+        return false;
+    }
+    f as i128 == i as i128
 }
 
 /// 每表 tab 一个队列：同格重复编辑合并（保留最初旧值）、改回原值自动塌缩。
@@ -206,10 +214,9 @@ impl ChangeQueue {
             if values_equal(&new_value, &orig) {
                 change.cell_changes.retain(|c| c.column != column);
                 if change.cell_changes.is_empty() {
-                    self.push_undo(UndoOp::Cell {
-                        key: key.clone(),
-                        column: column.to_string(),
-                    });
+                    // 塌缩即整条改动消失：不 push undo——undo() 按 key 查索引，
+                    // 而 remove_by_key 已把条目删掉，push 进来的 op 永远解析
+                    // 不到，只会白白吞掉用户的一次 undo。
                     self.remove_by_key(&key);
                 } else {
                     self.push_undo(UndoOp::Cell {
@@ -360,6 +367,7 @@ pub(crate) fn value_to_literal(kind: DatabaseKind, v: &Value) -> String {
         Value::Null => "NULL".to_string(),
         Value::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
         Value::Integer(i) => i.to_string(),
+        Value::U64(u) => u.to_string(),
         Value::Float(f) => format!("{}", f),
         Value::String(s) => {
             if s.is_empty() {
@@ -408,6 +416,11 @@ pub(crate) struct GeneratedStatement {
     pub expect_affected: u64,
     /// keyed update：actual > expect 才拦（同值更新报 0 是正常的）。
     pub allow_zero: bool,
+    /// 定位谓词与表引用（UPDATE/DELETE 有，INSERT 为空）：0 行守卫的同事务
+    /// 探针复用——`SELECT 1 FROM table WHERE where` 与提交语句同源生成，
+    /// 区分"同值更新 no-op"（行在，放行）与"行已被删/PK 已改"（回滚批次）。
+    pub table: String,
+    pub where_clause: String,
 }
 
 /// 生成提交语句（顺序 = 用户操作顺序）。
@@ -442,6 +455,8 @@ pub(crate) fn build_statements(
                         .collect(),
                     expect_affected: 1,
                     allow_zero: false,
+                    table: qt.clone(),
+                    where_clause: where_,
                 });
             }
             RowChangeType::Insert => {
@@ -498,6 +513,8 @@ pub(crate) fn build_statements(
                     params,
                     expect_affected: 1,
                     allow_zero: false,
+                    table: String::new(),
+                    where_clause: String::new(),
                 });
             }
             RowChangeType::Update => {
@@ -537,6 +554,8 @@ pub(crate) fn build_statements(
                     params,
                     expect_affected: 1,
                     allow_zero: true,
+                    table: qt.clone(),
+                    where_clause: where_,
                 });
             }
         }
@@ -618,6 +637,31 @@ mod tests {
         assert_eq!(q.get("r1").unwrap().cell_changes[0].new_value, s("w"));
     }
 
+    /// 塌缩到空的编辑不得入 undo 栈：undo() 按 key 查索引，而塌缩已把条目
+    /// 删除，push 进来的 op 永远解析不到——旧行为吞掉用户一次 undo（undo
+    /// 返回 false），真正的上一个编辑反而救不回来。
+    #[test]
+    fn collapse_to_empty_does_not_consume_an_undo_step() {
+        let mut q = ChangeQueue::new();
+        let orig = row(&[("a", s("x")), ("b", s("p"))]);
+        // 第一个编辑：a → y（真实改动，入 undo 栈）
+        q.add_cell_change("r1", "a", s("x"), s("y"), orig.clone());
+        assert_eq!(q.size(), 1);
+        // 第二个编辑：b 改回原值且该行此前没有 b 的改动 → 不产生改动。
+        // 旧行为会为这个 no-op push 一个 undo op。
+        q.add_cell_change("r1", "b", s("p"), s("p"), orig.clone());
+        assert_eq!(q.size(), 1);
+        // undo 必须直接撤销第一个真实编辑，而不是先吃掉一个死 op。
+        assert!(q.undo(), "the first undo must land on the real edit");
+        assert_eq!(q.size(), 0);
+
+        // 塌缩到空（cell_changes 清空 → 整行移除）同样不入栈：
+        q.add_cell_change("r1", "a", s("x"), s("y"), orig.clone());
+        q.add_cell_change("r1", "a", s("y"), s("x"), orig.clone());
+        assert_eq!(q.size(), 0);
+        // 这里 undo 返回 false（栈已空）是正确的——塌缩不欠用户一个 undo。
+    }
+
     #[test]
     fn ignores_noop_and_treats_int_float_as_equal() {
         let mut q = ChangeQueue::new();
@@ -625,6 +669,36 @@ mod tests {
         assert_eq!(q.size(), 0);
         q.add_cell_change("r2", "n", i(5), Value::Float(5.0), row(&[("n", i(5))]));
         assert_eq!(q.size(), 0);
+    }
+
+    #[test]
+    fn int_float_equality_is_exact_above_two_pow_53() {
+        // The exactness boundary: f64 represents every even integer up to 2^54,
+        // but (2^53+1) is not representable — as a float it rounds down to 2^53.
+        // `as f64` used to compare the integer against that rounded float equal,
+        // so editing such a cell to a "different" value was silently dropped as
+        // a no-op.
+        let odd: i64 = (1i64 << 53) + 1;
+        let even: i64 = (1i64 << 53) + 2;
+        assert!(
+            !values_equal(&i(odd), &i(even)),
+            "distinct integers stay distinct"
+        );
+
+        // The odd integer cannot round-trip through f64, so it must not compare
+        // equal to the float it would round to.
+        assert!(!values_equal(&i(odd), &Value::Float(odd as f64)));
+        // The even integer round-trips exactly, so it keeps comparing equal.
+        assert!(values_equal(&i(even), &Value::Float(even as f64)));
+        assert!(values_equal(
+            &i(1i64 << 53),
+            &Value::Float((1i64 << 53) as f64)
+        ));
+        // Values that a f64 can represent exactly keep comparing equal.
+        assert!(values_equal(&i(5), &Value::Float(5.0)));
+        assert!(values_equal(&Value::Float(5.0), &i(5)));
+        // A fractional float is never equal to any integer.
+        assert!(!values_equal(&i(5), &Value::Float(5.5)));
     }
 
     #[test]
@@ -707,6 +781,8 @@ mod tests {
             params: vec![],
             expect_affected: 1,
             allow_zero: false,
+            table: String::new(),
+            where_clause: String::new(),
         };
         let upd = GeneratedStatement {
             allow_zero: true,

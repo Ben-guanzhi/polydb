@@ -62,6 +62,7 @@ pub(crate) fn value_str(v: &Value) -> String {
         Value::Null => "NULL".to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Integer(i) => i.to_string(),
+        Value::U64(u) => u.to_string(),
         Value::Float(f) => f.to_string(),
         Value::String(s) => s.clone(),
         Value::Array(_) | Value::Object(_) => {
