@@ -138,6 +138,46 @@ func TestFinalizeRemovesTransaction(t *testing.T) {
 	}
 }
 
+// TestCommitFailureFinalizesTransaction 钉住 P3-A 修复：commit 失败后事务必须
+// 终结（从注册表移除），rollback 报 TRANSACTION_NOT_FOUND 而非误导性错误。
+// 与 Rust 侧 commit_transaction 失败时 guard.finish() 同构。
+// 用 SQLite 延迟外键触发 COMMIT 失败：建 parent/child 表（DEFERRABLE
+// INITIALLY DEFERRED），事务内插入引用不存在 parent 的 child 行，FK
+// 检查推迟到 COMMIT 时触发。
+func TestCommitFailureFinalizesTransaction(t *testing.T) {
+	a, id := newSQLiteApp(t)
+	t.Cleanup(a.Close)
+	ctx := context.Background()
+	if _, err := a.Execute(ctx, id, "CREATE TABLE parent (id INTEGER PRIMARY KEY, name TEXT)"); err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	if _, err := a.Execute(ctx, id, "CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED)"); err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+
+	info, err := a.BeginTransaction(ctx, &protocol.BeginTransactionRequest{ConnectionID: id})
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+
+	// 插入引用不存在 parent 的 child 行：FK 延迟检查，INSERT 成功。
+	if _, err := a.ExecuteInTx(ctx, info.ID, "INSERT INTO child (id, parent_id) VALUES (1, 999)"); err != nil {
+		t.Fatalf("insert in tx (deferred FK): %v", err)
+	}
+
+	// COMMIT 时 FK 检查触发，commit 失败。
+	_, err = a.CommitTransaction(info.ID)
+	if err == nil {
+		t.Fatalf("commit should fail due to deferred FK violation")
+	}
+
+	// commit 失败后事务已终结：rollback 报 NOT_FOUND（非误导性错误）。
+	_, err = a.RollbackTransaction(info.ID)
+	if code := codeOf(err); code != protocol.ErrTransactionNotFound {
+		t.Fatalf("rollback after commit failure: code=%q, want %s (err=%v)", code, protocol.ErrTransactionNotFound, err)
+	}
+}
+
 // overlapTracker 记录内核 ExecuteIn 的历史最大并发数（Option B：装饰在内核
 // 原生 dbc.SQLTxDriver 上，TxManager 直接驱动它）。
 type overlapTracker struct {

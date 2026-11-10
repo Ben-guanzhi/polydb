@@ -70,6 +70,11 @@ type Statement struct {
 	Params         []protocol.Value
 	ExpectAffected uint64
 	AllowZero      bool // keyed update：actual 仅在 > ExpectAffected 才拦（同值更新报 0 正常）
+	// Table 与 Where 供 0 行探针复用：UPDATE/DELETE 的定位谓词与提交语句
+	// 同源生成（keyWhere），同事务内 `SELECT 1 FROM Table WHERE Where` 即可
+	// 区分"同值更新 no-op"与"行已被删/PK 已改"。INSERT 两者皆空（探针无意义）。
+	Table string
+	Where string
 }
 
 // BuildStatements 依据变更队列生成提交语句（顺序 = 用户操作顺序）。
@@ -86,6 +91,8 @@ func BuildStatements(chs []RowChange, schema, table string, pkColumns []string, 
 				ParamSQL:       "DELETE FROM " + qt + " WHERE " + pwhere,
 				Params:         pkParams(pkColumns, ch.OriginalRow),
 				ExpectAffected: 1,
+				Table:          qt,
+				Where:          where,
 			})
 		case Insert:
 			row := ch.NewRow
@@ -151,6 +158,8 @@ func BuildStatements(chs []RowChange, schema, table string, pkColumns []string, 
 				Params:         params,
 				ExpectAffected: 1,
 				AllowZero:      true,
+				Table:          qt,
+				Where:          where,
 			})
 		}
 	}

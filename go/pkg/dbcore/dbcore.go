@@ -9,6 +9,12 @@ import (
 	"github.com/polydb/polydb/pkg/protocol"
 )
 
+// DriverMaxRows 是驱动层物化行数上限（behavior.md §5）。驱动扫描到该行数即
+// 停止并置 Truncated/HasMore，避免先把整表物化进内存再交由服务端事后裁剪
+// （服务端 applyMaxRows 是事后的）。与 Rust 侧 polydb_db_core::DRIVER_MAX_ROWS
+// 严格对齐，属双实现一致性要求（AGENTS.md §7）。
+const DriverMaxRows = 10000
+
 // Driver 是所有数据库驱动的基接口。
 type Driver interface {
 	Kind() protocol.DatabaseKind

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/dbcore/dbcore"
 	"github.com/dbcore/dbcore/drivertest"
@@ -12,6 +13,29 @@ import (
 )
 
 func boolPtr(b bool) *bool { return &b }
+
+// 同一引擎的时间戳在 wire 上必须只有一个拼写：事务路径 (本包 ValueFromDB 的
+// ValTime 分支) 与直查路径 (dbcore.DriverToValue 的 time.Time 分支) 各自转换
+// 一次。这里锁定 bridge 侧产出内核 Value.String 的同式拼写；直查侧的字面量
+// 对照在 valueconv_test（本包是唯一能同时看见两边的位置）。
+func TestValueFromDBTimeSpellingMatchesDriverPath(t *testing.T) {
+	ts := time.Date(2026, 1, 2, 3, 4, 5, 123456000, time.UTC)
+	got := ValueFromDB(dbcore.Value{Kind: dbcore.ValTime, T: ts})
+	s, ok := protocol.TryGetString(got)
+	if !ok {
+		t.Fatalf("ValTime must convert to a string value, got %+v", got)
+	}
+	if s != "2026-01-02T03:04:05.123456Z" {
+		t.Fatalf("bridge timestamp spelling = %q, want RFC3339Nano", s)
+	}
+	// 整秒对齐。
+	whole := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	got2 := ValueFromDB(dbcore.Value{Kind: dbcore.ValTime, T: whole})
+	s2, _ := protocol.TryGetString(got2)
+	if s2 != "2026-01-02T03:04:05Z" {
+		t.Fatalf("whole-second spelling = %q", s2)
+	}
+}
 
 func TestValueRoundTrip(t *testing.T) {
 	cases := []dbcore.Value{
@@ -65,6 +89,12 @@ func TestValueToDBFromProtocol(t *testing.T) {
 	// Integral floats stay int.
 	if v := ValueToDB(protocol.NewFloatValue(2.0)); v.Kind != dbcore.ValInt || v.I != 2 {
 		t.Fatalf("integral float should become ValInt, got %+v", v)
+	}
+	// Integers past 2^53 keep their low bits: the old float64 decode rounded
+	// 9007199254740993 to 9007199254740992 before the int64 cast.
+	const big = int64(9007199254740993)
+	if v := ValueToDB(protocol.NewIntValue(big)); v.Kind != dbcore.ValInt || v.I != big {
+		t.Fatalf("bigint parameter lost precision: %+v (want %d)", v, big)
 	}
 }
 

@@ -81,10 +81,18 @@ type wsSession struct {
 	shutdown   chan struct{}
 }
 
+// wsWriteTimeout bounds a single outbound frame write. Without it, a client
+// that stops reading wedges WriteMessage forever: writeCh (cap 32) then fills,
+// s.send blocks, handleQuery's synchronous send stalls the inbound loop, and
+// no further messages — including query_cancel — are processed until the
+// client closes the socket.
+const wsWriteTimeout = 30 * time.Second
+
 func (s *wsSession) runOutbound() {
 	for {
 		select {
 		case data := <-s.writeCh:
+			_ = s.conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
 			if err := s.conn.WriteMessage(websocket.BinaryMessage, data); err != nil {
 				s.stop()
 				return
@@ -103,6 +111,12 @@ func (s *wsSession) stop() {
 	}
 }
 
+// wsSendTimeout bounds how long send waits for a writeCh slot. handleQuery
+// calls send synchronously on the inbound loop: an unbounded wait here (a
+// client that stopped reading) would stall the loop and no further messages —
+// including query_cancel — would be processed.
+const wsSendTimeout = 30 * time.Second
+
 func (s *wsSession) send(msg *protocol.ServerMessage) {
 	data, err := msgpack.Marshal(msg)
 	if err != nil {
@@ -110,6 +124,10 @@ func (s *wsSession) send(msg *protocol.ServerMessage) {
 	}
 	select {
 	case s.writeCh <- data:
+	case <-time.After(wsSendTimeout):
+		// The outbound writer is wedged (or gone); the session's read idle
+		// reaper will tear it down. Dropping the frame beats blocking the
+		// inbound loop forever.
 	case <-s.shutdown:
 	}
 }
@@ -219,10 +237,15 @@ func (s *wsSession) handleHello(msg protocol.ClientMessage) {
 // 闸门防失控客户端把 goroutine 堆满。
 const wsMaxConcurrentQueries = 16
 
-// registerQuery 把一条查询登记为可取消。返回 false 表示会话的在途查询已到闸门。
+// registerQuery 把一条查询登记为可取消。返回 false 表示会话的在途查询已到闸门，
+// 或该 query_id 已在途——覆盖已存在的 id 会孤儿化先前查询的取消通道，后来的
+// query_cancel 关的是新通道，先前的查询永远无法取消。重复 id 由调用方回错误帧。
 func (s *wsSession) registerQuery(id string) bool {
 	s.inFlightMu.Lock()
 	defer s.inFlightMu.Unlock()
+	if _, exists := s.inFlight[id]; exists {
+		return false
+	}
 	if len(s.inFlight) >= wsMaxConcurrentQueries {
 		return false
 	}
@@ -286,10 +309,14 @@ func (s *wsSession) handleQuery(msg protocol.ClientMessage) {
 		return
 	}
 	if !s.registerQuery(msg.QueryID) {
+		// Either the session's in-flight gate is full, or this query_id is
+		// already running — the old overwrite silently orphaned the first
+		// query's cancel channel. The caller can tell the cases apart by
+		// whether it got a QueryStarted frame for this id.
 		s.send(&protocol.ServerMessage{
 			Type:    protocol.ServerMsgQueryError,
 			QueryID: msg.QueryID,
-			Error:   &protocol.PolyDBError{Code: protocol.ErrInvalidParam, Message: fmt.Sprintf("too many concurrent queries (max %d)", wsMaxConcurrentQueries)},
+			Error:   &protocol.PolyDBError{Code: protocol.ErrInvalidParam, Message: fmt.Sprintf("query_id %s is already in flight, or the session has reached %d concurrent queries", msg.QueryID, wsMaxConcurrentQueries)},
 		})
 		return
 	}
@@ -381,6 +408,22 @@ func (s *wsSession) runQuery(msg protocol.ClientMessage, connID string) {
 		}
 		// 与 HTTP 同一限行（§5）：无上限的 SELECT 会在序列化进 socket 前先
 		// 打爆内存。max_rows 消息字段与 HTTP 的 max_rows 参数同义。
+		//
+		// PD-11（2026-11-09）：这里是 WS 查询的**发射边界**。§6.1 把「获取」
+		// （执行，可被 cancel 撤回）与「发射」（写帧，一旦 WriteMessage 成功
+		// 即不可逆）分开：cancel 只能撤回尚未发射的获取，绝不能撤回已经写到
+		// socket 的帧。上面的 cancelled 判定发生在 retire 之前，若 cancel 在
+		// 判定与发射之间到达，客户端会既收到 cancel 又收到完整结果——边界被
+		// 穿透。因此在发射前再判一次 ctx.Err()，把「取消」与「结果发射」收敛到
+		// 同一个决策点；已发射的帧仍不可撤回（这正是发射边界的含义），但不会再
+		// 出现「先 cancel 后结果」的竞态窗口。
+		if ctx.Err() != nil {
+			s.send(&protocol.ServerMessage{
+				Type:    protocol.ServerMsgQueryCancelled,
+				QueryID: msg.QueryID,
+			})
+			return
+		}
 		s.send(&protocol.ServerMessage{
 			Type:    protocol.ServerMsgQueryResult,
 			QueryID: msg.QueryID,

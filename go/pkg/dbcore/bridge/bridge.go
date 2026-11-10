@@ -17,12 +17,14 @@
 package bridge
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
-	"math"
+	"strconv"
 	"time"
 
 	"github.com/dbcore/dbcore"
+	polydbdb "github.com/polydb/polydb/pkg/dbcore"
 	"github.com/polydb/polydb/pkg/protocol"
 )
 
@@ -77,8 +79,11 @@ type SQLTxProvider interface {
 // ─── Value conversion (protocol.Value ↔ dbcore.Value) ───────────────────────
 
 // ValueFromDB converts a dbcore.Value into polydb's protocol.Value.
-// Blob/Time are best-effort (stringified), since protocol.Value has no native
-// blob/time kind — it is a JSON-backed wrapper.
+// Blobs cross via the wire contract (spec/encoding.md §5.1 $blob encoding,
+// ≤1MB inline base64, >1MB bypass ref when the blob sink is up), not as a
+// raw string — the old string(v.B) path embedded arbitrary binary into a
+// JSON string, which encoding/json then mangled through U+FFFD replacement
+// on the client side. Times keep the RFC3339Nano text form.
 func ValueFromDB(v dbcore.Value) protocol.Value {
 	switch v.Kind {
 	case dbcore.ValNull:
@@ -92,7 +97,7 @@ func ValueFromDB(v dbcore.Value) protocol.Value {
 	case dbcore.ValBool:
 		return protocol.NewBoolValue(v.Bool)
 	case dbcore.ValBlob:
-		return protocol.NewStringValue(string(v.B))
+		return polydbdb.BlobValue(v.B)
 	case dbcore.ValTime:
 		return protocol.NewStringValue(v.T.Format(time.RFC3339Nano))
 	case dbcore.ValDecimal:
@@ -106,6 +111,11 @@ func ValueFromDB(v dbcore.Value) protocol.Value {
 
 // ValueToDB converts a polydb protocol.Value into a dbcore.Value. Numbers that are
 // integral become ValInt; others ValFloat. Objects/arrays fall back to ValText.
+//
+// The decode uses json.Decoder.UseNumber: the default unmarshal turns every
+// number into float64, whose 53-bit mantissa silently rounds integers past
+// 2^53 — 9007199254740993 arrived as 9007199254740992. The literal digits are
+// parsed with strconv instead, so a bigint parameter keeps its low bits.
 func ValueToDB(p protocol.Value) dbcore.Value {
 	if p.IsNull() {
 		return dbcore.Value{Kind: dbcore.ValNull}
@@ -114,18 +124,25 @@ func ValueToDB(p protocol.Value) dbcore.Value {
 	if err != nil {
 		return dbcore.Value{Kind: dbcore.ValNull}
 	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
 	var x any
-	if err := json.Unmarshal(raw, &x); err != nil {
+	if err := dec.Decode(&x); err != nil {
 		return dbcore.Value{Kind: dbcore.ValText, S: string(raw)}
 	}
 	switch t := x.(type) {
 	case bool:
 		return dbcore.Value{Kind: dbcore.ValBool, Bool: t}
-	case float64:
-		if t == math.Trunc(t) && !math.IsInf(t, 0) {
-			return dbcore.Value{Kind: dbcore.ValInt, I: int64(t)}
+	case json.Number:
+		if i, err := strconv.ParseInt(t.String(), 10, 64); err == nil {
+			return dbcore.Value{Kind: dbcore.ValInt, I: i}
 		}
-		return dbcore.Value{Kind: dbcore.ValFloat, F: t}
+		if f, err := strconv.ParseFloat(t.String(), 64); err == nil {
+			return dbcore.Value{Kind: dbcore.ValFloat, F: f}
+		}
+		// Not representable as int64 or float64 (a 30-digit integer): pass
+		// the digits as text rather than rounding them through a float.
+		return dbcore.Value{Kind: dbcore.ValText, S: t.String()}
 	case string:
 		return dbcore.Value{Kind: dbcore.ValText, S: t}
 	case nil:

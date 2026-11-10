@@ -25,18 +25,17 @@ func DataDir() string {
 }
 
 // Open 打开（必要时创建）本地元数据库并初始化 schema。
+//
+// Pragmas 走 DSN 的 `_pragma` 参数而非 Exec：modernc 只在**每条**物理连接上
+// 跑 DSN 参数。此前 journal_mode/WAL 用 Exec 设置了一次——它写进库文件会持
+// 久化，但 busy_timeout 是**每连接状态**，连接池的第二条连接 busy_timeout=0，
+// 并发写立刻 SQLITE_BUSY（用户库层 dbsqlite.Open 修过同一个问题，storage 层
+// 漏掉了；server 与 TUI 共库并发写正是这个包的主场景）。
 func Open(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path)
+	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open storage %s: %w", path, err)
-	}
-	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("enable WAL: %w", err)
-	}
-	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("enable foreign keys: %w", err)
 	}
 	if err := initSchema(db); err != nil {
 		db.Close()

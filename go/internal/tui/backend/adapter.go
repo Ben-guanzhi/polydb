@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/polydb/polydb/internal/tuidata"
 	"github.com/polydb/polydb/pkg/protocol"
@@ -380,7 +382,15 @@ func valueToCell(v protocol.Value) any {
 	}
 }
 
-// genericToDType 把协议通用类型映射为 tuidata 列类型；样本值兜底推断。
+// genericToDType 把协议通用类型映射为 tuidata 列类型；GenericType 缺失时从
+// 样本值兜底推断。
+//
+// 为什么需要兜底：protocol.ResultColumn.generic_type 是跨库类型归一的字段，
+// 但 v1 明确不填它（docs/plan-compare-sync.md §8-3：两端驱动一律留空，随 E3
+// 补）。而 Go 数据面的 bridge.QueryResultFromDB 也把该字段留零值。于是
+// GenericType 恒为空字符串——直接映射只会让所有列都变成 TypeString（查询结果
+// 的类型行会显示 str 而非 i64/datetime）。所以这里按设计意图实现注释里写的
+// 「样本值兜底推断」。
 func genericToDType(g protocol.GenericType, sample []any) tuidata.DType {
 	switch g {
 	case protocol.GenericTypeBoolean:
@@ -397,10 +407,94 @@ func genericToDType(g protocol.GenericType, sample []any) tuidata.DType {
 		protocol.GenericTypeJSON, protocol.GenericTypeJSONB, protocol.GenericTypeUUID,
 		protocol.GenericTypeXML, protocol.GenericTypeBinary, protocol.GenericTypeVarbinary,
 		protocol.GenericTypeBlob, protocol.GenericTypeArray, protocol.GenericTypeEnum,
-		protocol.GenericTypeInterval, protocol.GenericTypeTime, protocol.GenericTypeOther, "":
+		protocol.GenericTypeInterval, protocol.GenericTypeTime, protocol.GenericTypeOther:
 		return tuidata.TypeString
 	}
-	return tuidata.TypeString
+	// GenericType 为空（v1 数据面不填）：从样本值推断。
+	return inferDTypeFromSample(sample)
+}
+
+// DType 推断用到的 token：0 未定，1 布尔，2 整数，3 浮点，4 日期时间，5 日期，
+// 6 其它文本。
+const dtUndecided = iota
+
+// 日期/日期时间的严格文本形状。必须用形状而不是 time.Parse 判定：time.Parse
+// 的 "2006" 会接受四位数字字符串，从而把 VARCHAR('2026') 误判成日期。
+var (
+	dateOnlyShape = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
+	dateTimeShape = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$`)
+)
+
+// inferDTypeFromSample 从一列的样本值推断 DType，仅在协议未提供 generic_type
+// 时使用。整数/浮点/布尔按 Go 运行时类型精确判定；日期/日期时间按严格文本形状
+// 判定。混合类型（除 int/float 可混合）一律 TypeString。
+func inferDTypeFromSample(sample []any) tuidata.DType {
+	kind := dtUndecided
+	saw := false
+	for _, v := range sample {
+		if v == nil {
+			continue
+		}
+		saw = true
+		k := sampleKind(v)
+		if kind == dtUndecided {
+			kind = k
+			continue
+		}
+		if k == kind {
+			continue
+		}
+		// 整数与浮点可共存（都算数值）；其余组合说明列类型不一致。
+		if !((kind == 2 || kind == 3) && (k == 2 || k == 3)) {
+			return tuidata.TypeString
+		}
+		kind = 3
+	}
+	if !saw {
+		return tuidata.TypeString
+	}
+	switch kind {
+	case 1:
+		return tuidata.TypeBool
+	case 2:
+		return tuidata.TypeInt
+	case 3:
+		return tuidata.TypeFloat
+	case 4:
+		return tuidata.TypeDatetime
+	case 5:
+		return tuidata.TypeDate
+	default:
+		return tuidata.TypeString
+	}
+}
+
+// sampleKind 返回单个样本值对应的 DType token（2/3 分别是整型与浮点）。
+func sampleKind(v any) int {
+	switch x := v.(type) {
+	case bool:
+		return 1
+	case int64:
+		return 2
+	case float64:
+		return 3
+	case time.Time:
+		if x.Hour() == 0 && x.Minute() == 0 && x.Second() == 0 && x.Nanosecond() == 0 {
+			return 5
+		}
+		return 4
+	case string:
+		switch {
+		case dateOnlyShape.MatchString(x):
+			return 5
+		case dateTimeShape.MatchString(x):
+			return 4
+		default:
+			return 6
+		}
+	default:
+		return 6
+	}
 }
 
 // --- Redis 渲染 --------------------------------------------------------------

@@ -81,6 +81,26 @@ func TestWrappedOpsEscapeAndWrap(t *testing.T) {
 		"`x` LIKE ? ESCAPE '!'", strVal("a!_b%"))
 	assertOne(t, OracleSQLDialect(), colCond("x", protocol.FilterOpEndsWith, strVal("a!b")),
 		`"x" LIKE ? ESCAPE '!'`, strVal("%a!!b"))
+	// T-SQL 的 LIKE 没有 ESCAPE 子句，反斜杠也不是转义符：包裹类 op 用方括号
+	// 字符类重转义，且绝不拼 ESCAPE。
+	assertOne(t, MSSQLSQLDialect(), colCond("x", protocol.FilterOpContains, strVal("a%b")),
+		"[x] LIKE ?", strVal("%a[%]b%"))
+	assertOne(t, MSSQLSQLDialect(), withCS(colCond("x", protocol.FilterOpStartsWith, strVal("a_b")), boolPtr(true)),
+		"[x] COLLATE Latin1_General_CS_AS LIKE ?", strVal("a[_]b%"))
+}
+
+// T-SQL's LIKE has no ESCAPE clause at all: the wrapping ops must never emit
+// it for SQL Server, or the server rejects the whole statement as a syntax
+// error and the filter silently matches nothing.
+func TestMssqlLikeFamilyNeverEmitsEscapeClause(t *testing.T) {
+	for _, op := range []protocol.FilterOperator{
+		protocol.FilterOpContains, protocol.FilterOpStartsWith, protocol.FilterOpEndsWith,
+	} {
+		sql, _ := renderOne(t, MSSQLSQLDialect(), colCond("x", op, strVal("a%b")))
+		if strings.Contains(sql, "ESCAPE") {
+			t.Errorf("op %s emits the invalid ESCAPE clause: %s", op, sql)
+		}
+	}
 }
 
 func TestCaseInsensitiveRendering(t *testing.T) {

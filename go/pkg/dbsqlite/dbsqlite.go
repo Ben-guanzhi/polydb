@@ -16,6 +16,14 @@ import (
 	"github.com/polydb/polydb/pkg/protocol"
 )
 
+// quoteIdent 返回 SQL 标识符引用（"name" 形式），内部的 " 双写为 ""。
+// 与 Rust 侧 driver.rs 的 quote_ident 逐字对齐。此前用 %q 生成的是 Go 字符串
+// 字面量转义（\"），不是 SQL 标识符双写——含 " 的表名会拼出语法错误的
+// PRAGMA table_info("my\"table")，内省错位或报错。
+func quoteIdent(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
 type Conn struct {
 	db   *sql.DB
 	path string
@@ -30,17 +38,25 @@ type Conn struct {
 }
 
 func Open(ctx context.Context, path string) (*Conn, error) {
-	db, err := sql.Open("sqlite", path)
+	// The kernel DSN carries the pool-wide pragmas (`_pragma` query
+	// parameters), which modernc runs on EVERY physical connection the pool
+	// opens. Exec-ing pragmas once here only ever touched the first
+	// connection — the pool's secondary connections kept busy_timeout=0 and
+	// concurrent writes failed with SQLITE_BUSY immediately.
+	dsn := dbcoresqlite.DSN(dbcoresqlite.SpecFor(path))
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite %s: %w", path, err)
 	}
 	// 内存库是每连接独享的，必须限制单连接，否则跨连接看不到彼此的表。
 	if strings.Contains(path, ":memory:") {
 		db.SetMaxOpenConns(1)
-	}
-	if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("enable WAL: %w", err)
+	} else {
+		// 文件库默认也限池：without SetMaxOpenConns, database/sql opens an
+		// unbounded number of connections, and SQLite's file lock can
+		// serialize or fail under contention.
+		db.SetMaxOpenConns(10)
+		db.SetMaxIdleConns(5)
 	}
 	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys=ON"); err != nil {
 		db.Close()
@@ -165,7 +181,12 @@ func (c *Conn) executeIn(ctx context.Context, exec pdb.SQLTx, sql string, args [
 		}
 
 		var resultRows [][]protocol.Value
+		truncated := false
 		for rows.Next() {
+			if len(resultRows) >= pdb.DriverMaxRows {
+				truncated = true
+				break
+			}
 			raw := make([]any, len(colTypes))
 			for i := range raw {
 				raw[i] = new(any)
@@ -188,6 +209,8 @@ func (c *Conn) executeIn(ctx context.Context, exec pdb.SQLTx, sql string, args [
 			AffectedRows:    0,
 			ExecutionTimeMs: timeNowMs() - start,
 			StatementType:   stmtType,
+			Truncated:       truncated,
+			HasMore:         truncated,
 		}, nil
 	}
 
@@ -241,7 +264,7 @@ func (c *Conn) listTablesP(ctx context.Context, schema string) ([]protocol.Table
 }
 
 func (c *Conn) listColumnsP(ctx context.Context, schema, table string) ([]protocol.ColumnInfo, error) {
-	rows, err := c.db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%q)", table))
+	rows, err := c.db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", quoteIdent(table)))
 	if err != nil {
 		return nil, bridge.ErrorFromKernel(err)
 	}
@@ -273,7 +296,7 @@ func (c *Conn) listColumnsP(ctx context.Context, schema, table string) ([]protoc
 }
 
 func (c *Conn) listIndexesP(ctx context.Context, schema, table string) ([]protocol.IndexInfo, error) {
-	rows, err := c.db.QueryContext(ctx, fmt.Sprintf("PRAGMA index_list(%q)", table))
+	rows, err := c.db.QueryContext(ctx, fmt.Sprintf("PRAGMA index_list(%s)", quoteIdent(table)))
 	if err != nil {
 		return nil, bridge.ErrorFromKernel(err)
 	}
@@ -319,7 +342,7 @@ func (c *Conn) listIndexesP(ctx context.Context, schema, table string) ([]protoc
 }
 
 func (c *Conn) indexColumns(ctx context.Context, index string) ([]protocol.IndexColumn, error) {
-	rows, err := c.db.QueryContext(ctx, fmt.Sprintf("PRAGMA index_info(%q)", index))
+	rows, err := c.db.QueryContext(ctx, fmt.Sprintf("PRAGMA index_info(%s)", quoteIdent(index)))
 	if err != nil {
 		return nil, bridge.ErrorFromKernel(err)
 	}
@@ -355,7 +378,7 @@ func fkAction(raw string) protocol.ForeignKeyAction {
 }
 
 func (c *Conn) listForeignKeysP(ctx context.Context, schema, table string) ([]protocol.ForeignKeyInfo, error) {
-	rows, err := c.db.QueryContext(ctx, fmt.Sprintf("PRAGMA foreign_key_list(%q)", table))
+	rows, err := c.db.QueryContext(ctx, fmt.Sprintf("PRAGMA foreign_key_list(%s)", quoteIdent(table)))
 	if err != nil {
 		return nil, bridge.ErrorFromKernel(err)
 	}

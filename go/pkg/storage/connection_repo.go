@@ -92,8 +92,24 @@ func (r *ConnectionRepository) Get(id string) (protocol.ConnectionInfo, error) {
 	return info, err
 }
 
+// Update 把「读现状 → 读 password_ref → 写回」整段包进一个事务。三段散在
+// 连接池的不同物理连接上时是并发读改写：两个并发 Update 各自读到旧现状、
+// 各自整行写回，后提交者把先提交者的字段静默抹掉（丢字段，不是丢整个行）。
+// 事务把三段钉在同一连接上（SQLite 的写锁串行化整段），读到的就是写回前的
+// 现状。Rust 侧单连接串行无 BUSY，但同样存在该非原子 RMW 的语义问题；
+// 两端修法一致（Rust 侧 rusqlite 单连接天然串行，见 keyring 修复轮的记录）。
 func (r *ConnectionRepository) Update(id string, req *protocol.UpdateConnectionRequest) (protocol.ConnectionInfo, error) {
-	existing, err := r.Get(id)
+	tx, err := r.db.Begin()
+	if err != nil {
+		return protocol.ConnectionInfo{}, fmt.Errorf("begin update: %w", err)
+	}
+	defer tx.Rollback()
+
+	row := tx.QueryRow("SELECT "+connColumns+" FROM connections WHERE id = ?", id)
+	existing, err := scanConnection(row)
+	if err == sql.ErrNoRows {
+		return protocol.ConnectionInfo{}, ErrNotFound
+	}
 	if err != nil {
 		return protocol.ConnectionInfo{}, err
 	}
@@ -104,7 +120,7 @@ func (r *ConnectionRepository) Update(id string, req *protocol.UpdateConnectionR
 		passwordRef = *req.PasswordRef
 	} else {
 		var ref sql.NullString
-		if err := r.db.QueryRow("SELECT password_ref FROM connections WHERE id = ?", id).Scan(&ref); err != nil && err != sql.ErrNoRows {
+		if err := tx.QueryRow("SELECT password_ref FROM connections WHERE id = ?", id).Scan(&ref); err != nil && err != sql.ErrNoRows {
 			return protocol.ConnectionInfo{}, fmt.Errorf("read password_ref: %w", err)
 		}
 		passwordRef = ref.String
@@ -167,7 +183,7 @@ func (r *ConnectionRepository) Update(id string, req *protocol.UpdateConnectionR
 			return protocol.ConnectionInfo{}, fmt.Errorf("marshal ssh: %w", err)
 		}
 	}
-	_, err = r.db.Exec(
+	_, err = tx.Exec(
 		`UPDATE connections SET name=?, host=?, port=?, database=?, username=?, password_ref=?, options=?, ssh_tunnel=?, default_schema=?, read_only=?, "group"=?, color=?, updated_at=? WHERE id=?`,
 		name, nullStr(host), nullInt(port), nullStr(database), nullStr(username),
 		nullStr(passwordRef), string(optionsJSON), nullBytes(sshJSON), nullStr(defSchema), boolInt(readOnly),
@@ -176,6 +192,9 @@ func (r *ConnectionRepository) Update(id string, req *protocol.UpdateConnectionR
 	)
 	if err != nil {
 		return protocol.ConnectionInfo{}, fmt.Errorf("update connection: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return protocol.ConnectionInfo{}, fmt.Errorf("commit update: %w", err)
 	}
 	return protocol.ConnectionInfo{
 		ID:            id,

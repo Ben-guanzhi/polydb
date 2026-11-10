@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"strings"
@@ -36,10 +37,22 @@ type Server struct {
 	// WS 走 wsSession.inFlight（独立管理），不走此处。
 	httpInFlight map[string]context.CancelFunc
 	inFlightMu   sync.Mutex
+	// httpGate 是 HTTP 路径的并发准入信号量。WS 有 wsMaxConcurrentQueries=16
+	// 的 per-session 门控，HTTP 路径此前无上限——单个 HTTP 客户端可开无限并发
+	// goroutine 和 DB 连接。16 与 WS 一致。
+	httpGate chan struct{}
 }
 
+// httpMaxConcurrentQueries 是 HTTP 路径允许的全局并发查询数。与 WS 的
+// wsMaxConcurrentQueries 对齐。
+const httpMaxConcurrentQueries = 16
+
 func New(app *appcore.AppCore) *Server {
-	return &Server{app: app, httpInFlight: map[string]context.CancelFunc{}}
+	return &Server{
+		app:          app,
+		httpInFlight: map[string]context.CancelFunc{},
+		httpGate:     make(chan struct{}, httpMaxConcurrentQueries),
+	}
 }
 
 // NewWithToken 以启用 Bearer 鉴权的方式创建 Server（POLYDB_SERVER_TOKEN）。
@@ -396,9 +409,27 @@ func (s *Server) executeQuery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	// HTTP 并发门控：与 WS 的 per-session 上限对齐。超限时等待 30s，
+	// 仍无空位则返回 429。槽位在查询完成时释放（由后台 goroutine 持有），
+	// 而不是 handler 返回时——超时路径提前返回后，被放弃的查询还在占用
+	// DB 连接，只有它真正结束才腾出门控名额。
+	select {
+	case s.httpGate <- struct{}{}:
+	case <-time.After(30 * time.Second):
+		writeError(w, &protocol.PolyDBError{Code: protocol.ErrQueryFailed, Message: fmt.Sprintf("too many concurrent queries (max %d)", httpMaxConcurrentQueries)})
+		return
+	}
+	released := false
+	releaseGate := func() {
+		if !released {
+			released = true
+			<-s.httpGate
+		}
+	}
 	// 与 Rust 一致：路径 id 无论 body 是否覆盖都先校验；body 未带时用路径 id。
 	pathID, ok := connID(w, r)
 	if !ok {
+		releaseGate()
 		return
 	}
 	id := req.ConnectionID
@@ -425,6 +456,8 @@ func (s *Server) executeQuery(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		res, err := s.app.Execute(ctx, id, req.SQL, req.Params...)
 		ch <- execOutcome{res, err}
+		releaseGate() // the query is done: free the admission slot, even if
+		// the handler already returned a TIMEOUT
 	}()
 	var timeoutCh <-chan time.Time
 	if req.TimeoutMs != nil && *req.TimeoutMs > 0 {
@@ -470,15 +503,63 @@ func rowLimitFrom(maxRows *int64) int64 {
 
 // applyMaxRows 按 behavior.md §5 截断结果行：超过 limit 时截断并置
 // truncated=true、total_rows 记录原始行数（不额外 count）。
+//
+// 行上限之外还有响应字节上限：行数封了 10000 但每行可携带内联 blob（§5.1
+// 允许 ≤1MB），10000 行 × 1MB = 10GB 的响应会在序列化前把 server OOM。
+// 超过字节上限时同样截断（blob 编码长度以单元格负载估算）。
 func applyMaxRows(res *protocol.QueryResult, limit int64) *protocol.QueryResult {
-	if res == nil || int64(len(res.Rows)) <= limit {
+	if res == nil {
 		return res
 	}
 	total := int64(len(res.Rows))
-	res.Rows = res.Rows[:limit]
-	res.Truncated = true
-	res.TotalRows = &total
+	if total > limit {
+		res.Rows = res.Rows[:limit]
+		res.Truncated = true
+		res.TotalRows = &total
+	}
+	if resBytes(res) > maxResponseBytes {
+		keep := int64(0)
+		acc := int64(0)
+		for _, row := range res.Rows {
+			acc += rowBytes(row)
+			keep++
+			if acc >= maxResponseBytes {
+				break
+			}
+		}
+		if keep < int64(len(res.Rows)) {
+			res.Rows = res.Rows[:keep]
+			res.Truncated = true
+			if res.TotalRows == nil {
+				res.TotalRows = &total
+			}
+		}
+	}
 	return res
+}
+
+// maxResponseBytes 是单个查询响应的载荷字节上限（256MB）：超过它的响应在
+// writeMsgpack 序列化之前就把 server 拖进 OOM，截断是唯一的防线。
+const maxResponseBytes = 256 << 20
+
+// rowBytes 估算一行的编码负载。Value 持有的是 JSON 原文（msgpack 由它再编），
+// 所以 raw 长度就是负载的下界——blob 编码里 base64 已经把二进制放大 4/3，
+// 估计偏保守但截断方向正确。
+func rowBytes(row []protocol.Value) int64 {
+	n := int64(8)
+	for _, v := range row {
+		n += int64(len(v.Raw())) + 8
+	}
+	return n
+}
+
+// resBytes 估算整个结果的编码负载。
+func resBytes(res *protocol.QueryResult) int64 {
+	n := int64(64)
+	for _, row := range res.Rows {
+		n += rowBytes(row)
+	}
+	return n
 }
 
 // cancelQuery 取消一个正在执行的 HTTP 查询（best-effort）。
@@ -731,8 +812,18 @@ func decodeBody(r *http.Request, v any) error {
 	return dec.Decode(v)
 }
 
+// isJSONContentType parses the header with mime.ParseMediaType: the media type
+// is the part before the parameters, so every spelling of the JSON type —
+// "application/json", "application/json; charset=utf-8",
+// "application/json;charset=UTF-8" (no space), "text/json" — routes to the
+// JSON decoder. The old exact-string compare treated the no-space variant as
+// msgpack and failed the request with a decode error.
 func isJSONContentType(ct string) bool {
-	return ct == contentJSON || ct == "application/json; charset=utf-8"
+	mt, _, err := mime.ParseMediaType(ct)
+	if err != nil {
+		return false
+	}
+	return mt == contentJSON || mt == "text/json"
 }
 
 func writeMsgpack(w http.ResponseWriter, status int, v any) {

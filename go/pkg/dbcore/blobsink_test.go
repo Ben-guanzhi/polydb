@@ -83,23 +83,32 @@ func TestBlobValueRefWhenSinkEnabled(t *testing.T) {
 	}
 }
 
-func TestBlobValueSinkErrorFallsBackToPlaceholder(t *testing.T) {
+func TestBlobValueSinkErrorFallsBackWithTruncated(t *testing.T) {
 	SetBlobSink(&fakeSink{err: errors.New("disk full")})
 	defer SetBlobSink(nil)
 
 	inner := blobFields(t, BlobValue(make([]byte, MaxInlineBlobBytes+1)))
-	if len(inner) != 1 {
-		t.Fatalf("fallback fields = %v, want only len", inner)
+	if len(inner) != 2 {
+		t.Fatalf("fallback fields = %v, want len + truncated", inner)
 	}
 	if _, ok := inner["len"]; !ok {
 		t.Fatalf("len missing: %v", inner)
 	}
+	if inner["truncated"] != true {
+		t.Fatalf("truncated = %v, want true", inner["truncated"])
+	}
+	if _, ok := inner["ref"]; ok {
+		t.Fatalf("ref should not be set on fallback: %v", inner)
+	}
 }
 
-func TestBlobValueNoSinkKeepsPlaceholder(t *testing.T) {
+func TestBlobValueNoSinkKeepsPlaceholderWithTruncated(t *testing.T) {
 	SetBlobSink(nil)
 	inner := blobFields(t, BlobValue(make([]byte, MaxInlineBlobBytes+1)))
-	if len(inner) != 1 {
-		t.Fatalf("no-sink fields = %v, want only len", inner)
+	if len(inner) != 2 {
+		t.Fatalf("no-sink fields = %v, want len + truncated", inner)
+	}
+	if inner["truncated"] != true {
+		t.Fatalf("truncated = %v, want true", inner["truncated"])
 	}
 }

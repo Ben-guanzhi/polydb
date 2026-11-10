@@ -154,11 +154,26 @@ func queryResult(rows *sql.Rows, stmtType protocol.StatementType, start float64)
 		return nil, bridge.ErrorFromKernel(fmt.Errorf("column types: %w", err))
 	}
 	columns := make([]protocol.ResultColumn, len(colTypes))
+	// rawTypes 保留 go-ora 的**原始**类型拼写（TNSType stringer 名），
+	// 只用于取值解码：oracleValue → timestampValue 要靠它判定
+	// TIMESTAMP 的精度与是否带时区（timestamp.go:104-125 匹配
+	// "TIMESTAMPTZ"/"TIMESTAMPELTZ" 这类枚举拼写）。
+	//
+	// 对外的 ResultColumn.DataType 则用规范后的 Oracle SQL 类型名
+	// （typename.go），与 Rust 侧及 spec 的 "Database-specific type name"
+	// 口径一致（PD-28，2026-11-10）。
+	rawTypes := make([]string, len(colTypes))
 	for i, ct := range colTypes {
-		columns[i] = protocol.ResultColumn{Name: ct.Name(), DataType: pdb.DeclTypeOf(ct)}
+		rawTypes[i] = pdb.DeclTypeOf(ct)
+		columns[i] = protocol.ResultColumn{Name: ct.Name(), DataType: oracleTypeName(rawTypes[i])}
 	}
 	var resultRows [][]protocol.Value
+	truncated := false
 	for rows.Next() {
+		if len(resultRows) >= pdb.DriverMaxRows {
+			truncated = true
+			break
+		}
 		raw := make([]any, len(colTypes))
 		for i := range raw {
 			raw[i] = new(any)
@@ -168,7 +183,7 @@ func queryResult(rows *sql.Rows, stmtType protocol.StatementType, start float64)
 		}
 		rowVals := make([]protocol.Value, len(raw))
 		for i, r := range raw {
-			rowVals[i] = pdb.DriverToValueTyped(*(r.(*any)), columns[i].DataType)
+			rowVals[i] = oracleValue(*(r.(*any)), rawTypes[i])
 		}
 		resultRows = append(resultRows, rowVals)
 	}
@@ -180,6 +195,8 @@ func queryResult(rows *sql.Rows, stmtType protocol.StatementType, start float64)
 		Rows:            resultRows,
 		ExecutionTimeMs: timeNowMs() - start,
 		StatementType:   stmtType,
+		Truncated:       truncated,
+		HasMore:         truncated,
 	}, nil
 }
 

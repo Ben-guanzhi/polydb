@@ -238,12 +238,26 @@ func GlobQuoteText(s string) string {
 
 // textCond 是 LIKE 家族的同一份值的两种模式形态 + 是否取反 + 是否带 ESCAPE 子句。
 // SQLite 强制区分大小写时走 glob，其余方言走 like——两套转义符互不通用。
+// raw/wrap 记录包裹类 op 的未转义值与通配符形态：MSSQL 的 LIKE 没有 ESCAPE
+// 子句（见 renderLike），必须据此用方括号字符类重算模式，`!` 转义不能用。
 type textCond struct {
 	like    string
 	glob    string
 	neg     bool
 	escaped bool
+	raw     string
+	wrap    likeWrap
 }
+
+// likeWrap 是包裹类 op 的通配符形态：contains 两侧加 %，starts/ends 单侧加。
+type likeWrap int
+
+const (
+	wrapNone likeWrap = iota
+	wrapContains
+	wrapStartsWith
+	wrapEndsWith
+)
 
 // newTextCond 由 op 与值构造 textCond。like/not_like 原样透传（既有语义不变），
 // 包裹类 op 先各自转义字面值再加通配符。
@@ -256,15 +270,15 @@ func newTextCond(op protocol.FilterOperator, v protocol.Value) (textCond, error)
 	g := GlobQuoteText(raw)
 	switch op {
 	case protocol.FilterOpLike:
-		return textCond{like: raw, glob: LikePatternToGlob(raw)}, nil
+		return textCond{like: raw, glob: LikePatternToGlob(raw), raw: raw}, nil
 	case protocol.FilterOpNotLike:
-		return textCond{like: raw, glob: LikePatternToGlob(raw), neg: true}, nil
+		return textCond{like: raw, glob: LikePatternToGlob(raw), neg: true, raw: raw}, nil
 	case protocol.FilterOpContains:
-		return textCond{like: "%" + e + "%", glob: "*" + g + "*", escaped: true}, nil
+		return textCond{like: "%" + e + "%", glob: "*" + g + "*", escaped: true, raw: raw, wrap: wrapContains}, nil
 	case protocol.FilterOpStartsWith:
-		return textCond{like: e + "%", glob: g + "*", escaped: true}, nil
+		return textCond{like: e + "%", glob: g + "*", escaped: true, raw: raw, wrap: wrapStartsWith}, nil
 	case protocol.FilterOpEndsWith:
-		return textCond{like: "%" + e, glob: "*" + g, escaped: true}, nil
+		return textCond{like: "%" + e, glob: "*" + g, escaped: true, raw: raw, wrap: wrapEndsWith}, nil
 	default:
 		return textCond{}, invalidParam("not a like-family op")
 	}
@@ -280,8 +294,16 @@ func renderLike(d SQLDialect, col string, tc textCond, cs *bool) (string, protoc
 		return col + " " + neg + "GLOB ?", protocol.NewStringValue(tc.glob)
 	}
 	escClause := ""
+	pattern := tc.like
 	if tc.escaped {
-		escClause = fmt.Sprintf(" ESCAPE '%c'", likeEscapeChar)
+		if d.Flavor == FlavorMSSQL {
+			// T-SQL 的 LIKE 没有 ESCAPE 子句，且反斜杠不是转义符：包裹类 op
+			// 必须用方括号字符类重算模式，且不拼 ESCAPE（否则整条语句被
+			// SQL Server 判为语法错误，搜索条件静默失效）。
+			pattern = mssqlLikePattern(tc.raw, tc.wrap)
+		} else {
+			escClause = fmt.Sprintf(" ESCAPE '%c'", likeEscapeChar)
+		}
 	}
 	var sql string
 	switch {
@@ -303,7 +325,24 @@ func renderLike(d SQLDialect, col string, tc textCond, cs *bool) (string, protoc
 	default:
 		sql = col + " " + neg + "LIKE ?" + escClause
 	}
-	return sql, protocol.NewStringValue(tc.like)
+	return sql, protocol.NewStringValue(pattern)
+}
+
+// mssqlLikePattern 用方括号字符类把包裹类 op 的字面值转成 T-SQL LIKE 模式
+// （[%] [_] [[] 三个模式字符的字面形态）。T-SQL 的 LIKE 没有 ESCAPE 子句，
+// 反斜杠也不是转义符，所以通用的 `!` 转义与 ESCAPE 子句在 SQL Server 上都是
+// 语法错误。
+func mssqlLikePattern(raw string, wrap likeWrap) string {
+	escaped := strings.NewReplacer("[", "[[]", "%", "[%]", "_", "[_]").Replace(raw)
+	switch wrap {
+	case wrapContains:
+		return "%" + escaped + "%"
+	case wrapStartsWith:
+		return escaped + "%"
+	case wrapEndsWith:
+		return "%" + escaped
+	}
+	return escaped
 }
 
 // renderRegex 渲染 `regex` 条件；无原生正则的方言显式 NOT_SUPPORTED，绝不静默降级。

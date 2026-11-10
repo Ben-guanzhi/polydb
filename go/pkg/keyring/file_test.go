@@ -2,8 +2,10 @@ package keyring
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -88,6 +90,45 @@ func TestFileKeyringCorrupt(t *testing.T) {
 	}
 	if _, err := NewFileKeyring(dir, "pw"); err == nil {
 		t.Fatal("expected error on corrupt file")
+	}
+}
+
+// Save must replace the file atomically (temp + rename), not overwrite it in
+// place: a crash mid-write used to leave the ciphertext truncated or half
+// written, and GCM then failed on every later open — the whole stored secret
+// set was lost at once. The observable contract: after every successful Set,
+// the file at keyring.bin parses, and no temp file lingers.
+func TestFileKeyringSaveIsAtomic(t *testing.T) {
+	dir := t.TempDir()
+	k, err := NewFileKeyring(dir, "pw")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		if err := k.Set(fmt.Sprintf("k%d", i), "v"); err != nil {
+			t.Fatalf("Set %d: %v", i, err)
+		}
+		// The file on disk must be the complete new ciphertext: reopen from
+		// scratch and read everything written so far.
+		k2, err := NewFileKeyring(dir, "pw")
+		if err != nil {
+			t.Fatalf("reopen after Set %d: %v (a torn write would fail here)", i, err)
+		}
+		for j := 0; j <= i; j++ {
+			if _, err := k2.Get(fmt.Sprintf("k%d", j)); err != nil {
+				t.Fatalf("Get k%d after Set %d: %v", j, i, err)
+			}
+		}
+	}
+	// No temp residue: a successful rename consumed the .tmp file.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Fatalf("temp file left behind: %s", e.Name())
+		}
 	}
 }
 

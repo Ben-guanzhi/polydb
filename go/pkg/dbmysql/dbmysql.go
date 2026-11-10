@@ -34,6 +34,13 @@ func Open(ctx context.Context, dsn string) (*Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open mysql: %w", err)
 	}
+	// Bound the pool: without SetMaxOpenConns, database/sql opens an
+	// unbounded number of server connections. The kernel contract (conn.go)
+	// says pool parameters are applied centrally — each driver package is
+	// where they land. 10 open / 5 idle matches the kernel default and the
+	// other clients' conventions.
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("ping mysql: %w", err)

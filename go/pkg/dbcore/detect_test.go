@@ -48,6 +48,11 @@ func TestMutatesData(t *testing.T) {
 		{`SELECT * FROM "intoval" WHERE note = 'into the woods'`, false},
 		{"SELECT * FROM setval_log WHERE load_status = 1", false},
 		{"SELECT do_count, refresher, optimize_time FROM t", false},
+		// REPLACE 既是 MySQL 写语句动词又是内建字符串函数：函数调用形式
+		// （词后紧跟 `(`）是纯读，语句动词形式才是写。
+		{`SELECT REPLACE(name,'a','b') FROM t`, false},
+		{"SELECT REPLACE(name, 'a', 'b') AS cleaned FROM t", false},
+		{"REPLACE INTO t VALUES (1)", true}, // MySQL 动词形式仍是写
 	}
 	for _, c := range cases {
 		if got := MutatesData(c.sql, ""); got != c.want {

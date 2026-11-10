@@ -20,6 +20,15 @@ var mutatingKeywords = map[string]bool{
 	"SETVAL": true, "REFRESH": true, "INTO": true, "LOAD": true, "DO": true, "OPTIMIZE": true,
 }
 
+// keywordThatIsAlsoAFunction 列出「既是写关键字又是 SQL 内建函数名」的歧义词。
+// `REPLACE(name,'a','b')` 在 MySQL/SQLite/PG 里是纯读的字符串函数，但 REPLACE
+// 同时是 MySQL 的写语句动词——旧判定把 `SELECT REPLACE(name,'a','b') FROM t`
+// 判为写并在只读连接上拒绝。函数调用形式（词后紧跟 `(`）豁免：SQL 语句动词
+// 后从不直接跟 `(`，而函数调用总是。
+var keywordThatIsAlsoAFunction = map[string]bool{
+	"REPLACE": true,
+}
+
 // MutatesData 判断语句是否包含变更关键字（behavior.md §12.3 只读拦截的判定基础）。
 //
 // 扫描整条语句（含 WITH 子树与多语句），**按 token 类别**判定：只认裸词
@@ -33,13 +42,29 @@ var mutatingKeywords = map[string]bool{
 // 认为写了就算写了——宁可多问，放过去就是丢数据。
 func MutatesData(sql string, kind protocol.DatabaseKind) bool {
 	for _, p := range profilesFor(kind) {
-		for _, t := range scanTokens(sql, p) {
+		toks := scanTokens(sql, p)
+		for i, t := range toks {
 			if t.kind != tokenWord {
 				continue
 			}
-			if mutatingKeywords[strings.ToUpper(t.text)] {
-				return true
+			word := strings.ToUpper(t.text)
+			if !mutatingKeywords[word] {
+				continue
 			}
+			// A keyword that is also a SQL function name, called as a function
+			// (word immediately followed by `(`), is a read: MySQL's
+			// `SELECT REPLACE(name,'a','b') FROM t` never writes. A statement
+			// verb is never followed directly by an open paren. scanTokens
+			// skips whitespace without emitting tokens, so the gap between the
+			// word's end and the next token's start is whitespace.
+			if keywordThatIsAlsoAFunction[word] && i+1 < len(toks) {
+				next := toks[i+1]
+				if next.kind == tokenOther && next.start >= t.end &&
+					strings.HasPrefix(strings.TrimSpace(sql[t.end:next.start+1]), "(") {
+					continue
+				}
+			}
+			return true
 		}
 	}
 	return false

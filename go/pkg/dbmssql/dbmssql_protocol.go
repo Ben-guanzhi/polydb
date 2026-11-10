@@ -159,7 +159,12 @@ func queryResult(rows *sql.Rows, stmtType protocol.StatementType, start float64)
 		columns[i] = protocol.ResultColumn{Name: ct.Name(), DataType: pdb.DeclTypeOf(ct)}
 	}
 	var resultRows [][]protocol.Value
+	truncated := false
 	for rows.Next() {
+		if len(resultRows) >= pdb.DriverMaxRows {
+			truncated = true
+			break
+		}
 		raw := make([]any, len(colTypes))
 		for i := range raw {
 			raw[i] = new(any)
@@ -181,6 +186,8 @@ func queryResult(rows *sql.Rows, stmtType protocol.StatementType, start float64)
 		Rows:            resultRows,
 		ExecutionTimeMs: timeNowMs() - start,
 		StatementType:   stmtType,
+		Truncated:       truncated,
+		HasMore:         truncated,
 	}, nil
 }
 

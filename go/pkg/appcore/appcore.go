@@ -6,25 +6,30 @@ import (
 	"database/sql"
 	"errors"
 	"net"
-	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	dbc "github.com/dbcore/dbcore"
 	"github.com/google/uuid"
 	"github.com/polydb/polydb/pkg/dbcore"
 	"github.com/polydb/polydb/pkg/dbcore/bridge"
-	"github.com/polydb/polydb/pkg/dbmssql"
-	"github.com/polydb/polydb/pkg/dbmysql"
-	"github.com/polydb/polydb/pkg/dboracle"
-	"github.com/polydb/polydb/pkg/dbpostgres"
-	"github.com/polydb/polydb/pkg/dbredis"
-	"github.com/polydb/polydb/pkg/dbsqlite"
 	"github.com/polydb/polydb/pkg/keyring"
 	"github.com/polydb/polydb/pkg/protocol"
 	"github.com/polydb/polydb/pkg/sshtunnel"
 	"github.com/polydb/polydb/pkg/storage"
 	"golang.org/x/sync/singleflight"
+
+	// PD-01/PD-02：各驱动包的 init() 把 opener 登记进 pkg/dbcore 的驱动分派
+	// 注册表。这里的空导入就是「按 kind 选择引擎」的机制——与内核
+	// `_ "github.com/dbcore/dbcore/<engine>"` 的 opt-in 纪律一致，二进制不含
+	// 未使用驱动。
+	_ "github.com/polydb/polydb/pkg/dbmssql"
+	_ "github.com/polydb/polydb/pkg/dbmysql"
+	_ "github.com/polydb/polydb/pkg/dboracle"
+	_ "github.com/polydb/polydb/pkg/dbpostgres"
+	_ "github.com/polydb/polydb/pkg/dbredis"
+	_ "github.com/polydb/polydb/pkg/dbsqlite"
 )
 
 // driverSpec holds per-engine metadata: default port, schema, host requirement.
@@ -71,9 +76,16 @@ type AppCore struct {
 	// readOnly 记录已打开连接的只读标志（behavior.md §12.3）。
 	// Connect 时从 ConnectionInfo.read_only 快照，Disconnect 时清除。
 	readOnly map[string]bool
+	// userDisconnected 记录用户显式断开的连接（PD-04，2026-11-09）。
+	// 心跳（Ping）不得复活它——否则对不可达主机每 30s 重建一次 SSH 隧道+连接；
+	// 显式 Connect 清除该意图。execute 的懒连接语义不变（首次查询仍可免显式
+	// Connect），与 Rust 侧 user_disconnected 的判定范围严格一致。
+	userDisconnected map[string]bool
 	// knownHostsPath 为 SSH 主机密钥 known_hosts 文件（TOFU 首用校验，见 docs/ssh-tunnel.md）；
 	// 空则不校验主机密钥（M8 原行为）。由宿主（server/tui main）经 SetKnownHostsPath 注入。
-	knownHostsPath string
+	// atomic.Value：宿主在服务启动前写入，Connect 在 HTTP goroutine 里读——
+	// 跨 goroutine 的写读需要同步（见 SetKnownHostsPath）。
+	knownHostsPath atomic.Value
 	// blobs 是大字段旁路存储（spec/encoding.md §5.2）：New 时建句柄、
 	// 启动清扫并注册到 dbcore（进程级 sink，覆盖本进程所有入口）。
 	blobs *storage.BlobStore
@@ -89,14 +101,15 @@ func New(db *sql.DB, kr keyring.Keyring) *AppCore {
 	blobs.Sweep()
 	dbcore.SetBlobSink(blobs)
 	a := &AppCore{
-		repo:        storage.NewConnectionRepository(db),
-		kr:          kr,
-		connections: make(map[string]dbcore.Connection),
-		tunnels:     make(map[string]*sshtunnel.Tunnel),
-		txManagers:  make(map[string]*bridge.TxManager),
-		txMeta:      make(map[string]*txMeta),
-		readOnly:    make(map[string]bool),
-		blobs:       blobs,
+		repo:             storage.NewConnectionRepository(db),
+		kr:               kr,
+		connections:      make(map[string]dbcore.Connection),
+		tunnels:          make(map[string]*sshtunnel.Tunnel),
+		txManagers:       make(map[string]*bridge.TxManager),
+		txMeta:           make(map[string]*txMeta),
+		readOnly:         make(map[string]bool),
+		userDisconnected: make(map[string]bool),
+		blobs:            blobs,
 	}
 	// 事务清扫随各连接的 TxManager 自带 sweeper 启动，AppCore 不再全局起 goroutine。
 	return a
@@ -119,7 +132,18 @@ func (a *AppCore) GetBlob(blobID string) ([]byte, error) {
 }
 
 // SetKnownHostsPath 指定 SSH known_hosts 文件路径；传空串保持 M8 的不校验行为。
-func (a *AppCore) SetKnownHostsPath(path string) { a.knownHostsPath = path }
+//
+// 宿主都在服务启动前调用（写后无并发写），但 Connect 在 HTTP goroutine 里读
+// 同一字段——跨 goroutine 的写读是 Go 内存模型意义上的 data race（race
+// detector 标记，且架构上允许宿主运行中改路径）。atomic.Value 消掉竞争，
+// 语义不变：Set 后新 Connect 生效，进行中的连接不回溯。
+func (a *AppCore) SetKnownHostsPath(path string) { a.knownHostsPath.Store(path) }
+
+// KnownHostsPath 返回当前 known_hosts 路径（读侧与 SetKnownHostsPath 配对）。
+func (a *AppCore) KnownHostsPath() string {
+	p, _ := a.knownHostsPath.Load().(string)
+	return p
+}
 
 // ─── 连接 CRUD ─────────────────────────────────────────────
 
@@ -162,12 +186,70 @@ func (a *AppCore) UpdateConnection(id string, req *protocol.UpdateConnectionRequ
 
 func (a *AppCore) DeleteConnection(id string) (bool, error) {
 	a.Disconnect(id)
-	return a.repo.Delete(id)
+	// 先取回 secret 引用再删行：keyring 是独立存储，DELETE 不级联。
+	// 不留这一步的话删除连接后 keyring 里仍残留可复用的明文密码
+	// （PD-07，2026-11-09），等于把「删除」做成了只删元数据的假删除。
+	refs, err := a.secretRefs(id)
+	if err != nil {
+		return false, err
+	}
+	ok, err := a.repo.Delete(id)
+	if err != nil {
+		return false, err
+	}
+	a.revokeSecrets(refs)
+	return ok, nil
+}
+
+// secretRefs 收集连接在 keyring 里的全部凭据引用（连接密码 + SSH 密码/私钥口令）。
+// 连接不存在时返回已收集到的空集合而不是错误——Delete 对不存在的 id 幂等返回 false。
+func (a *AppCore) secretRefs(id string) ([]string, error) {
+	var refs []string
+	ref, err := a.repo.GetPasswordRef(id)
+	switch {
+	case err == nil && ref != "":
+		refs = append(refs, ref)
+	case err != nil && !errors.Is(err, storage.ErrNotFound):
+		return nil, err
+	}
+	info, err := a.repo.Get(id)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return refs, nil
+		}
+		return nil, err
+	}
+	if info.SSHTunnel != nil {
+		if info.SSHTunnel.PasswordRef != "" {
+			refs = append(refs, info.SSHTunnel.PasswordRef)
+		}
+		if info.SSHTunnel.PrivateKeyPassphraseRef != "" {
+			refs = append(refs, info.SSHTunnel.PrivateKeyPassphraseRef)
+		}
+	}
+	return refs, nil
+}
+
+// revokeSecrets 摘除 keyring 里的凭据；删除失败**不**向上传播（不掩盖行删除
+// 结果）。凭据残留可被后续对同一 ref 的 Set 覆盖，故这里静默是有意的；
+// 调用方已保证 ref 只在此刻之后不再被引用（Create 的一次性明文已清空）。
+func (a *AppCore) revokeSecrets(refs []string) {
+	for _, r := range refs {
+		if r == "" {
+			continue
+		}
+		_ = a.kr.Delete(r)
+	}
 }
 
 // ─── 连通性 ────────────────────────────────────────────────
 
 func (a *AppCore) Connect(ctx context.Context, id string) error {
+	// 显式 connect 清除「用户断开」意图：心跳因此得以恢复工作（PD-04，
+	// 与 Rust connect 首行的 user_disconnected.remove 镜像）。
+	a.mu.Lock()
+	delete(a.userDisconnected, id)
+	a.mu.Unlock()
 	info, err := a.repo.Get(id)
 	if err != nil {
 		return err
@@ -200,7 +282,7 @@ func (a *AppCore) Connect(ctx context.Context, id string) error {
 		if cfg.Port == 0 {
 			cfg.Port = 22 // OpenSSH 默认端口（known_hosts 校验与拨号一致）
 		}
-		tunnel, err = sshtunnel.Open(ctx, &cfg, targetHost, targetPort, sshPwd, a.knownHostsPath)
+		tunnel, err = sshtunnel.Open(ctx, &cfg, targetHost, targetPort, sshPwd, a.KnownHostsPath())
 		if err != nil {
 			return &protocol.PolyDBError{Code: protocol.ErrSSHTunnelFailed, Message: err.Error(), Retryable: true}
 		}
@@ -213,57 +295,17 @@ func (a *AppCore) Connect(ctx context.Context, id string) error {
 		connInfo.Port = atoi(port)
 	}
 
-	var (
-		d    dbcore.Driver
-		err2 error
-	)
-	switch info.Kind {
-	case protocol.DatabaseKindSQLite:
-		path := info.Database
-		if path == "" {
-			path = ":memory:"
-		}
-		c, errOpen := dbsqlite.Open(ctx, path)
-		if errOpen != nil {
-			err2 = errOpen
-			break
-		}
-		d = dbsqlite.NewProtocolDriver(c)
-	case protocol.DatabaseKindPostgres:
-		var c *dbpostgres.Conn
-		c, err2 = dbpostgres.Open(ctx, postgresDSN(connInfo, password))
-		if err2 == nil {
-			d = dbpostgres.NewProtocolDriver(c)
-		}
-	case protocol.DatabaseKindMySQL:
-		var c *dbmysql.Conn
-		c, err2 = dbmysql.Open(ctx, mysqlDSN(connInfo, password))
-		if err2 == nil {
-			d = dbmysql.NewProtocolDriver(c)
-		}
-	case protocol.DatabaseKindMSSQL:
-		var c *dbmssql.Conn
-		c, err2 = dbmssql.Open(ctx, mssqlDSN(connInfo, password))
-		if err2 == nil {
-			d = dbmssql.NewProtocolDriver(c)
-		}
-	case protocol.DatabaseKindOracle:
-		var c *dboracle.Conn
-		c, err2 = dboracle.Open(ctx, oracleDSN(connInfo, password))
-		if err2 == nil {
-			d = dboracle.NewProtocolDriver(c)
-		}
-	case protocol.DatabaseKindRedis:
-		d, err2 = dbredis.Open(ctx, redisAddr(connInfo), redisDBIndex(info), password)
-	default:
-		if tunnel != nil {
-			_ = tunnel.Close()
-		}
-		return &protocol.PolyDBError{Code: protocol.ErrNotSupported, Message: "driver not implemented: " + string(info.Kind)}
-	}
+	// PD-01/PD-02（2026-11-09）：按 kind 查驱动分派注册表打开连接，删除手写
+	// switch。注册表由各驱动包 init() 登记（见 pkg/dbcore/registry.go），新增引擎
+	// 退化为「驱动包登记一项 + driverSpecs 补一项元数据」。DSN/地址方言知识已
+	// 下沉到各驱动包，appcore 不再持有任何 kind 专属的打开逻辑。
+	d, err2 := dbcore.OpenDriver(ctx, info.Kind, connInfo, password)
 	if err2 != nil {
 		if tunnel != nil {
 			_ = tunnel.Close()
+		}
+		if errors.Is(err2, dbcore.ErrDriverNotRegistered) {
+			return &protocol.PolyDBError{Code: protocol.ErrNotSupported, Message: err2.Error()}
 		}
 		return &protocol.PolyDBError{Code: protocol.ErrConnectionFailed, Message: err2.Error(), Retryable: true}
 	}
@@ -381,6 +423,9 @@ func (a *AppCore) Disconnect(id string) {
 		delete(a.connections, id)
 	}
 	delete(a.readOnly, id)
+	// PD-04：标记用户显式断开。心跳（Ping）据此拒绝复活，避免对不可达主机
+	// 周期性重建 SSH 隧道+连接；execute 的懒连接语义不变。
+	a.userDisconnected[id] = true
 	var tunnel *sshtunnel.Tunnel
 	if t, ok := a.tunnels[id]; ok {
 		tunnel = t
@@ -430,11 +475,25 @@ func (a *AppCore) ConnectionStatus(id string) (protocol.ConnectionStatus, error)
 }
 
 func (a *AppCore) Ping(ctx context.Context, id string) error {
+	// 心跳是断开连接事实上的重连器：ping 不得复活用户主动断开的连接
+	// （PD-04，对不可达主机每 30s 重建一次 SSH 隧道+连接）。显式 Connect 恢复；
+	// execute 的懒连接语义保持不变（首次查询仍可免显式 Connect）。
+	// 与 Rust ping 首行的 user_disconnected 判定镜像。
+	if a.isUserDisconnected(id) {
+		return &protocol.PolyDBError{Code: protocol.ErrConnectionFailed, Message: "connection is disconnected"}
+	}
 	c, err := a.ensure(ctx, id)
 	if err != nil {
 		return err
 	}
 	return c.Driver().Ping(ctx)
+}
+
+// isUserDisconnected 报告连接是否被用户显式断开且尚未显式重连。
+func (a *AppCore) isUserDisconnected(id string) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.userDisconnected[id]
 }
 
 // ensure 懒连接：已连接直接返回，否则按保存的连接信息打开驱动。
@@ -698,6 +757,11 @@ func (a *AppCore) Close() {
 		for _, m := range managers {
 			m.Close()
 		}
+		// PD-03（2026-11-09）：销毁 AppCore 时摘掉进程级旁路写入端。此前只在
+		// New 里 set 从不 clear，销毁后全局 sink 仍指向已释放的 BlobStore（悬垂），
+		// 多实例互相覆盖，且新实例的 blob 可能写进旧实例的目录。与 Rust 侧
+		// Drop::drop 的 clear_blob_sink 严格镜像（双实现一致）。
+		dbcore.SetBlobSink(nil)
 	})
 }
 
@@ -954,132 +1018,5 @@ func atoi(s string) int {
 	return n
 }
 
-func postgresDSN(info protocol.ConnectionInfo, password string) string {
-	host := info.Host
-	if host == "" {
-		host = "localhost"
-	}
-	port := info.Port
-	if port == 0 {
-		port = 5432
-	}
-	dbname := info.Database
-	if dbname == "" {
-		dbname = "postgres"
-	}
-	userinfo := url.User(info.Username)
-	if password != "" {
-		userinfo = url.UserPassword(info.Username, password)
-	}
-	return "postgres://" + userinfo.String() + "@" + host + ":" + itoa(port) + "/" + dbname + "?sslmode=disable"
-}
-
-func mysqlDSN(info protocol.ConnectionInfo, password string) string {
-	host := info.Host
-	if host == "" {
-		host = "localhost"
-	}
-	port := info.Port
-	if port == 0 {
-		port = 3306
-	}
-	dbname := info.Database
-	if dbname == "" {
-		dbname = "mysql"
-	}
-	return info.Username + ":" + password + "@tcp(" + host + ":" + itoa(port) + ")/" + dbname
-}
-
-func mssqlDSN(info protocol.ConnectionInfo, password string) string {
-	host := info.Host
-	if host == "" {
-		host = "localhost"
-	}
-	port := info.Port
-	if port == 0 {
-		port = 1433
-	}
-	u := &url.URL{Scheme: "sqlserver", Host: host + ":" + itoa(port)}
-	if info.Username != "" {
-		userinfo := url.User(info.Username)
-		if password != "" {
-			userinfo = url.UserPassword(info.Username, password)
-		}
-		u.User = userinfo
-	}
-	if info.Database != "" {
-		q := u.Query()
-		q.Set("database", info.Database)
-		u.RawQuery = q.Encode()
-	}
-	return u.String()
-}
-
-func oracleDSN(info protocol.ConnectionInfo, password string) string {
-	host := info.Host
-	if host == "" {
-		host = "localhost"
-	}
-	port := info.Port
-	if port == 0 {
-		port = 1521
-	}
-	service := info.Database
-	if service == "" {
-		service = "ORCL"
-	}
-	userinfo := url.User(info.Username)
-	if password != "" {
-		userinfo = url.UserPassword(info.Username, password)
-	}
-	return "oracle://" + userinfo.String() + "@" + host + ":" + itoa(port) + "/" + service
-}
-
-func redisAddr(info protocol.ConnectionInfo) string {
-	host := info.Host
-	if host == "" {
-		host = "localhost"
-	}
-	port := info.Port
-	if port == 0 {
-		port = 6379
-	}
-	return host + ":" + itoa(port)
-}
-
-// redisDBIndex 用连接信息里的 database 字段存 Redis db 编号（"0".."15"）。
-func redisDBIndex(info protocol.ConnectionInfo) int {
-	if info.Database == "" {
-		return 0
-	}
-	idx := 0
-	for _, r := range info.Database {
-		if r < '0' || r > '9' {
-			return 0
-		}
-		idx = idx*10 + int(r-'0')
-	}
-	return idx
-}
-
-func itoa(v int) string {
-	if v == 0 {
-		return "0"
-	}
-	negative := v < 0
-	if negative {
-		v = -v
-	}
-	var b [20]byte
-	i := len(b)
-	for v > 0 {
-		i--
-		b[i] = byte('0' + v%10)
-		v /= 10
-	}
-	if negative {
-		i--
-		b[i] = '-'
-	}
-	return string(b[i:])
-}
+// DSN / 地址的方言知识已下沉到各驱动包的 registry.go（PD-01/PD-02）；
+// appcore 只保留与 kind 无关的通用工具。

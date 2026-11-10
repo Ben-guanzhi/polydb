@@ -446,6 +446,57 @@ func TestQueryMaxRows(t *testing.T) {
 	}
 }
 
+// 行数上限封 10000 但每行可携带 ≤1MB 的内联 blob（behavior.md §5.1），
+// 10000 行 × 1MB = 10GB 会在序列化前把 server 拖进 OOM：超过 maxResponseBytes
+// 的响应必须按字节截断（applyMaxRows 的字节手臂）。用单元级构造直接打
+// applyMaxRows——起真实 HTTP 会话塞 256MB 数据太慢。
+func TestApplyMaxRowsByteCapTruncates(t *testing.T) {
+	big := strings.Repeat("x", 100<<20) // 100MB 字符串 ≈ 100MB 负载
+	mk := func(n int) *protocol.QueryResult {
+		res := &protocol.QueryResult{}
+		for i := 0; i < n; i++ {
+			res.Rows = append(res.Rows, []protocol.Value{protocol.NewStringValue(big)})
+		}
+		return res
+	}
+	out := applyMaxRows(mk(10), 10000)
+	if !out.Truncated {
+		t.Fatalf("byte cap must truncate")
+	}
+	if len(out.Rows) >= 10 {
+		t.Fatalf("rows = %d, must be cut below 10", len(out.Rows))
+	}
+	if out.TotalRows == nil || *out.TotalRows != 10 {
+		t.Fatalf("total_rows = %v, want 10", out.TotalRows)
+	}
+
+	// 正常大小不受影响。
+	out = applyMaxRows(mk(3), 10000)
+	if out.Truncated || len(out.Rows) != 3 {
+		t.Fatalf("normal result: truncated=%v rows=%d, want false/3", out.Truncated, len(out.Rows))
+	}
+}
+
+// 行上限与字节上限同时命中：先按行截到 limit，再按字节截；total_rows 记录
+// 最初的总行数。
+func TestApplyMaxRowsRowCapThenByteCap(t *testing.T) {
+	big := strings.Repeat("x", 60<<20) // 60MB：8 行 480MB，行上限 5 后仍 300MB 超 256MB
+	res := &protocol.QueryResult{}
+	for i := 0; i < 8; i++ {
+		res.Rows = append(res.Rows, []protocol.Value{protocol.NewStringValue(big)})
+	}
+	out := applyMaxRows(res, 5)
+	if !out.Truncated {
+		t.Fatalf("must truncate")
+	}
+	if len(out.Rows) > 5 {
+		t.Fatalf("rows = %d, must be <= 5 after row cap", len(out.Rows))
+	}
+	if out.TotalRows == nil || *out.TotalRows != 8 {
+		t.Fatalf("total_rows = %v, want original 8", out.TotalRows)
+	}
+}
+
 func TestQueryTimeout(t *testing.T) {
 	srv := newTestServer(t)
 	id := createSQLiteConn(t, srv)
@@ -1209,5 +1260,57 @@ func TestWSQueryMaxRows(t *testing.T) {
 	}
 	if truncated, _ := result["truncated"].(bool); !truncated {
 		t.Fatalf("expected truncated=true, got %v", result["truncated"])
+	}
+}
+
+// PD-11（2026-11-09）：查询执行是「获取」（可被 cancel 撤回），帧发射是
+// 「发射」（不可逆）。边界点之后到达的 cancel 不得回滚已发射的结果，也不
+// 得在结果之后补发 query_cancelled——否则 §6.1 的发射边界被穿透。
+// 这里钉住：结果已发射后再 cancel，只回 query not found（query_cancelled
+// 通道已随 retireQuery 关闭），且会话仍可继续查询。
+func TestWSQueryCancelAfterResultEmissionBoundary(t *testing.T) {
+	srv := newTestServer(t)
+	id := createSQLiteConn(t, srv)
+	_, _, _ = mpDo(t, srv, "POST", "/api/connections/"+id+"/query",
+		map[string]any{"sql": "CREATE TABLE t(x INTEGER); INSERT INTO t VALUES(7)"})
+
+	w := wsDial(t, srv)
+	defer w.close()
+	w.send(map[string]any{"type": "hello", "connection_id": id, "client_version": "0.1.0"})
+	if typ, _ := w.recv(3 * time.Second); typ != "hello_ack" {
+		t.Fatalf("expected hello_ack")
+	}
+
+	qid := "11111111-2222-3333-4444-555555555558"
+	w.send(map[string]any{"type": "query", "query_id": qid, "sql": "SELECT x FROM t"})
+	if typ, _ := w.recv(3 * time.Second); typ != "query_started" {
+		t.Fatalf("expected query_started")
+	}
+	if typ, _ := w.recv(3 * time.Second); typ != "query_result" {
+		t.Fatalf("expected query_result")
+	}
+
+	// 结果已发射：边界之后 cancel 不能撤回它。
+	w.send(map[string]any{"type": "query_cancel", "query_id": qid})
+	typ, msg := w.recv(3 * time.Second)
+	if typ != "query_error" {
+		t.Fatalf("expected query_error (not found), got %q: %v", typ, msg)
+	}
+	errObj, _ := msg["error"].(map[string]any)
+	if errObj["code"] != "POLYDB_ERR_INVALID_PARAM" {
+		t.Fatalf("expected POLYDB_ERR_INVALID_PARAM, got %v", errObj)
+	}
+	if _, ok := errObj["message"].(string); !ok || !strings.Contains(errObj["message"].(string), "query not found") {
+		t.Fatalf("expected query not found message, got %v", errObj)
+	}
+
+	// 会话未被破坏：再查一次仍正常。
+	qid2 := "11111111-2222-3333-4444-555555555559"
+	w.send(map[string]any{"type": "query", "query_id": qid2, "sql": "SELECT 42 AS v"})
+	if typ, _ := w.recv(3 * time.Second); typ != "query_started" {
+		t.Fatalf("expected query_started on second query")
+	}
+	if typ, _ := w.recv(3 * time.Second); typ != "query_result" {
+		t.Fatalf("expected query_result on second query")
 	}
 }

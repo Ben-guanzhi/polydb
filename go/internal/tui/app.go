@@ -1238,6 +1238,10 @@ func (a *App) runCommand(name, arg string) tea.Cmd {
 		a.overlays = append(a.overlays, errBox{err: fmt.Errorf("unknown command: %s", name)})
 		return nil
 	}
+	// PD-09：派发期间持有工厂的依赖计数，使 UnregisterFactory 的
+	// `¬ relied_n(γ)` 守卫可表达（工厂可能阻塞在网络/IO 上）。
+	AcquireFactory(name)
+	defer ReleaseFactory(name)
 	ov, err := factory(a, arg)
 	if err != nil {
 		a.overlays = append(a.overlays, errBox{err: err})

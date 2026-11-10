@@ -10,6 +10,8 @@ package changes
 import (
 	"bytes"
 	"encoding/json"
+	"math"
+	"math/big"
 	"sort"
 
 	"github.com/polydb/polydb/pkg/protocol"
@@ -135,9 +137,32 @@ func parseValue(v protocol.Value) parsedValue {
 }
 
 // ValuesEqual 跨整型 / 浮点按数值比较，避免把 5（整数）判成与 5.0（浮点）不等。
+//
+// 精度守卫（与 Rust 端 int_float_equal、Web 端 bigintSafe 字符串承载三端对齐）：
+// 64 位整数只有 53 位尾数，Float64() 会把两个 >2^53 的相邻大整数塌成同一个
+// double 而误判相等——编辑被当 no-op 静默丢弃。所以先走**精确整数路径**
+// （两侧都能精确解析成整数时直接比，不经 double）；一侧是整数、另一侧是
+// 带小数点的文本时，只有"该文本是整数值（5.0）且落在 int64 范围内"才判等
+// （Rust int_float_equal 同款），其余一律不等；两侧都不是精确整数才落
+// float64 比较。
 func ValuesEqual(a, b protocol.Value) bool {
 	pa, pb := parseValue(a), parseValue(b)
 	if pa.kind == vNumber && pb.kind == vNumber {
+		ia, aInt := exactInt(pa.num)
+		ib, bInt := exactInt(pb.num)
+		if aInt && bInt {
+			return ia.Cmp(ib) == 0 // 两个精确整数：直接比，不经 double
+		}
+		if aInt != bInt {
+			// 一侧整数、一侧带小数点/指数。整数值的浮点（5.0）仍须与整数 5
+			// 判等：把浮点侧的整数值也解析出来比；带真实小数部分或超出
+			// int64 范围的不可能相等。
+			intSide, floatSide := pa.num, pb.num
+			if bInt {
+				intSide, floatSide = pb.num, pa.num
+			}
+			return floatValueEqualsInt(floatSide, intSide)
+		}
 		fa, e1 := pa.num.Float64()
 		fb, e2 := pb.num.Float64()
 		if e1 == nil && e2 == nil {
@@ -158,6 +183,43 @@ func ValuesEqual(a, b protocol.Value) bool {
 	}
 	return false
 }
+
+// exactInt 把 json.Number 解析为精确整数。返回 ok=false 表示这不是一个纯整数
+// 文本——小数、科学计数或超范围数字。
+func exactInt(n json.Number) (*big.Int, bool) {
+	i, ok := new(big.Int).SetString(n.String(), 10)
+	return i, ok
+}
+
+// floatValueEqualsInt 判"整数值的浮点文本"是否与整数相等（5.0 ↔ 5）。
+// 只有文本是纯整数值且落在 int64 范围内才可能相等——这是 Rust 端
+// int_float_equal 的语义：范围外的浮点不可能与 int64 精确相等。
+func floatValueEqualsInt(floatSide, intSide json.Number) bool {
+	f, err := floatSide.Float64()
+	if err != nil || !isIntegralFloat(f) {
+		return false
+	}
+	if f < mathMinInt64AsFloat || f >= mathMaxInt64AsFloat {
+		return false
+	}
+	i, ok := exactInt(intSide)
+	if !ok {
+		return false
+	}
+	return new(big.Float).SetInt(i).Cmp(big.NewFloat(f)) == 0
+}
+
+// isIntegralFloat 报告浮点是否为整数值（无小数部分）。NaN/Inf 直接排除。
+func isIntegralFloat(f float64) bool {
+	return !math.IsInf(f, 0) && !math.IsNaN(f) && f == math.Trunc(f)
+}
+
+// 浮点与 int64 边界比较用的常量：2^63 本身可被 double 精确表示，
+// MaxInt64 (=2^63-1) 不行——落在 2^63 的 double 已超 int64，范围外。
+const (
+	mathMinInt64AsFloat = -9223372036854775808.0
+	mathMaxInt64AsFloat = 9223372036854775808.0 // 2^63，double 能精确表示的最小越界点
+)
 
 // ─── 变更队列 ──────────────────────────────────────────────
 

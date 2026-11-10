@@ -146,8 +146,21 @@ func (k *FileKeyring) save(m map[string]string) error {
 	if err := os.MkdirAll(filepath.Dir(k.path), 0o700); err != nil {
 		return fmt.Errorf("keyring: mkdir: %w", err)
 	}
-	if err := os.WriteFile(k.path, data, 0o600); err != nil {
-		return fmt.Errorf("keyring: write %s: %w", k.path, err)
+	// Atomic replacement, not an in-place overwrite: a crash or power loss
+	// mid-write used to leave the ciphertext truncated or half-old-half-new,
+	// and GCM verification then failed on EVERY subsequent open — the whole
+	// stored secret set was lost at once (server startup treats keyring open
+	// failure as fatal). Write to a temp file in the same directory and rename:
+	// rename within one directory is atomic on both Windows and POSIX, so the
+	// file at k.path is always either the old complete ciphertext or the new
+	// complete one, never a mix.
+	tmp := k.path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("keyring: write %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, k.path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("keyring: rename %s: %w", k.path, err)
 	}
 	return nil
 }

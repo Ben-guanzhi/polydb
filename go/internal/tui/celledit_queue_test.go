@@ -5,9 +5,11 @@ package tui
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/polydb/polydb/internal/tui/backend"
+	"github.com/polydb/polydb/internal/tuidata"
 	"github.com/polydb/polydb/pkg/changes"
 	"github.com/polydb/polydb/pkg/protocol"
 )
@@ -136,6 +138,85 @@ func TestCommitQueueFallsBackWithoutTx(t *testing.T) {
 	}
 	if n != 2 || len(be.ran) != 2 {
 		t.Fatalf("应逐条执行 2 条, got n=%d ran=%d", n, len(be.ran))
+	}
+}
+
+// probeSpy 让指定语句返回 0 行，并记录探针（SELECT 1 ...）的执行。
+type probeSpy struct {
+	fakeBackend
+	stmts      []string
+	zeroAt     int // 1-based：第 n 条提交语句返回 0 行；0 = 不归零
+	probeSeen  []string
+	probeRows  int // 探针返回的行数（1 = 行在，0 = 行没了）
+	begins     int
+	commits    int
+	rollbacks  int
+	submits    int // 非探针语句计数
+}
+
+func (s *probeSpy) PrimaryKeys(namespace, table string) ([]string, error) {
+	return []string{"id"}, nil
+}
+
+func (s *probeSpy) Begin() (string, error) { s.begins++; return "tx1", nil }
+
+func (s *probeSpy) ExecuteInTx(txID, stmt string) (backend.Result, error) {
+	if strings.HasPrefix(stmt, "SELECT 1 FROM") {
+		s.probeSeen = append(s.probeSeen, stmt)
+		frame := tuidata.New("1")
+		if s.probeRows > 0 {
+			frame.AppendRow([]any{"1"})
+		}
+		return backend.Result{Frame: frame}, nil
+	}
+	s.stmts = append(s.stmts, stmt)
+	s.submits++
+	if s.zeroAt > 0 && s.submits == s.zeroAt {
+		return backend.Result{Exec: &backend.ExecResult{RowsAffected: 0}}, nil
+	}
+	return backend.Result{Exec: &backend.ExecResult{RowsAffected: 1}}, nil
+}
+
+func (s *probeSpy) Commit(txID string) error   { s.commits++; return nil }
+func (s *probeSpy) Rollback(txID string) error { s.rollbacks++; return nil }
+
+// TestCommitQueueZeroRowUpdateProbesKey pins the 0-row guard: an UPDATE that
+// affected 0 rows triggers an in-transaction key probe. Row present = a MySQL
+// changed-rows no-op, the batch commits; row gone = concurrent delete/PK
+// change, the batch rolls back. (R2-02; TableProGo zeroRowVerdict 同课.)
+func TestCommitQueueZeroRowUpdateProbesKey(t *testing.T) {
+	// 行还在：探针返回 1 行 → 同值更新 no-op，整批提交。
+	s := &probeSpy{probeRows: 1, zeroAt: 1}
+	q := queueWith(t)
+	n, err := commitQueue(s, "", "people", "", q)
+	if err != nil {
+		t.Fatalf("行在的 0 行更新应按 no-op 放行: %v", err)
+	}
+	if n != 2 || s.commits != 1 || s.rollbacks != 0 {
+		t.Fatalf("no-op 放行应提交整批: n=%d commit=%d rollback=%d", n, s.commits, s.rollbacks)
+	}
+	if len(s.probeSeen) != 1 {
+		t.Fatalf("应恰一次定位探针, got %d", len(s.probeSeen))
+	}
+	// 探针复用提交语句的定位谓词（表名 + 主键谓词，与提交语句同源同方言）。
+	if !strings.Contains(s.probeSeen[0], "people") || !strings.Contains(s.probeSeen[0], "id") {
+		t.Fatalf("探针应带表名与主键谓词: %q", s.probeSeen[0])
+	}
+
+	// 行没了：探针返回 0 行 → 并发删除/改键，整批回滚。
+	s2 := &probeSpy{probeRows: 0, zeroAt: 1}
+	q2 := queueWith(t)
+	if _, err := commitQueue(s2, "", "people", "", q2); err == nil {
+		t.Fatal("行已消失的 0 行更新必须报错")
+	}
+	if s2.commits != 0 || s2.rollbacks != 1 {
+		t.Fatalf("行消失应回滚: commit=%d rollback=%d", s2.commits, s2.rollbacks)
+	}
+	if q2.Size() != 2 {
+		t.Fatalf("失败后队列应保留变更待重试, got %d", q2.Size())
+	}
+	if !strings.Contains(strings.Join(s2.probeSeen, ";"), "people") {
+		t.Fatalf("回滚前也应执行过探针: %v", s2.probeSeen)
 	}
 }
 

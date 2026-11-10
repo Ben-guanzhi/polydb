@@ -290,4 +290,82 @@ func TestAdapterCloseIsNoop(t *testing.T) {
 	}
 }
 
+// TestGenericToDTypeFallsBackToSample pins the §94 fix: protocol.ResultColumn.
+// generic_type is never populated on the Go data plane (bridge.QueryResultFromDB
+// leaves it zero; the v1 drivers don't fill it either), so the type line must
+// infer from sample values or every column renders as "str".
+func TestGenericToDTypeFallsBackToSample(t *testing.T) {
+	cases := []struct {
+		name   string
+		g      protocol.GenericType
+		sample []any
+		want   tuidata.DType
+	}{
+		{"empty generic and empty sample", "", nil, tuidata.TypeString},
+		{"empty generic and all nulls", "", []any{nil, nil}, tuidata.TypeString},
+		{"empty generic ints", "", []any{int64(1), int64(2)}, tuidata.TypeInt},
+		{"empty generic floats", "", []any{1.5, 2.5}, tuidata.TypeFloat},
+		{"empty generic int float mix", "", []any{int64(1), 2.5}, tuidata.TypeFloat},
+		{"empty generic bools", "", []any{true, false}, tuidata.TypeBool},
+		{"empty generic datetime text", "", []any{"2026-10-24 12:00:00", "2026-10-25T08:30:00Z"}, tuidata.TypeDatetime},
+		{"empty generic date text", "", []any{"2026-10-24", "2026-10-25"}, tuidata.TypeDate},
+		{"empty generic rfc3339", "", []any{"2026-10-24T12:00:00.123456789Z"}, tuidata.TypeDatetime},
+		{"empty generic free text", "", []any{"alice", "bob"}, tuidata.TypeString},
+		// 四位数字字符串绝不能被 time.Parse 的 "2006" 布局误判成日期。
+		{"empty generic year string", "", []any{"2026", "2027"}, tuidata.TypeString},
+		// 混类型退化为 str（int/float 除外）。
+		{"empty generic mixed", "", []any{int64(1), "x"}, tuidata.TypeString},
+		{"empty generic bool int mix", "", []any{true, int64(1)}, tuidata.TypeString},
+		// 显式 GenericType 优先于样本。
+		{"generic wins over sample", protocol.GenericTypeText, []any{int64(1)}, tuidata.TypeString},
+		{"generic boolean", protocol.GenericTypeBoolean, []any{int64(1)}, tuidata.TypeBool},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := genericToDType(c.g, c.sample); got != c.want {
+				t.Errorf("genericToDType(%q, %v) = %v, want %v", c.g, c.sample, got, c.want)
+			}
+		})
+	}
+}
+
+// TestAdapterRunFrameInfersDTypeWhenGenericTypeEmpty is the end-to-end half of
+// §94: a query result with no generic_type must still type its columns.
+func TestAdapterRunFrameInfersDTypeWhenGenericTypeEmpty(t *testing.T) {
+	ad, fc := newTestAdapter(t)
+	fc.ExecuteFunc = func(context.Context, string, string, ...protocol.Value) (*protocol.QueryResult, error) {
+		return &protocol.QueryResult{
+			Columns: []protocol.ResultColumn{
+				{Name: "id"}, // no GenericType
+				{Name: "score"},
+				{Name: "at"},
+				{Name: "d"},
+				{Name: "name"},
+				{Name: "mixed"},
+			},
+			Rows: [][]protocol.Value{
+				{protocol.NewIntValue(1), protocol.NewFloatValue(9.5),
+					protocol.NewStringValue("2026-10-24 12:00:00"), protocol.NewStringValue("2026-10-24"),
+					protocol.NewStringValue("alice"), protocol.NewIntValue(1)},
+				{protocol.NewIntValue(2), protocol.NewFloatValue(1.5),
+					protocol.NewStringValue("2026-10-25T08:30:00Z"), protocol.NewStringValue("2026-10-25"),
+					protocol.NewStringValue("bob"), protocol.NewStringValue("x")},
+			},
+		}, nil
+	}
+	res, err := ad.Run("SELECT * FROM t")
+	if err != nil || res.Frame == nil {
+		t.Fatalf("Run = %+v, %v", res, err)
+	}
+	want := []tuidata.DType{
+		tuidata.TypeInt, tuidata.TypeFloat, tuidata.TypeDatetime,
+		tuidata.TypeDate, tuidata.TypeString, tuidata.TypeString,
+	}
+	for i, col := range res.Frame.Columns {
+		if col.Type != want[i] {
+			t.Errorf("column %q type = %v, want %v", col.Name, col.Type, want[i])
+		}
+	}
+}
+
 func strPtr(s string) *string { return &s }
