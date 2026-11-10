@@ -390,6 +390,161 @@ SIMPLE_REASON = {
 PK_REASON = "主键列变化，需重建"
 
 
+# ──────────────────────────────────────────────────── DDL 警告（§15.x）
+#
+# 全部警告的**触发条件**都由语料 note 与实现口径给定（G1/G2/G4/G11/G13/G16
+# 取证），故是可推导量。文案逐字，见 spec/behavior.md §15.8。
+W_TRIGGERS = "重建表会丢失该表上的触发器（快照不含触发器）"
+W_GENERATED = "生成列会退化为普通列（快照不标注生成列）"
+W_CHECK = "CHECK 约束会丢失（快照不含 CHECK 约束）"
+W_AUTOINCREMENT = "主键整数列的 AUTOINCREMENT 关键字无法从快照还原"
+W_CREATE_TABLE = "新建表只按快照里的列定义生成，不含 CHECK 约束、生成列与触发器"
+W_DROP_COLUMN_CHECK = "该列若被 CHECK 约束引用，删除后约束会一并消失（快照不可见）"
+W_ADD_COLUMN_LIMITS = (
+    "SQLite 的 ADD COLUMN 只接受常量默认值，非空表上加 NOT NULL 且无默认值的列也会报错"
+)
+W_REBUILD_NEW_NOT_NULL = (
+    "重建只复制两侧同名列，新增的 NOT NULL 列若无默认值会让数据搬运 INSERT 报错"
+)
+W_FK_CYCLE_PREFIX = "外键依赖成环"
+
+#: 名单上限：再多只报数 + 前 5 个 + 「等」。
+SCOPE_MAX = 5
+
+
+def ordered_columns(table):
+    """按 ordinal_position 升序的列（同序数按名字稳定）。"""
+    cols = list(table.get("columns", []) or [])
+    return sorted(cols, key=lambda c: (c.get("ordinal_position", 0), str(c.get("name", "")).lower()))
+
+
+def has_integer_pk(kind, table):
+    """单列 INTEGER 主键（SQLite 里是 rowid 别名；AUTOINCREMENT 不在快照里）。"""
+    pk = [c for c in table.get("columns", []) or [] if c.get("is_primary_key")]
+    # 主键也可能来自 primary 索引；两者取并集更稳。
+    for idx in table.get("indexes", []) or []:
+        if idx.get("primary"):
+            pk = pk or []
+    if len(pk) != 1:
+        return False
+    return norm_type(pk[0].get("data_type"), kind) == "integer"
+
+
+def literal_default(raw):
+    """快照原样的默认值（只折叠空白）；空串表示「无默认值」，`NULL` 亦同。"""
+    if raw is None:
+        return ""
+    d = " ".join(str(raw).split())
+    if d == "" or d.lower() == "null":
+        return ""
+    return d
+
+
+def _is_hex_digit(ch):
+    return ch.isdigit() or ("a" <= ch <= "f") or ("A" <= ch <= "F")
+
+
+def _is_number(s):
+    body = s[1:] if s[:1] in ("-", "+") else s
+    if not body:
+        return False
+    digits = dot = exp = False
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch.isdigit():
+            digits = True
+        elif ch == "." and not dot and not exp:
+            dot = True
+        elif ch in "eE" and digits and not exp:
+            exp = True
+            if i + 1 < len(body) and body[i + 1] in "+-":
+                i += 1
+        else:
+            return False
+        i += 1
+    return digits
+
+
+def is_constant_default(raw):
+    """SQLite `ADD COLUMN` 认可的常量默认值（数字 / 单引号串 / blob / NULL）。"""
+    d = literal_default(raw)
+    if d == "":
+        return True  # 无默认值即 NULL，本身是常量
+    if d[0] == "'":
+        i = 1
+        while i < len(d):
+            if d[i] != "'":
+                i += 1
+                continue
+            if i + 1 < len(d) and d[i + 1] == "'":
+                i += 2
+                continue
+            return i + 1 == len(d)
+        return False
+    if d[0] in "xX" and len(d) > 1 and d[1] == "'":
+        if d[-1] != "'" or len(d) < 2:
+            return False
+        return all(_is_hex_digit(c) for c in d[2:-1])
+    return _is_number(d)
+
+
+def _scope(names, unit, lower_keys=False):
+    """渲染「N 个{unit}（a, b 等）」。
+
+    名单排序：按**小写键**升序；展示保留原样大小写；同名（小写相同）只留
+    排序后第一个；超过 `SCOPE_MAX` 个时只列前 5 个并在末尾加 ` 等`，但**计数
+    报全量**（`d26` 的 note）。
+    """
+    keyed = [(str(n).lower(), str(n)) for n in names]
+    keyed.sort(key=lambda kv: kv[0])  # 稳定排序：同键保留原顺序
+    seen = set()
+    uniq = []
+    for k, disp in keyed:
+        if k in seen:
+            continue
+        seen.add(k)
+        uniq.append(disp if not lower_keys else k)
+    head = ", ".join(uniq[:SCOPE_MAX])
+    if len(uniq) > SCOPE_MAX:
+        head += " 等"
+    return f"{len(uniq)} 个{unit}（{head}）"
+
+
+def view_scope(names):
+    """视图名单串（展示保留原样大小写）。"""
+    return _scope(names, "视图")
+
+
+def table_scope(names):
+    """表名单串（**报小写键**：依赖图与拓扑都建在小写键上）。"""
+    return _scope(names, "表", lower_keys=True)
+
+
+def w_view_drop(views):
+    """删表的视图警告（G16）。"""
+    return (
+        f"本库现有 {view_scope(views)}：DROP TABLE 不检查依赖，语句会成功，"
+        "但引用它的视图将失效（快照不含视图定义，判定不了是哪一个）"
+    )
+
+
+def w_view_rebuild(views):
+    """重建的视图警告（G13：失败点在 ALTER TABLE … RENAME）。"""
+    return (
+        f"本库现有 {view_scope(views)}：重建经 RENAME，而 SQLite 改名时会重解析"
+        "依赖该表的视图 ⇒ 有视图引用它就整条重建报错"
+    )
+
+
+def w_fk_cycle(names):
+    """新建表之间的外键环警告。"""
+    return (
+        f"{W_FK_CYCLE_PREFIX}：{table_scope(names)}互相引用，"
+        "建表顺序无法保证父表在前（SQLite 到写入时才报错）"
+    )
+
+
 def index_object(idx):
     """索引在条目里的 object 名。
 

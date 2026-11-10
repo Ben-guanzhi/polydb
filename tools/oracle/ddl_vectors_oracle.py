@@ -10,7 +10,8 @@ DDL 语料的 `expected` 含三类东西，可推导性差别很大：
 | `error_code`（方言闸门、stale、整组校验） | ✅ 纯规则 | 校验 |
 | **渲染出的条目集合**（正/反两向） | ✅ 纯规则 | 校验 |
 | 语句**条数/分组/顺序/相位** | ⚠️ 编码 SQLite 方言策略 | **不校验**（见下） |
-| `sql` 全文、`warnings` 文案 | ❌ 渲染产物 | **不校验** |
+| **`warnings` 文案** | ✅ 纯规则（§15.8 规定了文案、挂载位置与名单渲染）| **校验** |
+| `sql` 全文 | ❌ 渲染产物 | 不校验 |
 
 ### 为什么"条目集合"是可推导的、而"语句分组"不是
 
@@ -173,7 +174,160 @@ def check_loaded(v):
     if exp.get("ddl_in_tx") is not True:
         problems.append("ddl_in_tx 应为 true")
 
+    # ── 警告文案（§15.8）：按 entry_ids 组核内容 + 「只挂在组内首条」
+    problems.extend(check_warnings(v, "statements", forward))
+    problems.extend(check_warnings(v, "rollback", rollback))
+
     return (not problems), problems
+
+
+def _executed_sides(v, direction):
+    """该方向「被执行的那一侧」快照。
+
+    正向执行时库停在 `source`，回滚执行时停在 `target` —— 视图警告只报
+    **被执行侧**的视图（`d24` 的 note：回滚方向互换两侧）。
+    返回 (before, after, views, kind)。
+    """
+    src, tgt = v["source"], v["target"]
+    if direction == "statements":
+        before, after = src, tgt
+    else:
+        before, after = tgt, src
+    views = [t["name"] for t in before.get("tables", []) or []
+             if t.get("type") in R.SKIPPED_TABLE_TYPES]
+    return before, after, views, after.get("kind", "")
+
+
+def _cycle_tables(after):
+    """参与外键环的表（小写键，升序）。只在新出现的建表之间判。"""
+    real = R.real_tables(after)
+    edges = {k: set() for k in real}
+    for k, t in real.items():
+        for fk in t.get("foreign_keys", []) or []:
+            ref = str(fk.get("referenced_table") or "").lower()
+            if ref in real and ref != k:
+                edges[k].add(ref)
+    # 找出处于环上的点：能从自己走回来。
+    cyclic = set()
+    for start in edges:
+        stack = list(edges[start])
+        seen = set()
+        while stack:
+            cur = stack.pop()
+            if cur == start:
+                cyclic.add(start)
+                break
+            if cur in seen:
+                continue
+            seen.add(cur)
+            stack.extend(edges.get(cur, ()))
+    return cyclic
+
+
+def _group_warnings(direction, ids, table, kind, before, after, views, rebuild, cyclic):
+    """按 §15.8 推导某个 entry_ids 组应挂的警告。"""
+    if rebuild:
+        w = [R.W_TRIGGERS, R.W_GENERATED, R.W_CHECK]
+        after_tbl = R.real_tables(after).get(table)
+        before_tbl = R.real_tables(before).get(table)
+        if after_tbl is None:
+            return w
+        if R.has_integer_pk(kind, after_tbl):
+            w.append(R.W_AUTOINCREMENT)
+        sc = R.columns_of(before_tbl) if before_tbl is not None else {}
+        for c in R.ordered_columns(after_tbl):
+            known = str(c["name"]).lower() in sc
+            if not c.get("nullable") and R.literal_default(c.get("default_value")) == "" and not known:
+                w.append(R.W_REBUILD_NEW_NOT_NULL)
+                break
+        if views:
+            w.append(R.w_view_rebuild(views))
+        return w
+
+    op = ids[0].split("/")[2]
+    if op == "create_table":
+        w = [R.W_CREATE_TABLE]
+        after_tbl = R.real_tables(after).get(table)
+        if after_tbl is not None and R.has_integer_pk(kind, after_tbl):
+            w.append(R.W_AUTOINCREMENT)
+        if table in cyclic:
+            w.append(R.w_fk_cycle(sorted(cyclic)))
+        return w
+    if op == "drop_table":
+        return [R.w_view_drop(views)] if views else []
+    if op == "add_column":
+        after_tbl = R.real_tables(after).get(table)
+        if after_tbl is None:
+            return []
+        c = R.columns_of(after_tbl).get(ids[0].split("/")[1])
+        if c is None:
+            return []
+        if (not R.is_constant_default(c.get("default_value"))) or (
+            not c.get("nullable") and R.literal_default(c.get("default_value")) == ""
+        ):
+            return [R.W_ADD_COLUMN_LIMITS]
+        return []
+    if op == "drop_column":
+        return [R.W_DROP_COLUMN_CHECK]
+    return []
+
+
+def check_warnings(v, direction, selected_ids):
+    """核该方向每条语句组挂的警告。
+
+    规则（§15.8 + 语料结构）：
+      - 同一 `entry_ids` 组的警告**只挂在组内首条**（建临时表那条），其余
+        （INSERT / DROP / RENAME / CREATE INDEX / PRAGMA）不带警告；
+      - 组内警告内容 = `_group_warnings`。
+    """
+    problems = []
+    before, after, views, kind = _executed_sides(v, direction)
+
+    # 重建表集合：正向/回滚共用同一套（spec §15：正向重建过的表，回滚也走重建）。
+    src, tgt = v["source"], v["target"]
+    plan = DIFF.derive(v)[2]
+    norm = [{"id": e["id"], "op": e["op"], "table": e["table"],
+             "target": (e.get("object") or "").lower()} for e in plan]
+    srt, trt = R.real_tables(src), R.real_tables(tgt)
+    rebuild_tables = set()
+    for e in norm:
+        tkey = e["table"].lower()
+        if SEL.needs_rebuild(e, srt.get(tkey), trt.get(tkey)):
+            rebuild_tables.add(tkey)
+
+    cyclic = _cycle_tables(after)
+
+    # 按 entry_ids 收集组内各语句的警告位于第几条
+    order = []
+    groups = {}
+    for i, st in enumerate(v["expected"].get(direction) or []):
+        ids = tuple(st.get("entry_ids") or [])
+        if not ids:
+            if st.get("warnings"):
+                problems.append(f"{direction}[{i}] PRAGMA/空组语句不应带警告")
+            continue
+        if ids not in groups:
+            groups[ids] = []
+            order.append(ids)
+        groups[ids].append((i, st.get("warnings") or []))
+
+    for ids in order:
+        table = ids[0].split("/")[0]
+        want = _group_warnings(direction, ids, table, kind, before, after, views,
+                              table in rebuild_tables, cyclic)
+        occ = groups[ids]
+        first_i = occ[0][0]
+        for i, w in occ:
+            if i != first_i and w:
+                problems.append(
+                    f"{direction}[{i}] 同组非首条不应带警告（组 {list(ids)[0]}）"
+                )
+        got = occ[0][1]
+        if got != want:
+            problems.append(
+                f"{direction} 组 {list(ids)[0]} 警告不符: want={want} got={got}"
+            )
+    return problems
 
 
 def check_vector(path):
@@ -207,7 +361,7 @@ def main(argv=None):
 
     print(
         f"\nDDL 结构 oracle：{len(files)} 份语料，吻合 {len(files) - bad}，不吻合 {bad}"
-        f"（校验 error_code + 正/反两向条目集合；不校验语句切分与 SQL 文本）"
+        f"（校验 error_code + 正/反两向条目集合 + 警告文案；不校验语句切分与 SQL 文本）"
     )
     return 0 if bad == 0 else 1
 

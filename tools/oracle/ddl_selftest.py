@@ -79,6 +79,34 @@ def tamper_ddl_in_tx(v):
     v["expected"]["ddl_in_tx"] = False
 
 
+def tamper_warning_text(v):
+    """改一条告警的一个字 ⇒ 必须检出（§15.8 的文案是契约）。"""
+    for st in v["expected"]["statements"]:
+        if st.get("warnings"):
+            st["warnings"][0] = st["warnings"][0] + "X"
+            return
+    raise AssertionError("没有可篡改的告警")
+
+
+def tamper_warning_placement(v):
+    """把重建组首条的告警**挪到同组第二条** ⇒ 必须检出。
+
+    §15.8 规定重建告警只挂**重建组首条**；挪位置不改内容，只有"挂载位置"
+    这条规则能抓到——这一条防止 oracle 退回"只比内容集合"。
+    """
+    sts = v["expected"]["statements"]
+    for i, st in enumerate(sts):
+        ids = st.get("entry_ids") or []
+        if not ids or not st.get("warnings"):
+            continue
+        # 找同组的下一条
+        for j in range(i + 1, len(sts)):
+            if (sts[j].get("entry_ids") or []) == ids:
+                sts[j]["warnings"] = list(st["warnings"])
+                return
+    raise AssertionError("没有可用的重建组")
+
+
 SCENARIOS = [
     ("语句丢弃勾选条目", "d05_drop_column_indexed_rebuild.json", tamper_drop_entry_id),
     ("凭空造出条目", "d05_drop_column_indexed_rebuild.json", tamper_invent_entry),
@@ -86,6 +114,8 @@ SCENARIOS = [
     ("抹掉方言闸门 error_code", "d16_pg_dialect_not_supported.json", tamper_clear_error),
     ("抹掉 stale error_code", "d22_stale_selected_id.json", tamper_clear_error),
     ("ddl_in_tx 改 false", "d02_create_table.json", tamper_ddl_in_tx),
+    ("篡改告警文案", "d05_drop_column_indexed_rebuild.json", tamper_warning_text),
+    ("告警挪到非首条", "d05_drop_column_indexed_rebuild.json", tamper_warning_placement),
 ]
 
 
