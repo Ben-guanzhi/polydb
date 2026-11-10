@@ -44,13 +44,20 @@ text
 7. **向量语料的 `expected` 不得由任一端实现回写**——那会让两端只核对"我与它一致"，把**共享的误解**锁死为范式（循环论证）。改语料的期望值时**必须**手写推导，并跑独立 oracle 门禁 `make check-oracle`（六步：`select_vectors_oracle.py` / `selftest.py` / `diff_vectors_oracle.py` / `diff_selftest.py` / `ddl_vectors_oracle.py` / `ddl_selftest.py`）。oracle 刻意用 Python 写：跨语言 ⇒ 不可能共享同一语言层面的误解。
    规则集**只在 `tools/oracle/schema_rules.py` 一处**（相位码全九种、类型/默认值归一、索引/外键签名、id 构成、选择策略）。**别在调用方另立一份**——select oracle 曾自带残缺相位表（漏 `drop_foreign_key(10)`），select 语料恰好没覆盖该 op，18/18 全绿把缺口遮了很久（PD-29，2026-11-10）。
    覆盖范围与**排除项**（排除必须写进工具文档，不许假装覆盖）：
-   **select（18 份）**——选中的 id 序列；
+   **select（21 份）**——选中的 id 序列；
    **diff（17 份）**——完整计划条目，排除 `reason` 文案（散文无法从快照推导）；
    **ddl（27 份）**——只校验 `error_code` 与**正/反两向的渲染条目集合**；
    排除语句切分/顺序/相位（那是 SQLite 方言策略，推导它等于写第三个 DDL 生成器）、
    以及 `sql` 全文与 `warnings` 文案（渲染产物）。
    **判据是"要不要方言知识"**：完整性（每个勾选条目都必须落到脚本）是可推导的，
    "直改还是重建、拆几条语句"不是。
+   **覆盖门禁要守 op，不能只守分支**：`select` 语料的覆盖度测试原先只统计
+   分支（selected_null / group_whole_pass…），结果 `drop_foreign_key`、
+   `add_foreign_key`、`drop_column` 三个 op **从没出现在任何成功输出里**
+   （只在报错用例的计划里出现过）——相位表漏掉 `drop_foreign_key` 也照样全绿
+   （PD-31）。现在两端各有一道 op 覆盖断言：遍历生成表 `OpRows`/`OP_ROWS`
+   （不硬编码清单），要求每个 op 至少在某条**成功**用例的 picked 里出现过。
+   补语料时记住：**报错用例不算覆盖**，那条路径不产出条目。
    **两套语料全绿不代表规则没 bug**：`norm_type` 曾把 `(n)` 一律当噪声，
    `varchar(20)`→`varchar(30)` 被判无变化；diff 语料没有"改字符长度"的用例，
    17/17 全绿把 bug 遮住，直到 ddl 的 `d06` 逼出来（PD-30）。整数族的 `(n)`
