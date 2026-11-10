@@ -41,8 +41,22 @@ text
 4. `core` / `protocol` 层**不得**有 IO。
 5. 密码**只**经 `keyring`（OS 凭据管理器优先，加密文件 `keyring.bin` 兜底），明文密码永不下发、永不在 DTO 中往返（`password` 字段仅创建/更新时一次性接受并由服务端写入 keyring）。
 6. **契约优先**：任何接口/字段变更须先改 `spec/` 再改代码；合并前**必须**跑 `tools/genprotocol` 四门禁（`ts --check` / `check` / `ops` / `docs`），漂移即拦截。
-7. **MCP 以 Go 端 `go/pkg/mcp` + `cmd/polydb-mcp` 为唯一实现**（stdio JSON-RPC，只读工具集，符合只读安全模型）；dbstudio 的 Rust `crates/mcp` 为冗余实现，**不并入**。
-8. **dbstudio 能力并入须先扩契约再改代码**——落点按性质分：触及 wire/DTO 的进 `spec/`（走第 6 条四门禁）；纯 UI/跨端行为进 `docs/frontends.md` 的 A/D 系列节（A2 连接表单、A3 键位与 Vim、A4 结构编辑边界，2026-10-24 起生效）。Rust GUI 端回填统一走 `rust/crates/ui-gui` + `apps/polydb-gui`，密码层复用 `rust/crates/storage/src/keyring.rs`（禁止各项目自带 keyring 实现）。
+7. **向量语料的 `expected` 不得由任一端实现回写**——那会让两端只核对"我与它一致"，把**共享的误解**锁死为范式（循环论证）。改语料的期望值时**必须**手写推导，并跑独立 oracle 门禁 `make check-oracle`（六步：`select_vectors_oracle.py` / `selftest.py` / `diff_vectors_oracle.py` / `diff_selftest.py` / `ddl_vectors_oracle.py` / `ddl_selftest.py`）。oracle 刻意用 Python 写：跨语言 ⇒ 不可能共享同一语言层面的误解。
+   规则集**只在 `tools/oracle/schema_rules.py` 一处**（相位码全九种、类型/默认值归一、索引/外键签名、id 构成、选择策略）。**别在调用方另立一份**——select oracle 曾自带残缺相位表（漏 `drop_foreign_key(10)`），select 语料恰好没覆盖该 op，18/18 全绿把缺口遮了很久（PD-29，2026-11-10）。
+   覆盖范围与**排除项**（排除必须写进工具文档，不许假装覆盖）：
+   **select（18 份）**——选中的 id 序列；
+   **diff（17 份）**——完整计划条目，排除 `reason` 文案（散文无法从快照推导）；
+   **ddl（27 份）**——只校验 `error_code` 与**正/反两向的渲染条目集合**；
+   排除语句切分/顺序/相位（那是 SQLite 方言策略，推导它等于写第三个 DDL 生成器）、
+   以及 `sql` 全文与 `warnings` 文案（渲染产物）。
+   **判据是"要不要方言知识"**：完整性（每个勾选条目都必须落到脚本）是可推导的，
+   "直改还是重建、拆几条语句"不是。
+   **两套语料全绿不代表规则没 bug**：`norm_type` 曾把 `(n)` 一律当噪声，
+   `varchar(20)`→`varchar(30)` 被判无变化；diff 语料没有"改字符长度"的用例，
+   17/17 全绿把 bug 遮住，直到 ddl 的 `d06` 逼出来（PD-30）。整数族的 `(n)`
+   是 MySQL 显示宽度（噪声），字符/十进制类型的 `(n)` 是真实容量（保留）。
+8. **MCP 以 Go 端 `go/pkg/mcp` + `cmd/polydb-mcp` 为唯一实现**（stdio JSON-RPC，只读工具集，符合只读安全模型）；dbstudio 的 Rust `crates/mcp` 为冗余实现，**不并入**。
+9. **dbstudio 能力并入须先扩契约再改代码**——落点按性质分：触及 wire/DTO 的进 `spec/`（走第 6 条四门禁）；纯 UI/跨端行为进 `docs/frontends.md` 的 A/D 系列节（A2 连接表单、A3 键位与 Vim、A4 结构编辑边界，2026-10-24 起生效）。Rust GUI 端回填统一走 `rust/crates/ui-gui` + `apps/polydb-gui`，密码层复用 `rust/crates/storage/src/keyring.rs`（禁止各项目自带 keyring 实现）。
 
 ---
 
@@ -239,6 +253,37 @@ spec/ 是唯一真相源，改 spec → 重新生成两端代码。
 
 契约测试 test/contract/：同一份 fixture，分别打 Rust 与 Go 的 HTTP 接口，比对响应。
 
+契约测试用 `normalize.go` 的归一化**放弃一部分区分能力**（动态字段、驱动错误
+包装前缀等）。每一处放弃都必须 (1) 在 `test/contract/known_differences_test.go`
+**登记两端当前的确切形态**（断言而非只打日志——一端行为变了要红），
+(2) 说明它是「可修复的实现缺陷」还是「不可比的实现细节」。**已知的不可比项
+不得默默留着**：能修的（如 PD-21：Rust 侧 SQLite 列类型硬编码 TEXT）要修，
+修不了的要登记。
+
+**「服务缺失 ⇒ 跳过」只适用于拨号失败**：凭证错误（认证/授权失败）是**配置
+错误**，必须报错——否则会静默跳过整个场景，出现"契约测试全绿、实际什么都没
+测"的假象（PD-23）。判定见 `test/contract/net_unavailable.go` 的
+`isAuthFailure`。
+
+**断言收紧后必须用"故意写错的期望值"验证它真的在比较**：把期望改成明显错
+的值，测试仍绿 ⇒ 该断言没生效（可能场景被静默跳过、或归一化把该字段裁掉了），
+不是"断言太宽松"。PD-22/PD-24 都是这样被抓出来的。
+
+**`ResultColumn.type` 的口径**：spec 定义它是 "Database-specific type name"，
+即**数据库自己的 SQL 类型名、全大写、不含长度/精度**（PG `INT4`、MySQL
+`VARCHAR`、MSSQL `NVARCHAR`、Oracle `VARCHAR2`）。驱动库给的**原生表示必须
+映射**，不要把驱动的东西直接透出——go-ora 给的是 TNS 协议码枚举名
+（`VARCHAR2` 列报成 `NCHAR`、`BINARY_DOUBLE` 报成 `IBDouble`），oracle crate
+的 `Debug` 给的是 `Number(10, 0)`，两者都不是类型名。映射表见
+`go/pkg/dboracle/typename.go` 与 `rust/crates/db-oracle` 的
+`oracle_type_name`；未识别类型两端都回落 `OTHER`，以保证奇类型也一致
+（PD-28，2026-11-10）。**注意 Oracle 的字符族分辨率上限**：Go 侧经
+`database/sql` 拿不到字符集形态，故 VARCHAR2/NVARCHAR2 归 `VARCHAR2`、
+CHAR/NCHAR 归 `CHAR`——这是两端可一致的最大分辨率，别去追求"精确名"。
+另外：`ResultColumn.DataType` 若同时被取值解码逻辑使用（如 Oracle 的
+`oracleValue` 靠它解析 TIMESTAMP 精度/时区），**必须把原始拼写与对外名字
+拆成两个变量**，否则改类型名会静默破坏取值。
+
 CI 双跑：
 
 Rust：cargo test + cargo clippy
@@ -343,9 +388,9 @@ M8	SSH 隧道、keyring、Pub/Sub、Cluster（可选）
 
 在 spec/schemas 补 DTO（若需要）
 
-Rust：crates/db-<name>/ + db-core 加 enum variant + Connection 分派
+Rust：crates/db-<name>/ + db-core 加 enum variant + `app-core` 的 `open_driver` match 分派（PD-01 的 Rust 侧落点；新增引擎时必须在 `match` 里补分支，`genprotocol dispatch` 门禁会钉住「spec kind ↔ DatabaseKind 变体 ↔ 驱动 crate」且禁止 `_ =>` 兜底，漏改即红灯）
 
-Go：pkg/db<name>/ + dbcore 实现接口；**目录/DDL 一律经共享内核 `github.com/dbcore/dbcore/<engine>` 的 `NewFromDB` 委托实现，Redis 经 `github.com/dbcore/dbcore/redis` 的 KVDriver 委托（P1-5，2026-10-24 起）——不要在 pkg/db<name>/ 里新写 information_schema / pg_catalog / sys.* / all_* 目录 SQL 或 RESP 约定，方言与协议知识只此一份。边界：Option B（2026-10-24）后 `*Conn` 原生实现内核 `dbc.SQLTxDriver`（执行/事务委托内核驱动，protocol 线语义由同包 `ProtocolDriver` 适配，appcore 事务注册表接 `dbcore.TxManager`）；protocol 面的表浏览分页（`BuildRowsQuery`）仍自有以保线语义；接入深度由 `dbcore/consumer_claims_test.go` 的 dbcoreImportDirs 断言（七个目录：bridge、dbsqlite、dbmysql、dbpostgres、dbmssql、dboracle、dbredis）**
+Go：pkg/db<name>/ + **在本包 `registry.go` 的 `init()` 里 `RegisterDriver(protocol.DatabaseKind<Name>, openFromInfo)` 登记打开动作**（PD-01/PD-02，2026-11-09）：`appcore.Connect` 只按 kind 查 `pkg/dbcore.OpenDriver`，不再手写 switch。**目录/DDL 一律经共享内核 `github.com/dbcore/dbcore/<engine>` 的 `NewFromDB` 委托实现，Redis 经 `github.com/dbcore/dbcore/redis` 的 KVDriver 委托（P1-5，2026-10-24 起）——不要在 pkg/db<name>/ 里新写 information_schema / pg_catalog / sys.* / all_* 目录 SQL 或 RESP 约定，方言与协议知识只此一份。**连接串也要走内核的规范**：不要在 pkg/db<name>/ 里手拼 DSN——会漏掉内核 dbcore/<engine>/spec.go 的连接参数（如 MySQL 的 ParseTime=true，漏了它 DATETIME 列会以驱动原生文本返回、与 Rust 侧类型化路径形态不同，见 PD-26）。边界：Option B（2026-10-24）后 `*Conn` 原生实现内核 `dbc.SQLTxDriver`（执行/事务委托内核驱动，protocol 线语义由同包 `ProtocolDriver` 适配，appcore 事务注册表接 `dbcore.TxManager`）；protocol 面的表浏览分页（`BuildRowsQuery`）仍自有以保线语义；接入深度由 `dbcore/consumer_claims_test.go` 的 dbcoreImportDirs 断言（八个目录：appcore、bridge、dbsqlite、dbmysql、dbpostgres、dbmssql、dboracle、dbredis）**
 
 补契约测试用例
 
@@ -441,6 +486,7 @@ logger 名	polydb
 | 6 | `SqlDriver::begin() -> Transaction` | 实为 `begin_tx(TxMode) -> Box<dyn Any+Send>` | 已确认 | 迁移到 trait-object transaction |
 | 7 | 契约测试用 JSON fixture | 实为 Go 测试（`test/contract/`） | 已确认 | 统一为 JSON fixture 或更新本节 |
 | 9 | `.qoder/skills/polydb/SKILL.md` 记录实现事实 | 被 `.gitignore` 排除（不入库、不随 tag 发布、无法被 CI 校验），且自身已漂移：称 `ImportModalParts.tsx` ~11k 行，实际 17 行 barrel re-export | 未修复 | 入库，或在文首标注「非权威，以代码为准」 |
+| 10 | §7「双实现一致性」：同一分派语义两端应同构 | Go 端驱动分派走 `pkg/dbcore` 注册表（各 `pkg/db*/registry.go` 在 `init` 里 `RegisterDriver`，`appcore` 只按 kind 查表）；Rust 端仍是 `app-core` 的 `open_driver` 手写 `match`。两处机制不同 | **部分修复（2026-11-09，PD-01/PD-02/PD-15）**：Go 已单源；Rust 保留 match，但由 `genprotocol dispatch` 门禁钉住「spec kind ↔ Rust 变体 ↔ 驱动 crate」且禁止 `_ =>` 兜底。Go 走协议层注册表而非内核 `dbcore.Open`，是因为内核 Factory 的签名 `(ConnSpec, PoolConfig) (dbc.Driver, error)` 产出 `dbc.*`，而 `appcore` 需要 `protocol.*`——两端 kind 集合由 `pkg/appcore/registry_kinds_test.go` 钉在一起（放在 appcore 而非 `pkg/dbcore`：后者是再导出层、引内核会触发 `dbcoreImportDirs` 契约断言漂移）| 若 Rust 日后引入等价注册表，可收敛为两端同构 |
 
 > 原第 5 条（Arrow IPC 数据面）已于 2026-10-15 修复：`arrow 54` 从 workspace
 > `Cargo.toml` 的 `[workspace.dependencies]` 删除（无任何 crate 依赖，也未进
@@ -462,7 +508,7 @@ logger 名	polydb
 
 **机械校验（能自动发现的别靠人）**：`spec/` ↔ 三端实现由 `tools/genprotocol`
 的 `check` / `ops` / `ts --check` 门禁兜住；文档 ↔ 源码由 `genprotocol docs`
-兜住——文档反引号里写出的 `POLYDB_*` 标识符（错误码、环境变量）必须能在源码里
-找到定义，找不到即 CI 红灯，所以别在本表手抄一个代码里已经没有的标识符。
+兜住——文档中写出的 `POLYDB_*` 标识符（错误码、环境变量，无论反引号内外）
+必须能在源码里找到定义，找不到即 CI 红灯，所以别在本表手抄一个代码里已经没有的标识符。
 两类校验覆盖不到的才是需要人工维护的偏差，例如"某类型本应存在但没实现"
 这种源码里根本搜不到字符串的语义漂移。

@@ -1,5 +1,10 @@
 # 插件 ABI 与信任门禁设计（知识保全，源自 dbstudio）
 
+> **实现状态：未实现（NOT IMPLEMENTED）**。本文件是纯设计保全，polydb 当前**没有**
+> 任何插件宿主 / C ABI 分派 / SHA-256 信任门禁代码；`rust/crates/` 与 `go/pkg/` 下
+> 均不存在对应实现，`tools/genprotocol` 的四门禁也不覆盖它。保留它只为保存 dbstudio
+> 的差异化设计口径，供未来按铁律 8 扩契约后再动工。
+>
 > **来源与状态**：本文件是 dbstudio（已归档，远端 github.com:Ben-guanzhi/dbstudio）
 > `crates/plugin`（abi.rs / loader.rs / trust.rs / bridge.rs，约 1.5k 行 + 测试）与
 > `plugins/sqlite-plugin`（581 行 cdylib 参考实现）的设计保全——polydb **无对应物**，

@@ -110,6 +110,8 @@ describe('commitInTransaction', () => {
         parameterized: { sql: 'DELETE', params: [] },
         expectAffected: 1,
         allowZero: false,
+        table: '',
+        whereClause: '',
       },
     ];
     const out = await commitInTransaction(
@@ -121,7 +123,7 @@ describe('commitInTransaction', () => {
       },
       async () => {
         calls.push('exec');
-        return { affected_rows: 0 }; // 行已不在 → 影响行数不符
+        return { affected_rows: 0, rows: [] }; // 行已不在 → 影响行数不符
       },
       async (tx, commit) => {
         calls.push(commit ? 'commit' : 'rollback');
@@ -139,18 +141,96 @@ describe('commitInTransaction', () => {
         parameterized: { sql: 'UPDATE', params: [] },
         expectAffected: 1,
         allowZero: true,
+        table: '',
+        whereClause: '',
       },
     ];
     const out = await commitInTransaction(
       'c1',
       stmts as never,
       async () => 'txn-1',
-      async () => ({ affected_rows: 0 }),
+      async () => ({ affected_rows: 0, rows: [] }),
       async () => {
         /* commit */
       },
     );
     expect(out).toEqual({ ok: true, applied: 1 });
+  });
+
+  // 0 行守卫（R2-02）：带定位谓词的 UPDATE 影响 0 行时跑同事务探针——
+  // 行在 = 同值更新 no-op 放行；行不在 = 并发删除/PK 已改，整体回滚。
+  // （table/whereClause 为空的 INSERT 不探针，0 行即回滚。）
+  describe('zero-row probe', () => {
+    const updWithKey = {
+      sql: 'UPDATE t SET a = 2 WHERE id = 1',
+      parameterized: { sql: 'UPDATE t SET a = ? WHERE id = ?', params: [2, 1] },
+      expectAffected: 1,
+      allowZero: true,
+      table: 't',
+      whereClause: 'id = 1',
+    };
+
+    it('probes the key in the same transaction and commits when the row is present', async () => {
+      const calls: string[] = [];
+      const sqls: string[] = [];
+      const out = await commitInTransaction(
+        'c1',
+        [updWithKey],
+        async () => {
+          calls.push('begin');
+          return 'txn-1';
+        },
+        async (_tx, req) => {
+          sqls.push(req.sql);
+          // 首次 = UPDATE 报 0 行；二次 = 探针，行还在。
+          return sqls.length === 1 ? { affected_rows: 0, rows: [] } : { affected_rows: 0, rows: [[1]] };
+        },
+        async (_tx, commit) => {
+          calls.push(commit ? 'commit' : 'rollback');
+        },
+      );
+      expect(out).toEqual({ ok: true, applied: 1 });
+      expect(sqls).toHaveLength(2);
+      expect(sqls[1]).toContain('SELECT 1 FROM t WHERE id = 1');
+      expect(calls).toEqual(['begin', 'commit']);
+    });
+
+    it('rolls back when the probe finds the row gone', async () => {
+      const calls: string[] = [];
+      const out = await commitInTransaction(
+        'c1',
+        [updWithKey],
+        async () => {
+          calls.push('begin');
+          return 'txn-1';
+        },
+        async () => ({ affected_rows: 0, rows: [] }), // UPDATE 0 行 + 探针 0 行
+        async (_tx, commit) => {
+          calls.push(commit ? 'commit' : 'rollback');
+        },
+      );
+      expect(out.ok).toBe(false);
+      expect(out.error).toContain('已整体回滚');
+      expect(calls).toEqual(['begin', 'rollback']);
+    });
+
+    it('treats a zero-row insert (no key predicate) as a mismatch', async () => {
+      const calls: string[] = [];
+      const out = await commitInTransaction(
+        'c1',
+        [{ ...updWithKey, table: '', whereClause: '', allowZero: false }],
+        async () => {
+          calls.push('begin');
+          return 'txn-1';
+        },
+        async () => ({ affected_rows: 0, rows: [] }),
+        async (_tx, commit) => {
+          calls.push(commit ? 'commit' : 'rollback');
+        },
+      );
+      expect(out.ok).toBe(false);
+      expect(calls).toEqual(['begin', 'rollback']);
+    });
   });
 
   it('rolls back on executor error and reports it', async () => {
@@ -172,6 +252,78 @@ describe('commitInTransaction', () => {
     expect(out.error).toBe('db boom');
     expect(rolled).toBe(true);
   });
+
+  // R2-02 守卫漏洞：mismatched（影响行数超过预期）必须无条件回滚。探针行存在
+  // 只对"keyed update 的 0 行同值更新"（allowZero && zeroRow && present，此时
+  // mismatched 本就为 false）是合法豁免；delete/insert 的 0 行、以及
+  // actual > expect 的 keyed update，即使探针查到行也必须回滚。
+  describe('mismatched guard', () => {
+    it('rolls back a keyed update whose actual rows exceed the expectation', async () => {
+      const calls: string[] = [];
+      const out = await commitInTransaction(
+        'c1',
+        [
+          {
+            sql: 'UPDATE t SET a = 2 WHERE id = 1',
+            parameterized: { sql: 'UPDATE t SET a = ? WHERE id = ?', params: [2, 1] },
+            expectAffected: 1,
+            allowZero: true,
+            table: 't',
+            whereClause: 'id = 1',
+          },
+        ],
+        async () => {
+          calls.push('begin');
+          return 'txn-1';
+        },
+        async (_tx, req) => {
+          // 探针即使查到行也不足以豁免 actual > expect 的 mismatch。
+          if (String(req.sql).startsWith('SELECT 1')) return { affected_rows: 0, rows: [[1]] };
+          calls.push('exec');
+          return { affected_rows: 2, rows: [] }; // actual=2 > expectAffected=1
+        },
+        async (_tx, commit) => {
+          calls.push(commit ? 'commit' : 'rollback');
+        },
+      );
+      expect(out.ok).toBe(false);
+      expect(out.error).toContain('影响行数');
+      expect(calls).toEqual(['begin', 'exec', 'rollback']);
+    });
+
+    it('rolls back a delete that affected 0 rows even when the probe row exists', async () => {
+      const calls: string[] = [];
+      const out = await commitInTransaction(
+        'c1',
+        [
+          {
+            sql: 'DELETE FROM t WHERE id = 1',
+            parameterized: { sql: 'DELETE FROM t WHERE id = ?', params: [1] },
+            expectAffected: 1,
+            allowZero: false,
+            table: 't',
+            whereClause: 'id = 1',
+          },
+        ],
+        async () => {
+          calls.push('begin');
+          return 'txn-1';
+        },
+        async (_tx, req) => {
+          // DELETE 报 0 行，但探针查到行仍在：mismatch 不能被探针豁免。
+          if (String(req.sql).startsWith('SELECT 1')) return { affected_rows: 0, rows: [[1]] };
+          calls.push('exec');
+          return { affected_rows: 0, rows: [] };
+        },
+        async (_tx, commit) => {
+          calls.push(commit ? 'commit' : 'rollback');
+        },
+      );
+      expect(out.ok).toBe(false);
+      expect(out.error).toContain('影响行数');
+      expect(calls).toEqual(['begin', 'exec', 'rollback']);
+    });
+  });
 });
 
 describe('valuesEqual', () => {
@@ -181,5 +333,28 @@ describe('valuesEqual', () => {
     expect(valuesEqual(1, 1)).toBe(true);
     expect(valuesEqual(1, '1')).toBe(false);
     expect(valuesEqual({ a: 1 }, { a: 1 })).toBe(true);
+  });
+
+  // 大整数（>2^53）经 bigintSafe 归一化为精确十进制字符串（bigintSafe.ts
+  // isBigIntString 的唯一形态），valuesEqual 走字符串比较——相邻大整数必须
+  // 判不等（Rust 端 int_float_equal / Go 端 ValuesEqual 同语义，R2-01 三端
+  // 对齐）。钉住它防编辑器/解码路径回归：若哪天归一化改回 number，相邻大
+  // 整数塌进同一 double，编辑被当 no-op 静默吞掉。
+  it('keeps adjacent big integers distinct (string-carried)', () => {
+    const even = '9007199254740992'; // 2^53
+    const odd = '9007199254740993'; // 2^53+1
+    expect(valuesEqual(even, even)).toBe(true);
+    expect(valuesEqual(even, odd)).toBe(false);
+    expect(valuesEqual('18446744073709551615', '18446744073709551614')).toBe(false);
+    expect(valuesEqual('18446744073709551615', '18446744073709551615')).toBe(true);
+    // 同值不同承载形态（number 5 vs 字符串大整数）不相等——类型即语义。
+    expect(valuesEqual(5, '5')).toBe(false);
+  });
+
+  // int/float 相等（5 ↔ 5.0）：JS 无变体之分，同为 number 严格相等，与
+  // Rust int_float_equal 的语义对齐（整数值浮点等于整数）。
+  it('treats integral float equal to int', () => {
+    expect(valuesEqual(5, 5.0)).toBe(true);
+    expect(valuesEqual(5, 5.5)).toBe(false);
   });
 });

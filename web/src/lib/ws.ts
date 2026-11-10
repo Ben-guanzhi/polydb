@@ -37,14 +37,23 @@ function newClient(): Client {
   const ws = new WebSocket(wsUrl());
   ws.binaryType = 'arraybuffer';
   const pending = new Map<string, Pending>();
+  // ready 只在收到 hello_ack 时 resolve；open 只代表 TCP 建连，auth 可能随后
+  // 失败，此时 hello 会发往死 socket。open 不再单独 resolve。
+  let resolveReady: () => void = () => {};
+  let rejectReady: (e: unknown) => void = () => {};
   const ready = new Promise<void>((resolve, reject) => {
-    ws.addEventListener('open', () => resolve(), { once: true });
-    ws.addEventListener('error', () => reject(new Error('websocket connection error')), { once: true });
+    resolveReady = resolve;
+    rejectReady = reject;
   });
+  const c: Client = { ws, pending, connId: null, ready, closed: false };
+  ws.addEventListener('error', () => rejectReady(new Error('websocket connection error')));
   ws.addEventListener('message', (ev) => {
     const buf: ArrayBuffer = ev.data instanceof ArrayBuffer ? ev.data : new Uint8Array(ev.data).buffer;
     const msg = decodeMsgpack(buf) as ServerMessage;
-    if (msg.type === 'hello_ack') return;
+    if (msg.type === 'hello_ack') {
+      resolveReady();
+      return;
+    }
     if (!('query_id' in msg) || !msg.query_id) return;
     const item = pending.get(msg.query_id);
     if (!item) return;
@@ -70,6 +79,9 @@ function newClient(): Client {
     }
   });
   ws.addEventListener('close', () => {
+    c.closed = true;
+    // 关闭的是当前全局客户端时清空槽位，否则下次 connect 会复用已死的 socket。
+    if (client === c) client = null;
     for (const item of pending.values()) {
       item.handler.onError({
         code: 'POLYDB_ERR_UNKNOWN',
@@ -79,7 +91,7 @@ function newClient(): Client {
     }
     pending.clear();
   });
-  return { ws, pending, connId: null, ready, closed: false };
+  return c;
 }
 
 function send(c: Client, msg: ClientMessage) {
@@ -104,13 +116,17 @@ async function connect(connId: string): Promise<Client> {
       ...(token ? { auth: { token } } : {}),
     });
   } catch (e) {
-    if (prev) client = prev;
+    // 新连接就绪前失败：关闭死 socket 并恢复全局 client，避免全局槽位被
+    // 一个永远等不到 hello_ack 的连接占住。
+    next.closed = true;
+    client = prev;
+    next.ws.close();
     throw e;
-  } finally {
-    if (prev && !prev.closed) {
-      prev.closed = true;
-      prev.ws.close();
-    }
+  }
+  // 新连接就绪：关闭并丢弃旧连接（一次只保留一个连接）。
+  if (prev && !prev.closed) {
+    prev.closed = true;
+    prev.ws.close();
   }
   return next;
 }

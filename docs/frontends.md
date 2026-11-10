@@ -23,6 +23,16 @@ polydb 有多个前端，均遵守 AGENTS.md 铁律：**只经 `app-core`（进�
   `ws.chart-toggle` 改为切页签。
 - 纯逻辑出口：`web/src/lib/resultViews.ts`（视图模式类型、`cellClass`/`fmt`、`buildInspectorFields`、
   `outputMessages`）；呈现组件 `web/src/components/ResultViewPanels.tsx`（`JsonResultView`/`MessagesView`/`RowInspector`）。
+- **可逆注册的参考实现（PD-08，2026-11-09）**：`web/src/lib/commandRegistry.ts` 的 `registerCommand`
+  返回 unsubscribe 闭包，且退订前用 `registry.get(id) === cmd` 做身份守卫——这正是 §6.6 的
+  `¬ relied_n(γ)` 撤回语义（同一 id 被新实例覆盖时，旧实例的退订不会误删新实例）。
+  `App.tsx`/`QueryWorkspace.tsx`/`ImportModal.tsx` 把所有 `registerCommand` 的返回值收进 `unregs`，
+  在组件卸载 effect 里统一退订，构成 LIFO 逆操作。**新增任何「注册 + 生命周期」机制时先照抄这个形态**：
+  注册表持有 `Map<id, item>`、登记返回退订闭包、退订带身份守卫；TUI overlay 工厂（PD-09）与
+  Go 驱动注册表（PD-01）已按同一形状补齐 acquire/release 与 `UnregisterDriver`。
+  残余已知项：`registerCommand` 对重复 id 是 last-wins（静默覆盖），未像内核 `RegisterFactory`
+  那样在重复注册时 panic/报错——这是有意的宽松，因为 UI 命令可在开发期热替换；若将来要求
+  重复注册报错，再在此处加冲突检测并保持退订守卫不变。
 
 ## TUI（M4，Go + bubbletea）
 

@@ -2,7 +2,7 @@
 // 单元格编辑先在本地排队，Review SQL 后在单个事务内提交，逐条校验影响行数。
 // 契约依据：spec/behavior.md §10（事务单次 finalize）+ docs/plan-tablepro-parity.md §2.
 
-import type { DatabaseKind, QueryRequest, Value } from '../api';
+import type { DatabaseKind, QueryRequest, QueryResult, Value } from '../api';
 import * as api from './api';
 import { isBigIntString } from './bigintSafe';
 
@@ -236,6 +236,11 @@ export interface GeneratedStatement {
   expectAffected: number;
   /** keyed update：actual > expect 才拦（MySQL 同值更新报 0 是正常的）。 */
   allowZero: boolean;
+  /** 定位谓词与表引用（UPDATE/DELETE 有，INSERT 为空）：0 行守卫的同事务
+   *  探针复用——`SELECT 1 FROM table WHERE where` 与提交语句同源生成，
+   *  区分"同值更新 no-op"（行在，放行）与"行已被删/PK 已改"（回滚批次）。 */
+  table: string;
+  whereClause: string;
 }
 
 function qualifiedTable(d: Dialect, schema: string, table: string): string {
@@ -268,6 +273,8 @@ export function buildStatements(
         },
         expectAffected: 1,
         allowZero: false,
+        table: qTable,
+        whereClause: where,
       });
     } else if (change.type === 'insert') {
       const row = change.newRow ?? {};
@@ -285,6 +292,8 @@ export function buildStatements(
         parameterized: { sql: psql, params: pparams },
         expectAffected: 1,
         allowZero: false,
+        table: '',
+        whereClause: '',
       });
     } else {
       // update：多格合并为一条
@@ -296,6 +305,8 @@ export function buildStatements(
         parameterized: { sql: `UPDATE ${qTable} SET ${psets.join(', ')} WHERE ${pkColumns.map((p) => `${d.quoteIdent(p)} = ?`).join(' AND ')}`, params: [...change.cellChanges.map((c) => c.newValue), ...pkColumns.map((p) => change.originalRow[p] ?? null)] },
         expectAffected: 1,
         allowZero: true,
+        table: qTable,
+        whereClause: where,
       });
     }
   }
@@ -313,19 +324,22 @@ export interface CommitOutcome {
 
 /**
  * 在单事务内按序执行提交语句并校验影响行数（§2-4）：
- * delete/insert：actual !== 1 → 中止；keyed update：actual > 1 → 中止（0 合法）。
+ * delete/insert：actual !== 1 → 中止；keyed update：actual > 1 → 中止。
+ * 0 行单独探针：UPDATE 的 0 可能是 MySQL changed-rows 语义下的同值更新
+ * （行在 → no-op 放行），也可能是行已被删/PK 已改（行不在 → 回滚）——
+ * 探针 SELECT 1 复用语句自身的定位谓词，跑在同一事务里（读到同一快照）。
  * 任一失败/校验不过 → rollback 后返回失败，队列由调用方保留。
  */
 export async function commitInTransaction(
   connId: string,
   stmts: GeneratedStatement[],
   begin?: (connId: string, iso?: string) => Promise<string>,
-  exec?: (txId: string, req: QueryRequest) => Promise<{ affected_rows: number }>,
+  exec?: (txId: string, req: QueryRequest) => Promise<Pick<QueryResult, 'affected_rows' | 'rows'>>,
   finalize?: (txId: string, commit: boolean) => Promise<void>,
 ): Promise<CommitOutcome> {
   const beginTxn = begin ?? ((cid: string) => api.beginTransaction(cid).then((t) => t.id));
   const execTxn = exec ?? ((txId: string, req: QueryRequest) =>
-    api.executeInTx(txId, req).then((res) => ({ affected_rows: res.affected_rows })));
+    api.executeInTx(txId, req).then((res) => ({ affected_rows: res.affected_rows, rows: res.rows })));
   const finalizeTxn = finalize ?? ((txId: string, commit: boolean) =>
     commit ? api.commitTransaction(txId) : api.rollbackTransaction(txId));
 
@@ -334,10 +348,29 @@ export async function commitInTransaction(
   let applied = 0;
   try {
     for (const s of stmts) {
-      const { affected_rows: actual } = await execTxn(txId, s.parameterized as unknown as QueryRequest);
-      if (s.allowZero ? actual > s.expectAffected : actual !== s.expectAffected) {
-        await finalizeTxn(txId, false);
-        return { ok: false, applied, error: `影响行数与预期不符：预期 ${s.expectAffected}，实际 ${actual}（第 ${applied + 1} 条），已整体回滚` };
+      const { affected_rows: actual, rows } = await execTxn(txId, s.parameterized as unknown as QueryRequest);
+      const mismatched = s.allowZero ? actual > s.expectAffected : actual !== s.expectAffected;
+      // 0 行守卫：0 行本身可能合法（keyed update 同值更新），只有定位谓词查不到行才是
+      // 并发冲突。表/谓词为空（INSERT）不探针，按行数校验直接判。
+      const zeroRow = actual === 0 && s.table !== '' && s.whereClause !== '';
+      if (mismatched || zeroRow) {
+        let present = false;
+        if (zeroRow) {
+          const probe = await execTxn(txId, {
+            sql: `SELECT 1 FROM ${s.table} WHERE ${s.whereClause}`,
+            params: [],
+          } as unknown as QueryRequest);
+          present = Array.isArray(probe.rows) && probe.rows.length > 0;
+        }
+        // mismatched（行数超过预期，或 delete/insert 实际 0 行）必须无条件回滚；
+        // 探针查到行只对"keyed update 的 0 行同值更新"（allowZero && zeroRow &&
+        // present，此时 mismatched 为 false）是合法豁免，不能用来放行其他 mismatch。
+        if (mismatched || !present) {
+          await finalizeTxn(txId, false);
+          const why = mismatched ? `预期 ${s.expectAffected}，实际 ${actual}` : '目标行已不存在（同事务探针）';
+          return { ok: false, applied, error: `影响行数与预期不符：${why}（第 ${applied + 1} 条），已整体回滚` };
+        }
+        // 行在且未 mismatch：keyed update 的 0 行 no-op，放行。
       }
       applied += 1;
     }
