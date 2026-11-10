@@ -105,7 +105,21 @@ func collapseSQL(v any) any {
 	return m
 }
 
-// onlyColumnNames 把查询结果的列裁剪成只保留 name（Rust 侧列类型固定回退 TEXT，差异不比）。
+// onlyColumnNames 把查询结果的列裁剪成只保留 name。
+//
+// 用途：**只**用于那些列类型拼写两端尚未对齐的场景（PG / MySQL / MSSQL /
+// Oracle 的 net 场景）。SQLite 场景**已不再使用**（PD-21，2026-11-10）：
+// Rust 侧此前把 data_type 硬编码成 "TEXT"，而 Go 侧报真实声明类型
+// （dbsqlite.go:180 的 `pdb.DeclTypeOf(ct)`），两端对同一查询给出的 type
+// 不同，于是这里把类型整个裁掉。Rust 侧改读 sqlite3_column_decltype
+// （开启 rusqlite 的 column_decltype feature，db-sqlite/src/driver.rs）后
+// 两端逐字一致（INTEGER/TEXT/INT/REAL/BLOB），SQLite 的断言已把 type
+// 纳入比较。
+//
+// 保留本函数是因为 net 场景的列类型来自**不同引擎的类型名体系**（PG 的
+// OID 名 vs sqlx 的 type_info().name()，Oracle 的 OracleType Debug 形态
+// vs go-ora 的拼写），端到端对齐需逐引擎实测——本机无对应服务，故此处
+// 仍按"名称之外不比"处理，并在此登记为**已知未对齐项**（见 WORKSPACE §134）。
 func onlyColumnNames(v any) any {
 	m, ok := v.(map[string]any)
 	if !ok {

@@ -103,6 +103,29 @@ jobs:
       - name: drift check (spec ↔ rust ↔ go ↔ ts, docs ↔ source)
         working-directory: tools/genprotocol
         run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" sh -c 'go run . ts --check && go run . check && go run . ops --check && go run . docs'
+      - name: vector oracle (independent ground truth)
+        # The shared vector corpora used to have their `expected` written by
+        # one of the two implementations, so the two ends only checked "am I
+        # the same as you" — a shared misunderstanding was locked in as the
+        # canon. This gate derives the expected values from the rules stated in
+        # each vector's `note` (phase codes, id shape, dedup/order/validation)
+        # without reading either implementation, so a shared misreading shows
+        # up as a red build instead of passing both ends.
+        #
+        # Deliberately Python, not Go: a different language cannot share the
+        # same language-level misconception. The runner image ships Python 3.
+        #
+        # The selftest is the meta-check: it tampers with a corpus to simulate
+        # "both ends share the same misreading" and requires the oracle to
+        # catch it — otherwise the gate above would be green for the wrong
+        # reason.
+        run: |
+          sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" python3 tools/oracle/select_vectors_oracle.py --check
+          sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" python3 tools/oracle/selftest.py
+          sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" python3 tools/oracle/diff_vectors_oracle.py --check
+          sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" python3 tools/oracle/diff_selftest.py
+          sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" python3 tools/oracle/ddl_vectors_oracle.py --check
+          sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" python3 tools/oracle/ddl_selftest.py
       - name: gofmt
         working-directory: go
         run: |
@@ -289,4 +312,4 @@ jobs:
         # Wrapped in gate.sh so a failure names the assertion instead of only
         # saying "exit code 1". This is the first step in the repo that has
         # ever had real databases behind it, so the failure is otherwise opaque.
-        run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" go test -count=1 -v ./...
+        run: sh "$GITHUB_WORKSPACE/.github/scripts/gate.sh" go test -count=1 -v -timeout 30m ./...

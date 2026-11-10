@@ -50,6 +50,28 @@ func (c *Client) DoRaw(method, path string, hdr map[string]string) (int, http.He
 	return resp.StatusCode, resp.Header, raw, err
 }
 
+// DoRawWithBody 同 DoRaw，但发送指定的原始请求体（413 超限用例：必须能发送
+// 超过服务端上限的字节流，msgpack 编码不适用）。
+func (c *Client) DoRawWithBody(method, path string, hdr map[string]string, body []byte) (int, http.Header, []byte, error) {
+	req, err := http.NewRequest(method, c.base+path, bytes.NewReader(body))
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	for k, v := range hdr {
+		req.Header.Set(k, v)
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	return resp.StatusCode, resp.Header, raw, err
+}
+
 // Do 发送请求；body 为 nil 时不携带请求体。返回值：HTTP 状态码与解码后的响应体。
 func (c *Client) Do(method, path string, body any) (int, any, error) {
 	var reader io.Reader

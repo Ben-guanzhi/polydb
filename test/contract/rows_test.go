@@ -110,9 +110,9 @@ func TestContractTableRows(t *testing.T) {
 
 			// ─── 操作符矩阵 ──────────────────────────────────
 			for _, tc := range []struct {
-				name   string
-				cond   map[string]any
-				count  int
+				name  string
+				cond  map[string]any
+				count int
 			}{
 				{"eq", map[string]any{"column": "name", "op": "eq", "value": "a"}, 1},
 				{"ne", map[string]any{"column": "name", "op": "ne", "value": "a"}, 11},
@@ -120,7 +120,7 @@ func TestContractTableRows(t *testing.T) {
 				{"le", map[string]any{"column": "score", "op": "le", "value": 3}, 3},
 				{"gt", map[string]any{"column": "score", "op": "gt", "value": 10}, 2},
 				{"ge", map[string]any{"column": "score", "op": "ge", "value": 10}, 3},
-				{"like", map[string]any{"column": "name", "op": "like", "value": "%a%"}, 1},   // a..l 中仅 "a" 含 a
+				{"like", map[string]any{"column": "name", "op": "like", "value": "%a%"}, 1}, // a..l 中仅 "a" 含 a
 				{"not_like", map[string]any{"column": "name", "op": "not_like", "value": "%a%"}, 11},
 				{"contains", map[string]any{"column": "name", "op": "contains", "value": "a"}, 1},
 				{"starts_with", map[string]any{"column": "name", "op": "starts_with", "value": "a"}, 1},

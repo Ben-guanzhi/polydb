@@ -147,18 +147,30 @@ func sqliteScenario(r *recorder) {
 	r.step("select", "POST", "/api/connections/"+id+"/query",
 		map[string]any{"sql": "SELECT * FROM users ORDER BY id"},
 		200, map[string]any{
-			"columns": []any{map[string]any{"name": "id"}, map[string]any{"name": "name"}, map[string]any{"name": "age"}},
-			"rows":    []any{[]any{int64(1), "alice", int64(30)}},
-		}, keep("columns", "rows"), transform(onlyColumnNames))
+			// 列类型也纳入断言（PD-21，2026-11-10）：Rust 侧此前硬编码 "TEXT"
+			// 而 Go 侧报真实声明类型，两端不同⇒这里曾用 onlyColumnNames 把
+			// 类型整个放弃。Rust 侧改读 sqlite3_column_decltype（开启 rusqlite
+			// 的 column_decltype feature）后两端逐字一致，故不再裁剪。
+			"columns": []any{
+				map[string]any{"name": "id", "type": "INTEGER"},
+				map[string]any{"name": "name", "type": "TEXT"},
+				map[string]any{"name": "age", "type": "INTEGER"},
+			},
+			"rows": []any{[]any{int64(1), "alice", int64(30)}},
+		}, keep("columns", "rows"))
 
 	r.step("select with leading comment", "POST", "/api/connections/"+id+"/query",
 		map[string]any{"sql": "-- 带注释的查询\n/* block */ SELECT * FROM users ORDER BY id"},
 		200, map[string]any{
-			"columns": []any{map[string]any{"name": "id"}, map[string]any{"name": "name"}, map[string]any{"name": "age"}},
-			"rows":    []any{[]any{int64(1), "alice", int64(30)}},
+			"columns": []any{
+				map[string]any{"name": "id", "type": "INTEGER"},
+				map[string]any{"name": "name", "type": "TEXT"},
+				map[string]any{"name": "age", "type": "INTEGER"},
+			},
+			"rows": []any{[]any{int64(1), "alice", int64(30)}},
 			// 注释不改变语句类型：仍是 SELECT，必须返回结果集而非 Exec 语义。
 			"statement_type": "select",
-		}, keep("columns", "rows", "statement_type"), transform(onlyColumnNames))
+		}, keep("columns", "rows", "statement_type"))
 
 	r.step("query missing table", "POST", "/api/connections/"+id+"/query",
 		map[string]any{"sql": "SELECT * FROM missing_table"},
@@ -291,6 +303,10 @@ func pgScenario(r *recorder, host string, port int64, database, username string)
 	connected, _ := m["connected"].(bool)
 	if !connected {
 		if msg, _ := m["error"].(string); msg != "" {
+			if isAuthFailure(msg) {
+				r.t.Errorf("%s: pg 认证失败（%s）——这是配置错误（检查 POLYDB_TEST_PG 的凭证），不是服务缺失", r.s.b.name, msg)
+				return
+			}
 			r.t.Logf("%s: pg unavailable (%s) — 需本机 PostgreSQL 服务，跳过 PG 流程", r.s.b.name, msg)
 		}
 		return // 视为跳过：清理已创建的连接记录
@@ -307,11 +323,16 @@ func pgScenario(r *recorder, host string, port int64, database, username string)
 	r.step("pg select", "POST", "/api/connections/"+id+"/query",
 		map[string]any{"sql": "SELECT id, name, age FROM ct_users ORDER BY id"},
 		200, map[string]any{
+			// 列类型也纳入断言（PD-22，2026-11-10）：PG 的列类型名两端逐字一致
+			// （pgx 与 sqlx 都报 PG 的 OID 名），此前用 onlyColumnNames 裁掉了。
+			// id 是 SERIAL，其底层类型是 INT4（PG 的 OID 名，不是 "SERIAL"）。
 			"columns": []any{
-				map[string]any{"name": "id"}, map[string]any{"name": "name"}, map[string]any{"name": "age"},
+				map[string]any{"name": "id", "type": "INT4"},
+				map[string]any{"name": "name", "type": "TEXT"},
+				map[string]any{"name": "age", "type": "INT4"},
 			},
 			"rows": []any{[]any{int64(1), "alice", int64(30)}},
-		}, keep("columns", "rows"), transform(onlyColumnNames))
+		}, keep("columns", "rows"))
 
 	r.step("pg cleanup", "POST", "/api/connections/"+id+"/query",
 		map[string]any{"sql": "DROP TABLE IF EXISTS ct_users"},
@@ -363,6 +384,10 @@ type netSpec struct {
 	insertSQL string
 	selectSQL string
 	dropSQL   string
+	// colTypes 是 selectSQL 各列的期望 type 拼写（PD-22，2026-11-10）。
+	// 为空表示该引擎的列类型两端**不可比**（见 known_differences_test.go
+	// 的登记），断言时用 onlyColumnNames 裁掉。
+	colTypes []string
 }
 
 func TestContractMySQL(t *testing.T) {
@@ -416,20 +441,65 @@ func netSpecFor(kind, host string, port int64, database, username, password stri
 		s.insertSQL = "INSERT INTO " + table + "(name, age) VALUES('alice', 30)"
 		s.selectSQL = "SELECT id, name, age FROM " + table + " ORDER BY id"
 		s.dropSQL = "DROP TABLE " + table
+		// 两端逐字一致（实测，PD-22）。
+		s.colTypes = []string{"INT", "VARCHAR", "INT"}
 	case "mssql":
 		qt := "dbo." + table
 		s.createSQL = "CREATE TABLE " + qt + "(id INT IDENTITY(1,1) PRIMARY KEY, name NVARCHAR(100) NOT NULL, age INT)"
 		s.insertSQL = "INSERT INTO " + qt + "(name, age) VALUES('alice', 30)"
 		s.selectSQL = "SELECT id, name, age FROM " + qt + " ORDER BY id"
 		s.dropSQL = "DROP TABLE " + qt
+		// 两端逐字一致（实测，PD-22）——Rust 侧原先给**小写**
+		// （"int"/"nvarchar"），已按 go-mssqldb 的规范拼写改为大写。
+		s.colTypes = []string{"INT", "NVARCHAR", "INT"}
 	case "oracle":
 		// Oracle 未加引号的列名大写：SELECT 用小写别名保证两端列名一致可比。
 		s.createSQL = "CREATE TABLE " + table + "(id NUMBER PRIMARY KEY, name VARCHAR2(100) NOT NULL, age NUMBER)"
 		s.insertSQL = "INSERT INTO " + table + "(id, name, age) VALUES(1, 'alice', 30)"
 		s.selectSQL = "SELECT id AS \"id\", name AS \"name\", age AS \"age\" FROM " + table + " ORDER BY id"
 		s.dropSQL = "DROP TABLE " + table
+		// 列类型两端逐字一致（PD-28，2026-11-10）——**已可比**：
+		// 此前 Go 侧报 go-ora 的 TNS 枚举名（VARCHAR2 列报成 "NCHAR"、
+		// BINARY_DOUBLE 报成 "IBDouble"）、Rust 侧报 Debug 形态
+		// （Varchar2(50)/Number(10, 0)），两端对不上，故这里裁掉类型。
+		// 现在两端都映射成大写 Oracle SQL 类型名（Go: pkg/dboracle/typename.go；
+		// Rust: db-oracle/src/lib.rs 的 oracle_type_name），实测
+		// VARCHAR2/CHAR/NUMBER/DATE/TIMESTAMP/BINARY_DOUBLE/BINARY_FLOAT/RAW
+		// 逐字相同。字符族按族名归并（Go 侧拿不到字符集形态）——
+		// id/age 是 NUMBER，name 是 VARCHAR2。
+		s.colTypes = []string{"NUMBER", "VARCHAR2", "NUMBER"}
 	}
 	return s
+}
+
+// netColumnsExpectation 给出 net 场景期望的 columns。
+//
+// colTypes 非空（MySQL / MSSQL / Oracle）：列类型两端逐字一致
+// （PD-22 / PD-28 实测），期望里带上 type，与实际响应一起比较。
+// colTypes 为空：该引擎的列类型两端不可比，期望里只给 name，由
+// netColumnsTransform 把实际响应的 type 一并裁掉。
+// 目前三个 net 引擎都填了 colTypes，即**没有**引擎再需要裁剪——
+// 若将来新增引擎宁可先填 nil（并在此登记原因），也不要放宽别名比较。
+func netColumnsExpectation(s netSpec) []any {
+	names := []string{"id", "name", "age"}
+	out := make([]any, 0, len(names))
+	for i, n := range names {
+		c := map[string]any{"name": n}
+		if i < len(s.colTypes) {
+			c["type"] = s.colTypes[i]
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// netColumnsTransform 在该引擎的列类型不可比时裁掉 type；可比时原样返回
+// （让 type 参与比较）。
+func netColumnsTransform(s netSpec) stepFunc {
+	if len(s.colTypes) > 0 {
+		return func(v any) any { return v }
+	}
+	return onlyColumnNames
 }
 
 func netScenario(r *recorder, s netSpec) {
@@ -446,6 +516,11 @@ func netScenario(r *recorder, s netSpec) {
 	}
 	if status == 500 {
 		// Rust 侧 mssql/oracle 在 create 时即建连：服务不可用会在此处失败，视为跳过。
+		if isAuthFailure(fmt.Sprintf("%v", got)) {
+			r.t.Errorf("%s: %s 认证失败（%v）——这是配置错误（检查 POLYDB_TEST_%s 的凭证），不是服务缺失",
+				r.s.b.name, s.kind, got, strings.ToUpper(s.kind))
+			return
+		}
 		r.t.Logf("%s: %s unavailable at create (%v) — 需本机 %s 服务，跳过 %s 流程", r.s.b.name, s.kind, got, s.kind, s.kind)
 		return
 	}
@@ -464,6 +539,11 @@ func netScenario(r *recorder, s netSpec) {
 	connected, _ := m["connected"].(bool)
 	if !connected {
 		if msg, _ := m["error"].(string); msg != "" {
+			if isAuthFailure(msg) {
+				r.t.Errorf("%s: %s 认证失败（%s）——这是配置错误（检查 POLYDB_TEST_%s 的凭证），不是服务缺失",
+					r.s.b.name, s.kind, msg, strings.ToUpper(s.kind))
+				return
+			}
 			r.t.Logf("%s: %s unavailable (%s) — 跳过 %s 流程", r.s.b.name, s.kind, msg, s.kind)
 		}
 		return // 视为跳过：清理已创建的连接记录
@@ -477,11 +557,9 @@ func netScenario(r *recorder, s netSpec) {
 
 	r.step("select", "POST", "/api/connections/"+id+"/query",
 		map[string]any{"sql": s.selectSQL}, 200, map[string]any{
-			"columns": []any{
-				map[string]any{"name": "id"}, map[string]any{"name": "name"}, map[string]any{"name": "age"},
-			},
-			"rows": []any{[]any{int64(1), "alice", int64(30)}},
-		}, keep("columns", "rows"), transform(onlyColumnNames))
+			"columns": netColumnsExpectation(s),
+			"rows":    []any{[]any{int64(1), "alice", int64(30)}},
+		}, keep("columns", "rows"), transform(netColumnsTransform(s)))
 
 	r.step("cleanup", "POST", "/api/connections/"+id+"/query",
 		map[string]any{"sql": s.dropSQL}, 200, map[string]any{"statement_type": "ddl"})
@@ -571,6 +649,11 @@ func redisScenario(r *recorder, host string, port int64) {
 	}
 	if status == 500 {
 		// 两端都在 create 时即建连：Redis 服务不可用在此处失败，视为跳过。
+		if isAuthFailure(fmt.Sprintf("%v", got)) {
+			r.t.Errorf("%s: redis 认证失败（%v）——这是配置错误（检查 POLYDB_TEST_REDIS 的凭证），不是服务缺失",
+				r.s.b.name, got)
+			return
+		}
 		r.t.Logf("%s: redis unavailable at create (%v) — 需本机 Redis 服务，跳过 redis 流程", r.s.b.name, got)
 		return
 	}
@@ -589,6 +672,11 @@ func redisScenario(r *recorder, host string, port int64) {
 	connected, _ := m["connected"].(bool)
 	if !connected {
 		if msg, _ := m["error"].(string); msg != "" {
+			if isAuthFailure(msg) {
+				r.t.Errorf("%s: redis 认证失败（%s）——这是配置错误（检查 POLYDB_TEST_REDIS 的凭证），不是服务缺失",
+					r.s.b.name, msg)
+				return
+			}
 			r.t.Logf("%s: redis unavailable (%s) — 跳过 redis 流程", r.s.b.name, msg)
 		}
 		return // 视为跳过：清理已创建的连接记录
