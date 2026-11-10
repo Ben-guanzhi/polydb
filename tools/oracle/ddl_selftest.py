@@ -88,6 +88,15 @@ def tamper_warning_text(v):
     raise AssertionError("没有可篡改的告警")
 
 
+def tamper_sql_text(v):
+    """改一条 SQL 的一个字符 ⇒ 全文推导必须检出（§15.3 的模板是契约）。"""
+    for st in v["expected"]["statements"]:
+        if st.get("sql"):
+            st["sql"] = st["sql"].replace("t", "t_x", 1)
+            return
+    raise AssertionError("没有可篡改的 sql")
+
+
 def tamper_warning_placement(v):
     """把重建组首条的告警**挪到同组第二条** ⇒ 必须检出。
 
@@ -116,6 +125,7 @@ SCENARIOS = [
     ("ddl_in_tx 改 false", "d02_create_table.json", tamper_ddl_in_tx),
     ("篡改告警文案", "d05_drop_column_indexed_rebuild.json", tamper_warning_text),
     ("告警挪到非首条", "d05_drop_column_indexed_rebuild.json", tamper_warning_placement),
+    ("篡改 SQL 文本", "d02_create_table.json", tamper_sql_text),
 ]
 
 

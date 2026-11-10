@@ -274,10 +274,54 @@ def derive(v):
                     )
                 )
 
-    # 稳定排序：相位 → 表名（create_table 的拓扑序由检查器验证性质，不在此
-    # 强行规定——见文件头的"不覆盖"说明）。
+    # 稳定排序：相位 → 表名 → id；create_table 段再做 §14.4 的依赖拓扑。
     entries.sort(key=lambda e: (e["phase"], e["table"].lower(), e["id"]))
+    entries = _topo_create_tables(entries, tgt)
     return None, None, entries
+
+
+def _topo_create_tables(entries, tgt):
+    """§14.4 的建表拓扑：create_table 段内父表先建。
+
+    依赖图只认**本段内**的新建表、排除自引用；起点按小写键升序；
+    `visit(k)` 先递归依赖再输出自身，因此无环时父表在前、环时按 DFS 到达序
+    （与两端实现同规则——Go `topoCreateTables`，spec §14.4 明文）。
+    """
+    by_key = {}
+    for e in entries:
+        if e["op"] == "create_table":
+            by_key[e["table"].lower()] = e
+    if len(by_key) < 2:
+        return entries
+    deps = {}
+    for k in sorted(by_key):
+        t = tgt.get(k)
+        d = set()
+        if t:
+            for fk in t.get("foreign_keys", []) or []:
+                r = str(fk.get("referenced_table") or "").lower()
+                if r in by_key and r != k:
+                    d.add(r)
+        deps[k] = sorted(d)
+    visited = set()
+    order_keys = []
+
+    def visit(k):
+        if k in visited:
+            return
+        visited.add(k)
+        for r in deps.get(k, ()):
+            visit(r)
+        order_keys.append(k)
+
+    for k in sorted(by_key):
+        visit(k)
+    # create_table 段按 DFS 到达序替换原位（stable：段内次序即拓扑序）。
+    create_order = iter([by_key[k] for k in order_keys])
+    return [
+        next(create_order) if e["op"] == "create_table" else e
+        for e in entries
+    ]
 
 
 # ──────────────────────────────────────────────────────────── 比对

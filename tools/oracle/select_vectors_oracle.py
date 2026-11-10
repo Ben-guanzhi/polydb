@@ -204,9 +204,12 @@ def build_plan(source, target, options):
                                     phase=PHASE["drop_foreign_key"], table=name,
                                     target=fname, op="drop_foreign_key"))
 
-    # 计划序：相位码 → 表名 → 目标名
+    # 计划序：相位码 → 表名 → 目标名；create_table 段再做 §14.4 的依赖拓扑
+    # （与 diff oracle 同一函数——规则只此一份）。
     entries.sort(key=lambda e: (e["phase"], e["table"], e["target"]))
-    return entries
+    import diff_vectors_oracle as _DIFF
+
+    return _DIFF._topo_create_tables(entries, tgt)
 
 
 def is_auto_index(name):

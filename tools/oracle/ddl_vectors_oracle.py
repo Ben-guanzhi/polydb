@@ -11,7 +11,7 @@ DDL 语料的 `expected` 含三类东西，可推导性差别很大：
 | **渲染出的条目集合**（正/反两向） | ✅ 纯规则 | 校验 |
 | 语句**条数/分组/顺序/相位** | ⚠️ 编码 SQLite 方言策略 | **不校验**（见下） |
 | **`warnings` 文案** | ✅ 纯规则（§15.8 规定了文案、挂载位置与名单渲染）| **校验** |
-| `sql` 全文 | ❌ 渲染产物 | 不校验 |
+| **`sql` 全文** | ✅ 纯规则（§15.3 五步模板 + §15.6 镜像回滚 + §15.7 不可逆）| **校验** |
 
 ### 为什么"条目集合"是可推导的、而"语句分组"不是
 
@@ -53,6 +53,7 @@ import json
 import os
 import sys
 
+import ddl_sql_derive as SQL
 import diff_vectors_oracle as DIFF
 import schema_rules as R
 import select_vectors_oracle as SEL
@@ -177,6 +178,35 @@ def check_loaded(v):
     # ── 警告文案（§15.8）：按 entry_ids 组核内容 + 「只挂在组内首条」
     problems.extend(check_warnings(v, "statements", forward))
     problems.extend(check_warnings(v, "rollback", rollback))
+
+    # ── 脚本全文（§15.3–§15.8）：语句/回滚/PRAGMA/不可逆逐字段推导
+    got_script = SQL.derive_script(v)
+    for key in ("statements", "rollback", "pragmas_outside_tx", "ddl_in_tx"):
+        if got_script.get(key) != exp.get(key):
+            problems.append(f"{key}: 全文推导与语料不符")
+    if any("全文推导与语料不符" in p for p in problems):
+        # 给出首个差异细节，便于定位
+        g, w = got_script.get("statements") or [], exp.get("statements") or []
+        done = False
+        for key in ("statements", "rollback"):
+            g2, w2 = got_script.get(key) or [], exp.get(key) or []
+            if len(g2) != len(w2):
+                problems.append(f"  首个差异 {key}: 条数 want={len(w2)} got={len(g2)}")
+                done = True
+                break
+            for i, (gi, wi) in enumerate(zip(g2, w2)):
+                for k in sorted(set(gi) | set(wi)):
+                    if gi.get(k) != wi.get(k):
+                        problems.append(
+                            f"  首个差异 {key}[{i}].{k}: "
+                            f"want={wi.get(k)!r} got={gi.get(k)!r}"
+                        )
+                        done = True
+                        break
+                if done:
+                    break
+            if done:
+                break
 
     return (not problems), problems
 
@@ -361,7 +391,7 @@ def main(argv=None):
 
     print(
         f"\nDDL 结构 oracle：{len(files)} 份语料，吻合 {len(files) - bad}，不吻合 {bad}"
-        f"（校验 error_code + 正/反两向条目集合 + 警告文案；不校验语句切分与 SQL 文本）"
+        f"（校验 error_code + 脚本全文：语句/回滚/PRAGMA/不可逆/警告——§15.3–§15.8 已全部写成规则）"
     )
     return 0 if bad == 0 else 1
 
