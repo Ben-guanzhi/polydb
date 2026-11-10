@@ -1,0 +1,118 @@
+{
+  "name": "s20_add_foreign_key_is_last",
+  "note": "加外键（add_foreign_key）的相位是 90，是**全表最高**——必须排在 add_column(60) 之后。同时锁定**无名外键**在条目里的对象名：真实 SQLite 快照的 PRAGMA foreign_key_list 没有 name 列，故 object 退化为 fk(<列>)，条目 id 写作 `orders/fk(user_id)/add_foreign_key`。",
+  "options": {
+    "ignore_defaults": false,
+    "select_destructive": false
+  },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "users",
+        "type": "table",
+        "columns": [
+          {
+            "name": "id",
+            "data_type": "INTEGER",
+            "nullable": false,
+            "ordinal_position": 1,
+            "is_primary_key": true
+          }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      },
+      {
+        "name": "orders",
+        "type": "table",
+        "columns": [
+          {
+            "name": "id",
+            "data_type": "INTEGER",
+            "nullable": false,
+            "ordinal_position": 1,
+            "is_primary_key": true
+          },
+          {
+            "name": "user_id",
+            "data_type": "INTEGER",
+            "nullable": true,
+            "ordinal_position": 2
+          }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "users",
+        "type": "table",
+        "columns": [
+          {
+            "name": "id",
+            "data_type": "INTEGER",
+            "nullable": false,
+            "ordinal_position": 1,
+            "is_primary_key": true
+          }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      },
+      {
+        "name": "orders",
+        "type": "table",
+        "columns": [
+          {
+            "name": "id",
+            "data_type": "INTEGER",
+            "nullable": false,
+            "ordinal_position": 1,
+            "is_primary_key": true
+          },
+          {
+            "name": "user_id",
+            "data_type": "INTEGER",
+            "nullable": true,
+            "ordinal_position": 2
+          },
+          {
+            "name": "note",
+            "data_type": "TEXT",
+            "nullable": true,
+            "ordinal_position": 3
+          }
+        ],
+        "indexes": [],
+        "foreign_keys": [
+          {
+            "name": "",
+            "columns": [
+              "user_id"
+            ],
+            "referenced_schema": "main",
+            "referenced_table": "users",
+            "referenced_columns": [
+              "id"
+            ],
+            "on_delete": "no_action"
+          }
+        ]
+      }
+    ]
+  },
+  "selected": null,
+  "expected": [
+    "orders/note/add_column",
+    "orders/fk(user_id)/add_foreign_key"
+  ],
+  "error_code": "",
+  "error_message": ""
+}

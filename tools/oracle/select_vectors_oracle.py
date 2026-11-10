@@ -176,20 +176,32 @@ def build_plan(source, target, options):
         sidx, tidx = indexes_of(s), indexes_of(t)
         for iname in sidx:
             if iname not in tidx:
-                entries.append(dict(id=f"{name.lower()}/{iname}/drop_index",
+                obj = R.index_object(sidx[iname]).lower()
+                entries.append(dict(id=f"{name.lower()}/{obj}/drop_index",
                                     phase=PHASE["drop_index"], table=name,
                                     target=iname, op="drop_index"))
         for iname in tidx:
             if iname not in sidx:
-                entries.append(dict(id=f"{name.lower()}/{iname}/add_index",
+                obj = R.index_object(tidx[iname]).lower()
+                entries.append(dict(id=f"{name.lower()}/{obj}/add_index",
                                     phase=PHASE["add_index"], table=name,
                                     target=iname, op="add_index"))
         sfk, tfk = fks_of(s), fks_of(t)
         for fname in tfk:
             if fname not in sfk:
-                entries.append(dict(id=f"{name.lower()}/{fname}/add_foreign_key",
+                obj = R.fk_object(tfk[fname]).lower()
+                entries.append(dict(id=f"{name.lower()}/{obj}/add_foreign_key",
                                     phase=PHASE["add_foreign_key"], table=name,
                                     target=fname, op="add_foreign_key"))
+        # 删外键（相位 10，全表最低）。**此前缺失**——与相位表漏
+        # `drop_foreign_key` 是同一个盲区：select 语料从没出现过「删外键」，
+        # 于是这条分支不存在也能 18/18 全绿（PD-31，2026-11-10）。
+        for fname in sfk:
+            if fname not in tfk:
+                obj = R.fk_object(sfk[fname]).lower()
+                entries.append(dict(id=f"{name.lower()}/{obj}/drop_foreign_key",
+                                    phase=PHASE["drop_foreign_key"], table=name,
+                                    target=fname, op="drop_foreign_key"))
 
     # 计划序：相位码 → 表名 → 目标名
     entries.sort(key=lambda e: (e["phase"], e["table"], e["target"]))

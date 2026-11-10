@@ -416,3 +416,32 @@ func indentIDs(ids []string, pad string) string {
 	sb.WriteString(pad[:len(pad)-2] + "]")
 	return sb.String()
 }
+
+// TestSharedSelectVectorsCoverAllOps 每一个 op 都必须在**某条成功用例的 picked**
+// 里出现过。
+//
+// 既有 TestSharedSelectVectorsCoverage 只守"分支"（selected_null /
+// group_whole_pass / stale_beats_group…），**不守 op**。`drop_foreign_key`
+// 因此长期 0 覆盖——相位表漏掉它（PD-29）、selected 计划里没有它，两者都
+// 能全绿（PD-31，2026-11-10）。本测试按生成表 `OpRows` 逐个核，不硬编码
+// op 清单：契约增删 op 时这里会自动跟上。
+func TestSharedSelectVectorsCoverAllOps(t *testing.T) {
+	covered := map[Op]bool{}
+	for _, v := range loadSelectVectors(t) {
+		v := v
+		_, picked, err := runSelectVector(t, &v)
+		if err != nil {
+			continue // 只统计**成功**用例：报错路径的 picked 为空
+		}
+		for i := range picked {
+			covered[picked[i].Op] = true
+		}
+	}
+	for _, r := range OpRows {
+		if !covered[r.Op] {
+			t.Errorf("select 语料缺 op 覆盖：%s —— 没有任何**成功**用例的 picked 含它"+
+				"（报错用例不算，那条路径不产出条目）。补一份语料，别让它只出现在"+
+				"计划里而不出现在期望输出里", r.Op)
+		}
+	}
+}

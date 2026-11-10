@@ -1,0 +1,81 @@
+{
+  "name": "s21_drop_column_direct_and_rebuild",
+  "note": "删列（drop_column）相位 30。本条的源表有两列要删：`note` 被 idx_note 覆盖 ⇒ 删除触发**整表重建**（同表所有条目必须整组勾选），`tmp` 没被任何索引/主键覆盖 ⇒ 直改。两种情况落在同一个成功输出里，同时锁定顺序：drop_index(20) 先于 drop_column(30)，同相位按列名。selected=null ⇒ 整组自然满足，期望是成功列表而不是报错。",
+  "options": {
+    "ignore_defaults": false,
+    "select_destructive": false
+  },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          {
+            "name": "id",
+            "data_type": "INTEGER",
+            "nullable": false,
+            "ordinal_position": 1,
+            "is_primary_key": true
+          },
+          {
+            "name": "note",
+            "data_type": "TEXT",
+            "nullable": true,
+            "ordinal_position": 2
+          },
+          {
+            "name": "tmp",
+            "data_type": "TEXT",
+            "nullable": true,
+            "ordinal_position": 3
+          }
+        ],
+        "indexes": [
+          {
+            "name": "idx_note",
+            "unique": false,
+            "columns": [
+              {
+                "name": "note",
+                "position": 1
+              }
+            ]
+          }
+        ],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          {
+            "name": "id",
+            "data_type": "INTEGER",
+            "nullable": false,
+            "ordinal_position": 1,
+            "is_primary_key": true
+          }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": null,
+  "expected": [
+    "t/idx_note/drop_index",
+    "t/note/drop_column",
+    "t/tmp/drop_column"
+  ],
+  "error_code": "",
+  "error_message": ""
+}

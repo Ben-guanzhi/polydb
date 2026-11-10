@@ -1,0 +1,118 @@
+{
+  "name": "s19_drop_foreign_key_is_first",
+  "note": "删外键（drop_foreign_key）的相位是 10，是**全表最低**——必须排在 add_column(60) 之前。此前 select 语料完全没有这个 op，于是相位表漏掉它也照样 18/18 全绿（PD-29 的隐身路径）。本条把它锁进成功输出的排序里。",
+  "options": {
+    "ignore_defaults": false,
+    "select_destructive": false
+  },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "users",
+        "type": "table",
+        "columns": [
+          {
+            "name": "id",
+            "data_type": "INTEGER",
+            "nullable": false,
+            "ordinal_position": 1,
+            "is_primary_key": true
+          }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      },
+      {
+        "name": "orders",
+        "type": "table",
+        "columns": [
+          {
+            "name": "id",
+            "data_type": "INTEGER",
+            "nullable": false,
+            "ordinal_position": 1,
+            "is_primary_key": true
+          },
+          {
+            "name": "user_id",
+            "data_type": "INTEGER",
+            "nullable": true,
+            "ordinal_position": 2
+          }
+        ],
+        "indexes": [],
+        "foreign_keys": [
+          {
+            "name": "fk_user",
+            "columns": [
+              "user_id"
+            ],
+            "referenced_schema": "main",
+            "referenced_table": "users",
+            "referenced_columns": [
+              "id"
+            ],
+            "on_delete": "no_action"
+          }
+        ]
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "users",
+        "type": "table",
+        "columns": [
+          {
+            "name": "id",
+            "data_type": "INTEGER",
+            "nullable": false,
+            "ordinal_position": 1,
+            "is_primary_key": true
+          }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      },
+      {
+        "name": "orders",
+        "type": "table",
+        "columns": [
+          {
+            "name": "id",
+            "data_type": "INTEGER",
+            "nullable": false,
+            "ordinal_position": 1,
+            "is_primary_key": true
+          },
+          {
+            "name": "user_id",
+            "data_type": "INTEGER",
+            "nullable": true,
+            "ordinal_position": 2
+          },
+          {
+            "name": "note",
+            "data_type": "TEXT",
+            "nullable": true,
+            "ordinal_position": 3
+          }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": null,
+  "expected": [
+    "orders/fk_user/drop_foreign_key",
+    "orders/note/add_column"
+  ],
+  "error_code": "",
+  "error_message": ""
+}

@@ -284,3 +284,35 @@ fn shared_select_vectors_cover_every_branch() {
         assert!(cov.contains(branch), "勾选语料缺少分支覆盖：{branch}");
     }
 }
+
+/// 每一个 op 都必须在**某条成功用例的 picked** 里出现过。
+///
+/// 既有的 `shared_select_vectors_cover_every_branch` 只守"分支"，**不守 op**。
+/// `drop_foreign_key` 因此长期 0 覆盖——相位表漏掉它（PD-29）、计划里没有它，
+/// 两者都能全绿（PD-31，2026-11-10）。本测试按生成表 `OP_ROWS` 逐个核，
+/// 不硬编码 op 清单：契约增删 op 时这里自动跟上。
+#[test]
+fn shared_select_vectors_cover_every_op() {
+    let mut covered: Vec<polydb_schema_diff::Op> = Vec::new();
+    for v in load_all() {
+        let (_plan, picked) = run(&v);
+        let Ok(picked) = picked else { continue }; // 报错路径不产出条目
+        for e in picked {
+            if !covered.contains(&e.op) {
+                covered.push(e.op);
+            }
+        }
+    }
+    let mut missing = Vec::new();
+    for row in polydb_schema_diff::ops_gen::OP_ROWS {
+        if !covered.contains(&row.op) {
+            missing.push(format!("{:?}", row.op));
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "select 语料缺 op 覆盖：{missing:?} —— 没有任何**成功**用例的 picked 含它\
+         （报错用例不算，那条路径不产出条目）。补一份语料，别让它只出现在计划里\
+         而不出现在期望输出里"
+    );
+}

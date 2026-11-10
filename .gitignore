@@ -1,4 +1,4 @@
-# ─── Build artifacts ───────────────────────────────────────
+ ─── Build artifacts ───────────────────────────────────────
 # Rust
 /rust/target/
 /rust/target-gnu/
@@ -35,3 +35,7 @@ keyring.bin
 # ─── OS ────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
+
+# ─── Python（oracle 工具的编译产物）────────────────────────
+__pycache__/
+*.pyc
