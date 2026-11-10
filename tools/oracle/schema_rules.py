@@ -272,6 +272,124 @@ def entry_id(table, obj, op):
     return f"{table.lower()}/{(obj or '').lower()}/{op}"
 
 
+# ──────────────────────────────────────────────────── reason 文案（§14.6.1）
+#
+# 文案格式是**契约**（spec/behavior.md §14.6.1），故这些词汇表也算规则。
+# 加进来的直接收益：diff 语料的 `reason` 不再需要"抄一端实现"，可独立推导。
+def null_word(nullable):
+    """可空性词：`NULL` / `NOT NULL`。"""
+    return "NULL" if nullable else "NOT NULL"
+
+
+def yes_word(b):
+    """布尔词：`是` / `否`。"""
+    return "是" if b else "否"
+
+
+def default_word(d):
+    """默认值词：None → `无`，否则原文（已归一的默认值）。"""
+    return "无" if d is None else d
+
+
+def action_word(a):
+    """FK 动作词：空串 → `无`，否则原文。"""
+    return "无" if not (a or "").strip() else a
+
+
+def cols_lower(names):
+    """列名列表：各名转小写后以 `,` 连接（无空格）。"""
+    return ",".join(str(n).lower() for n in names or [])
+
+
+def index_sig_str(idx):
+    """索引签名串：列按 (position, 小写名) 升序，转小写后 `,` 连接。"""
+    cols = list(idx.get("columns", []) or [])
+    cols.sort(key=lambda c: (c.get("position", 0), str(c.get("name", "")).lower()))
+    return ",".join(str(c.get("name", "")).lower() for c in cols)
+
+
+def ref_table(fk):
+    """引用表串：`[schema/]table`（都转小写；schema 空则只有表名）。"""
+    t = str(fk.get("referenced_table") or "").lower()
+    s = str(fk.get("referenced_schema") or "").strip().lower()
+    return f"{s}/{t}" if s else t
+
+
+def index_change_reason(s_idx, t_idx):
+    """索引定义变化的文案（成对两条相同，见 §14.6.1）。"""
+    parts = []
+    sa, ta = index_sig_str(s_idx), index_sig_str(t_idx)
+    if sa != ta:
+        parts.append(f"索引定义变化：{sa} → {ta}")
+    if bool(s_idx.get("unique")) != bool(t_idx.get("unique")):
+        parts.append(f"唯一性 {yes_word(bool(s_idx.get('unique')))} → {yes_word(bool(t_idx.get('unique')))}")
+    return "；".join(parts)
+
+
+def fk_change_reason(s_fk, t_fk):
+    """外键定义变化的文案（成对两条相同，见 §14.6.1）。"""
+    parts = []
+    sc, tc = cols_lower(s_fk.get("columns")), cols_lower(t_fk.get("columns"))
+    if sc != tc:
+        parts.append(f"列 {sc} → {tc}")
+    sr, tr = ref_table(s_fk), ref_table(t_fk)
+    if sr != tr:
+        parts.append(f"引用表 {sr} → {tr}")
+    srcols = cols_lower(s_fk.get("referenced_columns"))
+    trcols = cols_lower(t_fk.get("referenced_columns"))
+    if srcols != trcols:
+        parts.append(f"引用列 {srcols} → {trcols}")
+    if (s_fk.get("on_delete") or "") != (t_fk.get("on_delete") or ""):
+        parts.append(f"ON DELETE {action_word(s_fk.get('on_delete'))} → {action_word(t_fk.get('on_delete'))}")
+    if (s_fk.get("on_update") or "") != (t_fk.get("on_update") or ""):
+        parts.append(f"ON UPDATE {action_word(s_fk.get('on_update'))} → {action_word(t_fk.get('on_update'))}")
+    return "；".join(parts)
+
+
+def alter_reason(flags, sc, tc, kind=""):
+    """`alter_column` 的文案：按 flags 规范顺序拼接发生变化的分句。"""
+    parts = []
+    for f in FLAG_ORDER:
+        if f not in flags:
+            continue
+        if f == "type":
+            parts.append(
+                f"类型 {norm_type(sc.get('data_type'), kind)} → {norm_type(tc.get('data_type'), kind)}"
+            )
+        elif f == "nullability":
+            parts.append(
+                f"可空性 {null_word(bool(sc.get('nullable')))} → {null_word(bool(tc.get('nullable')))}"
+            )
+        elif f == "default":
+            parts.append(
+                "默认值 "
+                f"{default_word(norm_default(sc.get('default_value')))} → "
+                f"{default_word(norm_default(tc.get('default_value')))}"
+            )
+        elif f == "auto_increment":
+            parts.append(
+                f"自增 {yes_word(bool(sc.get('is_auto_increment')))} → "
+                f"{yes_word(bool(tc.get('is_auto_increment')))}"
+            )
+    return "；".join(parts)
+
+
+#: 各 op 的**简单**文案（对象仅在一侧时用，见 §14.6.1 表）。
+SIMPLE_REASON = {
+    "create_table": "表中缺失，需新建",
+    "drop_table": "表中多余，需删除",
+    "add_column": "列缺失，需新增",
+    "drop_column": "列多余，需删除",
+    "add_index": "索引缺失，需新增",
+    "drop_index": "索引多余，需删除",
+    "add_foreign_key": "外键缺失，需新增",
+    "drop_foreign_key": "外键多余，需删除",
+}
+
+#: 主键列变化时成对产出的文案（两方向同一条）。
+PK_REASON = "主键列变化，需重建"
+
+
 def index_object(idx):
     """索引在条目里的 object 名。
 

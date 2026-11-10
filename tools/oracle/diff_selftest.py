@@ -66,6 +66,19 @@ def tamper_error(v):
     v["error_code"] = ""
 
 
+def tamper_reason(v):
+    """改一个字的文案 ⇒ 必须检出。
+
+    `reason` 自 2026-11-10 起纳入推导（格式契约见 spec/behavior.md §14.6.1），
+    故它必须和结构字段一样被逐字比较——这一条防止 oracle 退回"排除文案"。
+    """
+    for e in v["expected"]:
+        if e.get("reason"):
+            e["reason"] = e["reason"] + "啊"
+            return
+    raise AssertionError("没有可用的 reason 用例")
+
+
 # (说明, 语料文件, 篡改函数)
 SCENARIOS = [
     ("删掉一条条目", "02_table_add_drop.json", tamper_drop_entry),
@@ -75,6 +88,7 @@ SCENARIOS = [
     ("打乱 flags 顺序", "05_type_nullability_autoincrement.json", tamper_flags_order),
     ("条目顺序相位回退", "13_phase_order.json", tamper_order),
     ("抹掉跨种类 error_code", "15_cross_kind_error.json", tamper_error),
+    ("篡改 reason 文案", "03_column_add_drop.json", tamper_reason),
 ]
 
 

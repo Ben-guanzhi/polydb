@@ -17,18 +17,19 @@
 - 条目**集合**：哪些表/列/索引/外键产生了变更、以及 op；
 - `phase`（相位码表）、`table`、`object`（原大小写）、`from`/`to`、
   `flags`（规范顺序）、`destructive`、`selected`（选择策略）；
+- **`reason` 文案**——2026-11-10 起：其格式已升为**契约**
+  （`spec/behavior.md` §14.6.1），故可逐字推导，不再排除。
+  词汇表与各 op 模板在 `schema_rules`（`null_word` / `index_change_reason`
+  / `fk_change_reason` / `alter_reason` / `SIMPLE_REASON` / `PK_REASON`）。
 - 条目**顺序**：按相位不减；同相位的 create_table 满足"被引用表在前"
   的拓扑性质（有环时跳过该检查——语料对环的处置见 `17` 的 note）。
 
-**不覆盖**（明确登记，非疏漏）：
+**不覆盖**：无。本 oracle 现在逐字段比对**整条 entry**。
 
-- `reason`——**文案**。它是给人读的散文（"索引多余，需删除"、
-  "引用表 users → app/users；引用列 id → uid"），无法从快照推导；
-  若强行复刻等于把实现的措辞抄一遍，反而制造"看起来独立、实则抄写"的
-  假象。
-
-> 这就是 §133 说的"半吊子 oracle"风险的正解：**把不可推导的部分显式排除
-> 并在报告里点名**，而不是假装覆盖了全部。
+> 演进记录：`reason` 原先被排除，理由是"散文无法从快照推导"。那句判断在
+> **当时的契约下**是对的——`spec/behavior.md` 只说"由语料锁定"，没规定格式。
+> 把格式写进契约后（§14.6.1），文案就成了可推导量，排除项随之消失。
+> 这也说明"不可推导"往往是**契约定得不够**，而不是真的不可推导。
 
 ## 用法
 
@@ -66,6 +67,9 @@ def _entry(op, table, obj, tname, **kw):
     if obj:
         e["object"] = obj
     e.update(kw)
+    # 简单文案（对象仅在一侧）从契约表取；成对/组合文案由调用方显式传入。
+    if "reason" not in e:
+        e["reason"] = R.SIMPLE_REASON.get(op, "")
     return e
 
 
@@ -108,6 +112,7 @@ def derive(v):
         table = tname_for(key)
 
         # 列
+        kind = tgt_snap.get("kind", "")
         sc, tc = R.columns_of(s), R.columns_of(t)
         for ckey in tc:
             if ckey not in sc:
@@ -117,7 +122,7 @@ def derive(v):
                         table,
                         tc[ckey]["name"],
                         key,
-                        to=str(tc[ckey].get("data_type") or "").lower(),
+                        to=R.norm_type(tc[ckey].get("data_type"), kind),
                         select_destructive=sel_destr,
                     )
                 )
@@ -129,7 +134,7 @@ def derive(v):
                         table,
                         sc[ckey]["name"],
                         key,
-                        **{"from": str(sc[ckey].get("data_type") or "").lower()},
+                        **{"from": R.norm_type(sc[ckey].get("data_type"), kind)},
                         select_destructive=sel_destr,
                     )
                 )
@@ -137,7 +142,7 @@ def derive(v):
             if ckey not in tc:
                 continue
             a, b = sc[ckey], tc[ckey]
-            flags = R.alter_flags(a, b, ignore_defaults, tgt_snap.get("kind", ""))
+            flags = R.alter_flags(a, b, ignore_defaults, kind)
             if not flags:
                 continue
             entries.append(
@@ -147,9 +152,12 @@ def derive(v):
                     b["name"],
                     key,
                     **{
-                        "from": str(a.get("data_type") or "").lower(),
-                        "to": str(b.get("data_type") or "").lower(),
+                        # from/to 与 `类型` 分句同源：都是 NormalizeType 的结果
+                        # （两端实现也是 `e.From = NormalizeType(...)`）。
+                        "from": R.norm_type(a.get("data_type"), kind),
+                        "to": R.norm_type(b.get("data_type"), kind),
                         "flags": flags,
+                        "reason": R.alter_reason(flags, a, b, kind),
                     },
                     select_destructive=sel_destr,
                 )
@@ -160,14 +168,17 @@ def derive(v):
         s_pk = [i for i in si.values() if i.get("primary")]
         t_pk = [i for i in ti.values() if i.get("primary")]
         if s_pk and t_pk and R.index_sig(s_pk[0]) != R.index_sig(t_pk[0]):
+            # 主键列变化：成对产出的两条文案相同（§14.6.1）。
             entries.append(
                 _entry(
-                    "drop_index", table, R.index_object(s_pk[0]), key, select_destructive=sel_destr
+                    "drop_index", table, R.index_object(s_pk[0]), key,
+                    reason=R.PK_REASON, select_destructive=sel_destr,
                 )
             )
             entries.append(
                 _entry(
-                    "add_index", table, R.index_object(t_pk[0]), key, select_destructive=sel_destr
+                    "add_index", table, R.index_object(t_pk[0]), key,
+                    reason=R.PK_REASON, select_destructive=sel_destr,
                 )
             )
         elif bool(s_pk) != bool(t_pk):
@@ -184,14 +195,18 @@ def derive(v):
             if ikey not in si or si[ikey].get("primary") or ti[ikey].get("primary"):
                 continue
             if R.index_sig(si[ikey]) != R.index_sig(ti[ikey]):
+                # 索引定义变化：成对产出的两条文案相同（§14.6.1）。
+                rsn = R.index_change_reason(si[ikey], ti[ikey])
                 entries.append(
                     _entry(
-                        "drop_index", table, R.index_object(si[ikey]), key, select_destructive=sel_destr
+                        "drop_index", table, R.index_object(si[ikey]), key,
+                        reason=rsn, select_destructive=sel_destr,
                     )
                 )
                 entries.append(
                     _entry(
-                        "add_index", table, R.index_object(ti[ikey]), key, select_destructive=sel_destr
+                        "add_index", table, R.index_object(ti[ikey]), key,
+                        reason=rsn, select_destructive=sel_destr,
                     )
                 )
             continue
@@ -236,12 +251,15 @@ def derive(v):
             if fkey not in tf:
                 continue
             if R.fk_sig(sf[fkey]) != R.fk_sig(tf[fkey]):
+                # 外键定义变化：成对产出的两条文案相同（§14.6.1）。
+                rsn = R.fk_change_reason(sf[fkey], tf[fkey])
                 entries.append(
                     _entry(
                         "drop_foreign_key",
                         table,
                         R.fk_object(sf[fkey]),
                         key,
+                        reason=rsn,
                         select_destructive=sel_destr,
                     )
                 )
@@ -251,6 +269,7 @@ def derive(v):
                         table,
                         R.fk_object(tf[fkey]),
                         key,
+                        reason=rsn,
                         select_destructive=sel_destr,
                     )
                 )
@@ -273,10 +292,14 @@ COMPARE_FIELDS = [
     "flags",
     "destructive",
     "selected",
+    # `reason` 自 2026-11-10 起**也纳入比较**：其格式已升为契约
+    # （spec/behavior.md §14.6.1），可逐字推导，不再需要排除。
+    "reason",
 ]
 
 
-def strip_reason(entries):
+def project(entries):
+    """按 COMPARE_FIELDS 投影（**含** `reason`）。"""
     return [{k: e.get(k) for k in COMPARE_FIELDS} for e in entries]
 
 
@@ -302,8 +325,8 @@ def check_loaded(v):
     if want_err:
         return (not problems), problems
 
-    want = strip_reason(v["expected"])
-    got = strip_reason(entries)
+    want = project(v["expected"])
+    got = project(entries)
 
     if want != got:
         if len(want) != len(got):

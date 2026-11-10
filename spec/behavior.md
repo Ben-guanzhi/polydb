@@ -527,9 +527,88 @@
 | 任一侧为 Redis | `POLYDB_ERR_NOT_SUPPORTED` | `Redis 无模式概念，不参与结构比对` |
 | 连接不存在/未连接 | 沿用 §4 既有连接类错误 | — |
 
+### 14.6.1 `reason` 文案格式（契约，2026-11-10）
+
+`reason` 是**用户可见**的人读原因，同时也是契约字段：双实现必须逐字一致。
+此前它的内容只由语料锁定（见 §14.7），于是新增语料必须逐字知道措辞——
+只能抄一端实现，等于把"一端回写"的循环论证保留在这一个字段上。
+本节把它**升为格式契约**：给定两侧快照，文案就是可推导的。
+
+#### 词汇表
+
+| 记号 | 取值 |
+|---|---|
+| `null_w(b)` | `b` 为真 → `NULL`；否则 `NOT NULL` |
+| `yes_w(b)` | `b` 为真 → `是`；否则 `否` |
+| `def_w(d)` | `d` 为 null → `无`；否则取 `NormalizeDefault(d)` 的原文 |
+| `act_w(a)` | `a` 为空串 → `无`；否则 `a` 原文（`no_action` / `cascade` / `restrict` / `set_null` / `set_default`）|
+| `cols_lower(ns)` | 各名转小写后以 `,` 连接，**无空格** |
+| `idx_sig(i)` | 列按 `(position, 小写名)` 升序排序，转小写后以 `,` 连接（同 §14.3） |
+| `ref_table(fk)` | `referenced_schema` 为空 → `小写(referenced_table)`；否则 `小写(schema)/小写(table)` |
+| `nrm(t)` | §14.3 的类型归一（`NormalizeType`） |
+| `obj_index(i)` | 有名用 `name`；无名用 `idx(` + `idx_sig(i)` + `)` |
+| `obj_fk(fk)` | 有名用 `name`；无名用 `fk(` + `cols_lower(columns)` + `)` |
+
+**标点**：同一文案内的多个分句用**全角分号 `；`** 连接；句内箭头为 `→`
+（U+2192）；`缺失/多余` 句内的逗号为全角 `，`。
+
+#### 各 op 的模板
+
+| op | 触发 | 文案 |
+|---|---|---|
+| `create_table` | 表仅在目标侧 | `表中缺失，需新建` |
+| `drop_table` | 表仅在源侧 | `表中多余，需删除` |
+| `add_column` | 列仅在目标侧 | `列缺失，需新增` |
+| `drop_column` | 列仅在源侧 | `列多余，需删除` |
+| `add_index` | 索引仅在目标侧 | `索引缺失，需新增` |
+| `drop_index` | 索引仅在源侧 | `索引多余，需删除` |
+| `add_index` + `drop_index` | 两侧同名索引，签名或唯一性不同 | 见「索引定义变化」 |
+| `add_index` / `drop_index` | 主键列不同（成对产出） | `主键列变化，需重建` |
+| `add_foreign_key` | 外键仅在目标侧 | `外键缺失，需新增` |
+| `drop_foreign_key` | 外键仅在源侧 | `外键多余，需删除` |
+| `add_foreign_key` + `drop_foreign_key` | 两侧同名外键，定义不同 | 见「外键定义变化」 |
+| `alter_column` | `flags` 非空 | 见「列变更」 |
+
+**索引定义变化**（成对的两条文案**完全相同**）：按下列顺序拼接**真正发生变化**
+的分句，用 `；` 连接（无变化的分句整条省略）：
+
+1. `idx_sig(源) != idx_sig(目标)` → `索引定义变化：{idx_sig(源)} → {idx_sig(目标)}`
+2. `unique` 不同 → `唯一性 {yes_w(源)} → {yes_w(目标)}`
+
+**外键定义变化**（成对的两条文案**完全相同**）：按下列顺序拼接**真正发生变化**
+的分句，用 `；` 连接：
+
+1. 本侧列不同 → `列 {cols_lower(源)} → {cols_lower(目标)}`
+2. `ref_table` 不同 → `引用表 {ref_table(源)} → {ref_table(目标)}`
+3. 引用列不同 → `引用列 {cols_lower(源引用列)} → {cols_lower(目标引用列)}`
+4. `on_delete` 不同 → `ON DELETE {act_w(源)} → {act_w(目标)}`
+5. `on_update` 不同 → `ON UPDATE {act_w(源)} → {act_w(目标)}`
+
+**列变更**（`alter_column`）：按 `flags` 的规范顺序
+（`type` → `nullability` → `default` → `auto_increment`）拼接**真正发生变化**
+的分句，用 `；` 连接：
+
+| flag | 分句 |
+|---|---|
+| `type` | `类型 {nrm(源)} → {nrm(目标)}` |
+| `nullability` | `可空性 {null_w(源)} → {null_w(目标)}` |
+| `default` | `默认值 {def_w(源)} → {def_w(目标)}` |
+| `auto_increment` | `自增 {yes_w(源)} → {yes_w(目标)}` |
+
+> `type` 分句里的两侧类型都是 `NormalizeType` 之后的值（`from`/`to` 字段同源），
+> 因此 MySQL 整数显示宽度不会出现在文案里。
+
+#### 为什么这值得进契约
+
+- **语义**：`reason` 是用户读到的变更说明，措辞不一致即体验不一致；
+- **机械性**：有了格式，文案就能从快照推导 ⇒ **diff 语料可独立扩充**，
+  不再需要抄一端实现；
+- **可验证**：`tools/oracle/diff_vectors_oracle.py` 现在连 `reason` 一起推导，
+  与语料**逐字**比较（此前该字段被显式排除）。
+
 ### 14.7 一致性锁定
 
-`reason` 文案、条目排序、归一结果由 `test/schema-diff-vectors/*.json` 一份语料同时喂两端锁定。
+`reason` 文案的**格式**由 §14.6.1 定义（可推导），`test/schema-diff-vectors/*.json` 只是它的回归锁；条目排序与归一结果同样由该语料同时喂两端锁定。
 **改规则必须同步改语料**：语料的 `expected` 由 Rust 实现生成后**逐条人工复核**再提交，
 Go 侧只读不断言写回；两份错误向量的 `error_code`/`error_message` 保持手写。
 

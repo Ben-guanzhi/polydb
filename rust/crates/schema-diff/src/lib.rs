@@ -1070,4 +1070,61 @@ mod tests {
             "not supported: Redis 无模式概念，不参与结构比对"
         );
     }
+
+    /// 钉住**语料未覆盖**的三种文案组合（spec/behavior.md §14.6.1，2026-11-10）。
+    ///
+    /// 语料只覆盖「索引两项同时变」「外键四项全变」「alter 单方面变」；
+    /// 下列组合契约有定义但没有任何用例钉住——不钉就等于允许两端在这里漂移。
+    #[test]
+    fn reason_format_contract_covers_unexercised_combinations() {
+        // ① 索引仅唯一性变化 ⇒ 只有「唯一性」分句，不得出现「索引定义变化：」。
+        let mut s = table("t", vec![col("a", "int", true)]);
+        s.indexes = vec![idx("ix", false, true, &["a"])];
+        let mut t = table("t", vec![col("a", "int", true)]);
+        t.indexes = vec![idx("ix", false, false, &["a"])];
+        let out = diff(
+            &snap(DatabaseKind::Postgres, vec![s]),
+            &snap(DatabaseKind::Postgres, vec![t]),
+            &Options::default(),
+        )
+        .unwrap();
+        assert_eq!(out.len(), 2, "应为 drop+add 一对：{out:?}");
+        assert_eq!(out[0].reason, "唯一性 是 → 否", "索引唯一性单变");
+        assert_eq!(out[1].reason, "唯一性 是 → 否", "成对两条文案相同");
+
+        // ② 外键仅**本侧列**变化 ⇒ 只有「列」分句。
+        // 表的列两侧**保持相同**，只有外键的本侧列不同 ⇒ 只应产出外键的那一对。
+        let mk = |fcols: &[&str]| {
+            let mut tb = table("orders", vec![col("x", "int", true)]);
+            let mut f = fk("fk", fcols, "users", &["id"]);
+            f.on_delete = Some(ForeignKeyAction::Cascade);
+            tb.foreign_keys = vec![f];
+            snap(DatabaseKind::MySql, vec![tb])
+        };
+        let out = diff(&mk(&["a"]), &mk(&["b"]), &Options::default()).unwrap();
+        assert_eq!(out.len(), 2, "应为 drop+add 一对：{out:?}");
+        assert_eq!(out[0].reason, "列 a → b", "外键本侧列变化");
+        assert_eq!(out[1].reason, "列 a → b", "成对两条文案相同");
+
+        // ③ 类型与默认值同变 ⇒ 分句按 flags 规范顺序（type 在 default 前）。
+        let s = snap(
+            DatabaseKind::Sqlite,
+            vec![table("t", vec![col("v", "integer", true)])],
+        );
+        let mut t = table("t", vec![col("v", "bigint", true)]);
+        t.columns[0].default_value = Some("2".into());
+        let mut s2 = s;
+        s2.tables[0].columns[0].default_value = Some("1".into());
+        let out = diff(
+            &s2,
+            &snap(DatabaseKind::Sqlite, vec![t]),
+            &Options::default(),
+        )
+        .unwrap();
+        assert_eq!(out.len(), 1, "应只有一条 alter_column：{out:?}");
+        assert_eq!(
+            out[0].reason, "类型 integer → bigint；默认值 1 → 2",
+            "类型与默认值同变的分句顺序"
+        );
+    }
 }

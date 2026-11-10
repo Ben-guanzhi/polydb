@@ -253,3 +253,82 @@ func TestDiffCreateTablesOrderedByForeignKeyDependency(t *testing.T) {
 		t.Fatalf("拓扑序错误：%#v", out)
 	}
 }
+
+// TestReasonFormatContract 钉住**语料未覆盖**的三种文案组合
+// （spec/behavior.md §14.6.1，2026-11-10）。
+//
+// 语料只覆盖了「索引两项同时变」「外键四项全变」「alter 单方面变」；
+// 下列组合契约有定义但没有任何用例钉住——不钉就等于允许两端在这里漂移。
+func TestReasonFormatContract(t *testing.T) {
+	t.Run("索引仅唯一性变化", func(t *testing.T) {
+		src := &Snapshot{Kind: protocol.DatabaseKindPostgres, Tables: []TableSnapshot{{
+			Name: "t",
+			Indexes: []protocol.IndexInfo{
+				{Name: "ix", Unique: true, Columns: []protocol.IndexColumn{{Name: "a", Position: 1}}},
+			},
+		}}}
+		tgt := &Snapshot{Kind: protocol.DatabaseKindPostgres, Tables: []TableSnapshot{{
+			Name: "t",
+			Indexes: []protocol.IndexInfo{
+				{Name: "ix", Unique: false, Columns: []protocol.IndexColumn{{Name: "a", Position: 1}}},
+			},
+		}}}
+		out, err := Diff(src, tgt, &Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(out) != 2 {
+			t.Fatalf("应为 drop+add 一对，得到 %d 条", len(out))
+		}
+		// 列签名没变 ⇒ **不得**出现「索引定义变化：」分句。
+		eq(t, out[0].Reason, "唯一性 是 → 否", "索引唯一性单变")
+		eq(t, out[1].Reason, "唯一性 是 → 否", "成对两条文案相同")
+	})
+
+	t.Run("外键仅本侧列变化", func(t *testing.T) {
+		mk := func(col string) *Snapshot {
+			return &Snapshot{Kind: protocol.DatabaseKindMySQL, Tables: []TableSnapshot{{
+				Name: "orders",
+				ForeignKeys: []protocol.ForeignKeyInfo{{
+					Name: "fk", Columns: []string{col},
+					ReferencedTable: "users", ReferencedColumns: []string{"id"},
+					OnDelete: "cascade",
+				}},
+			}}}
+		}
+		out, err := Diff(mk("a"), mk("b"), &Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(out) != 2 {
+			t.Fatalf("应为 drop+add 一对，得到 %d 条", len(out))
+		}
+		// 只有本侧列变了 ⇒ 只有「列」分句。
+		eq(t, out[0].Reason, "列 a → b", "外键本侧列变化")
+		eq(t, out[1].Reason, "列 a → b", "成对两条文案相同")
+	})
+
+	t.Run("alter 类型与默认值同变的分句顺序", func(t *testing.T) {
+		src := &Snapshot{Kind: protocol.DatabaseKindSQLite, Tables: []TableSnapshot{{
+			Name: "t",
+			Columns: []protocol.ColumnInfo{
+				{Name: "v", DataType: "integer", DefaultValue: sp("1")},
+			},
+		}}}
+		tgt := &Snapshot{Kind: protocol.DatabaseKindSQLite, Tables: []TableSnapshot{{
+			Name: "t",
+			Columns: []protocol.ColumnInfo{
+				{Name: "v", DataType: "bigint", DefaultValue: sp("2")},
+			},
+		}}}
+		out, err := Diff(src, tgt, &Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(out) != 1 || out[0].Op != OpAlterColumn {
+			t.Fatalf("应只有一条 alter_column，得到 %#v", out)
+		}
+		// flags 规范顺序：type → nullability → default → auto_increment。
+		eq(t, out[0].Reason, "类型 integer → bigint；默认值 1 → 2", "类型与默认值同变")
+	})
+}
