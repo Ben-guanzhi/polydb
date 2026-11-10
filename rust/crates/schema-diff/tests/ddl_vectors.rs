@@ -165,17 +165,10 @@ fn shared_ddl_vectors_cover_every_op_and_warning() {
         }
         pragmas[usize::from(got.pragmas_outside_tx)] += 1;
     }
-    for op in [
-        "create_table",
-        "drop_table",
-        "add_column",
-        "drop_column",
-        "alter_column",
-        "add_index",
-        "drop_index",
-        "add_foreign_key",
-        "drop_foreign_key",
-    ] {
+    // 清单来自契约生成表 `OP_ROWS`，**不硬编码**：契约新增 op 时这里自动
+    // 要求语料覆盖，避免新 op 悄悄没有用例（PD-31 的成因）。
+    for row in polydb_schema_diff::ops_gen::OP_ROWS {
+        let op = row.op.as_str();
         assert!(ops.contains(&op), "DDL 语料未覆盖动作：{op}");
     }
     for w in [

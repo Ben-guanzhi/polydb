@@ -137,7 +137,7 @@ def derive(v):
             if ckey not in tc:
                 continue
             a, b = sc[ckey], tc[ckey]
-            flags = R.alter_flags(a, b, ignore_defaults)
+            flags = R.alter_flags(a, b, ignore_defaults, tgt_snap.get("kind", ""))
             if not flags:
                 continue
             entries.append(

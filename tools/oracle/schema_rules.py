@@ -122,31 +122,38 @@ INTEGER_FAMILY = (
 )
 
 
-def norm_type(dt):
-    """类型名归一：大小写、空白、MySQL 的 zerofill 属噪声；
-    **整数族的显示宽度**也属噪声，但**字符/二进制类型的长度是真实语义**。
+def norm_type(dt, kind=""):
+    """类型名归一：大小写、空白与 MySQL 的 zerofill 属噪声；
+    **只有 MySQL 的整数族显示宽度**才是噪声，其余方言的括号是真实类型。
 
     规则来源：
       - `01_identical`：`integer` vs `INTEGER`、
         `character varying(100)` vs `CHARACTER   VARYING ( 100 )`；
-      - `04_mysql_type_width`：`bigint(20)` vs `BIGINT`、
+      - `04_mysql_type_width`（mysql）：`bigint(20)` vs `BIGINT`、
         `decimal(10, 2)` vs `DECIMAL(10,2)`、
         `INT(11) UNSIGNED ZEROFILL` vs `int unsigned`；
-      - `d06_alter_column_type_rebuild`：`varchar(20)` → `varchar(30)`
-        **是**变更（不能把长度当噪声丢掉）。
+      - `d06_alter_column_type_rebuild`（sqlite）：`varchar(20)` → `varchar(30)`
+        **是**变更。
 
-    ⇒ 括号里的长度/精度**只有整数族才丢**（MySQL 的显示宽度是历史遗留、
-    不影响取值）；`varchar(20)`/`decimal(10,2)` 的括号是真实类型的一部分，
-    必须保留参与比较。
+    ⇒ 括号里的长度/精度只有 **MySQL 的整数族**才丢（那是 8.0.17 之前的历史
+    遗留显示宽度，不影响取值）；`varchar(20)`/`decimal(10,2)` 的括号是真实
+    类型的一部分，任何方言都必须保留。
 
-    > 修正记录（PD-30，2026-11-10）：早先的实现在**所有**类型上都砍掉括号，
-    > 于是 `varchar(20)`→`varchar(30)` 被判"无变化"、漏掉 alter_column。
-    > diff 语料没有"改字符长度"的用例，所以 17/17 全绿没暴露；是 ddl 语料的
-    > `d06` 把它逼出来的。
+    **方言必须传进来**（`kind`）：MySQL 丢宽度、SQLite 不丢——
+    两端实现本来就是方言感知的（Go `TestNormalizeTypeMySQLWidthAndZerofill`
+    里就有 `NormalizeType(sqlite, "int(11)") == "int(11)"` 这条断言）。
+    早先本模块是方言无关的，会对 SQLite 的 `int(11)` 也丢宽度——**与两端
+    不一致的潜在偏差**（PD-32，2026-11-10）。现有语料恰好只在 MySQL 上出现
+    整数带括号（`04_mysql_type_width`），所以一直没暴露。
+
+    > PD-30 修正记录：更早的实现在**所有**类型上都砍括号，于是
+    > `varchar(20)`→`varchar(30)` 被判"无变化"、漏掉 alter_column；
+    > diff 语料没有"改字符长度"的用例，17/17 全绿把 bug 遮住，
+    > 是 ddl 的 `d06` 逼出来的。
 
     **不做别名等价猜测**（如 `integer` ↔ `int`）：`15_cross_kind_error` 的
     note 明写"不猜等价类型"——那种情况语料的处置是**报错**（跨种类），
-    而不是把两个类型判等。故此处只管"写法噪声"，不管"语义等价"。
+    而不是把两个类型判等。
     """
     if dt is None:
         return ""
@@ -157,10 +164,10 @@ def norm_type(dt):
     if i < 0:
         return s
     base = s[:i]
-    if base in INTEGER_FAMILY:
-        # 整数族的 (n) 是显示宽度 ⇒ 丢掉（可能不止一处，如 int(11)(...)?）。
+    if kind == "mysql" and base in INTEGER_FAMILY:
+        # 只有 MySQL 的整数 (n) 是显示宽度 ⇒ 丢掉。
         return re.sub(r"\([^)]*\)", "", s)
-    # 其它类型的括号是类型的一部分（长度/精度）⇒ 保留。
+    # 其它情况：括号是类型的一部分（长度/精度）⇒ 保留。
     return s
 
 
@@ -302,15 +309,17 @@ def is_destructive(op):
     return op in DESTRUCTIVE_OPS
 
 
-def alter_flags(sc, tc, ignore_defaults):
+def alter_flags(sc, tc, ignore_defaults, kind=""):
     """alter_column 的 flags（规范顺序见 FLAG_ORDER）。
 
     `ignore_defaults=true` 时只有默认值的变化不产条目
     （`07_ignore_defaults`），故此处直接跳过 default 标记；
     若最终 flags 为空，调用方不应产出条目。
+
+    `kind` 传给 `norm_type`：MySQL 的整数显示宽度是噪声，别的方言不是。
     """
     flags = []
-    if norm_type(sc.get("data_type")) != norm_type(tc.get("data_type")):
+    if norm_type(sc.get("data_type"), kind) != norm_type(tc.get("data_type"), kind):
         flags.append("type")
     if bool(sc.get("nullable")) != bool(tc.get("nullable")):
         flags.append("nullability")

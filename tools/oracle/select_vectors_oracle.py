@@ -101,7 +101,7 @@ def real_tables(snapshot):
     return out
 
 
-def norm_type(dt):
+def norm_type(dt, kind=""):
     """类型名归一（规则见 `schema_rules.norm_type`）。
 
     语料 01_identical 刻意用 `integer` vs `INTEGER`、
@@ -109,7 +109,7 @@ def norm_type(dt):
     表达"同一类型"——故类型比较必须归一。**实现在 `schema_rules`**：
     本文件不再自带一份，避免两份规则漂移。
     """
-    return R.norm_type(dt)
+    return R.norm_type(dt, kind)
 
 
 def columns_of(table):
@@ -164,7 +164,8 @@ def build_plan(source, target, options):
             if cn not in scol:
                 continue
             ac = scol[cn]
-            changed = norm_type(ac.get("data_type")) != norm_type(bc.get("data_type"))
+            kind = (source.get("kind") or "")
+            changed = norm_type(ac.get("data_type"), kind) != norm_type(bc.get("data_type"), kind)
             changed |= bool(ac.get("nullable")) != bool(bc.get("nullable"))
             changed |= bool(ac.get("is_primary_key")) != bool(bc.get("is_primary_key"))
             if not changed and not options.get("ignore_defaults"):

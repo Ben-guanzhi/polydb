@@ -229,10 +229,9 @@ func TestSharedDDLVectorsCoverEveryOpAndWarning(t *testing.T) {
 		}
 		pragmas[got.PragmasOutsideTx]++
 	}
-	for _, op := range []Op{
-		OpCreateTable, OpDropTable, OpAddColumn, OpDropColumn, OpAlterColumn,
-		OpAddIndex, OpDropIndex, OpAddForeignKey, OpDropForeignKey,
-	} {
+	// 清单来自契约生成表 `OpRows`，**不硬编码**（同上）。
+	for _, row := range OpRows {
+		op := row.Op
 		if !ops[string(op)] {
 			t.Fatalf("DDL 语料未覆盖动作：%s", op)
 		}

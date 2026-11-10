@@ -108,10 +108,10 @@ func TestSharedVectorsCoverEveryOp(t *testing.T) {
 			seen[string(e.Op)] = true
 		}
 	}
-	for _, op := range []Op{
-		OpCreateTable, OpDropTable, OpAddColumn, OpDropColumn, OpAlterColumn,
-		OpAddIndex, OpDropIndex, OpAddForeignKey, OpDropForeignKey,
-	} {
+	// 清单来自契约生成表 `OpRows`，**不硬编码**：契约新增 op 时这里自动
+	// 要求语料覆盖，避免新 op 悄悄没有用例（PD-31 的成因）。
+	for _, row := range OpRows {
+		op := row.Op
 		if !seen[string(op)] {
 			t.Fatalf("向量语料未覆盖 op：%s", op)
 		}
