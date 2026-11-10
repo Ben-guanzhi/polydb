@@ -39,13 +39,15 @@ func main() {
 	case "ts":
 		runTS(specDir, tsFile, rest...)
 	case "check":
-		runCheck(*specDir, *rustDir, *goDir)
+		runCheck(repo, *specDir, *rustDir, *goDir)
+	case "dispatch":
+		runDispatch(repo)
 	case "ops":
 		runOps(repo, *specDir, check)
 	case "docs":
 		runDocs(repo)
 	default:
-		fmt.Fprintln(os.Stderr, "usage: genprotocol ts [--check] | genprotocol check | genprotocol ops [--check] | genprotocol docs")
+		fmt.Fprintln(os.Stderr, "usage: genprotocol ts [--check] | genprotocol check | genprotocol dispatch | genprotocol ops [--check] | genprotocol docs")
 		os.Exit(2)
 	}
 }
@@ -103,7 +105,7 @@ func runTS(specDirPtr, tsFile *string, args ...string) {
 	fmt.Printf("generated %s\n", *tsFile)
 }
 
-func runCheck(specDir, rustDir, goDir string) {
+func runCheck(repo, specDir, rustDir, goDir string) {
 	spec := loadSpecModel(specDir)
 	rust, err := ParseRustDir(rustDir)
 	if err != nil {
@@ -116,6 +118,8 @@ func runCheck(specDir, rustDir, goDir string) {
 	var allErrs []string
 	allErrs = append(allErrs, CheckSide(spec, rust, "rust")...)
 	allErrs = append(allErrs, CheckSide(spec, gos, "go")...)
+	// PD-15：分派层门禁并入 check，使四门禁之一即可机械发现驱动注册漂移。
+	allErrs = append(allErrs, CheckDispatch(repo)...)
 	for _, w := range rust.Warns {
 		allErrs = append(allErrs, "[rust] warn: "+w)
 	}
@@ -123,7 +127,17 @@ func runCheck(specDir, rustDir, goDir string) {
 		fmt.Fprintf(os.Stderr, "protocol drift detected (%d):\n\n%s\n", len(allErrs), strings.Join(allErrs, "\n"))
 		os.Exit(1)
 	}
-	fmt.Printf("protocol check OK: %d spec types vs rust + go\n", len(spec.Order))
+	fmt.Printf("protocol check OK: %d spec types vs rust + go (+ dispatch: Go registry + Rust open_driver)\n", len(spec.Order))
+}
+
+// runDispatch 是 check 内 dispatch 子集的独立入口（`genprotocol dispatch`）。
+func runDispatch(repo string) {
+	errs := CheckDispatch(repo)
+	if len(errs) > 0 {
+		fmt.Fprintf(os.Stderr, "driver dispatch drift detected (%d):\n\n%s\n", len(errs), strings.Join(errs, "\n"))
+		os.Exit(1)
+	}
+	fmt.Println("driver dispatch check OK: spec kinds == Go protocol kinds == registered openers, no hand-written switch")
 }
 
 func fatal(format string, args ...any) {

@@ -64,6 +64,7 @@ pub mod codes {
     pub const CONSTRAINT_VIOLATION: &str = "POLYDB_ERR_CONSTRAINT_VIOLATION";
     pub const DEADLOCK: &str = "POLYDB_ERR_DEADLOCK";
     pub const TRANSACTION_FAILED: &str = "POLYDB_ERR_TRANSACTION_FAILED";
+    pub const TRANSACTION_NOT_FOUND: &str = "POLYDB_ERR_TRANSACTION_NOT_FOUND";
     pub const INVALID_PARAM: &str = "POLYDB_ERR_INVALID_PARAM";
     pub const NOT_SUPPORTED: &str = "POLYDB_ERR_NOT_SUPPORTED";
     pub const DRIVER_NOT_AVAILABLE: &str = "POLYDB_ERR_DRIVER_NOT_AVAILABLE";
@@ -75,4 +76,6 @@ pub mod codes {
     pub const CANCELLED: &str = "POLYDB_ERR_CANCELLED";
     pub const QUERY_NOT_FOUND: &str = "POLYDB_ERR_QUERY_NOT_FOUND";
     pub const BLOB_NOT_FOUND: &str = "POLYDB_ERR_BLOB_NOT_FOUND";
+    /// 请求体超过服务端上限（behavior.md §4；HTTP 413）。
+    pub const PAYLOAD_TOO_LARGE: &str = "POLYDB_ERR_PAYLOAD_TOO_LARGE";
 }

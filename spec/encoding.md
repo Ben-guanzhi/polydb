@@ -29,6 +29,27 @@
 - 可选字段缺失时**不编码**（不发送 null）
 - 枚举值编码为字符串（不用整数）
 
+### 64 位整数溢出形态（§4 数值编码的 MessagePack 对应条款）
+
+驱动可能返回超出有符号 64 位范围的整数（MySQL `BIGINT UNSIGNED`、Redis 计数）。
+各通道的承载形态：
+
+- **JSON 通道**：> 2^53 的整数以**精确十进制字符串**承载（§4 数值编码；同样
+  覆盖 > i64::MAX 的 uint64——字符串没有上界）。
+- **MessagePack 通道**：uint64 以**原生 msgpack uint64 帧（0xcf）**编码——
+  这是无损的精确类型，不降级为 float64（丢低位），也不转为字符串（丢类型）。
+  Go 端两条编码路径均如此（标量直通 `appendMsgpackNumber` 与树路径
+  `normalizeForMsgpack` 同判，`value_msgpack_test.go` 钉住 0xcf 帧与往返）。
+  **解码端责任**：uint64 > i64::MAX 在 Go 解码为精确十进制 JSON 数字原文
+  （`appendJSONNumberUint`）；Rust `Value::U64(u64)` 变体承载 > i64::MAX 的
+  msgpack uint64 帧（2026-11-09 修复 F7，此前仅 `Value::Integer(i64)` 无 u64
+  路径）、Web msgpack 解码开 `useBigInt64` 后归一化为精确字符串（`bigintSafe`）——超范围
+  值在这两端不落 float64 是实现的硬约束，rmp-serde 对 0xcf 的回落行为若变化
+  （Float 丢精度）属上游破坏，须在解码边界测试钉住。
+- **消费侧**：把数字语义还原出来是消费方的责任（按列类型或字面量形态判定），
+  已有先例：keyset 游标（`ParseUint` 通道）、`count_result_to_u64`（String
+  数字文本解析）、Rust `int_float_equal`（i128 精确比较）。
+
 ### 库选型
 
 | 语言 | 库 |

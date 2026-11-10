@@ -33,6 +33,11 @@ pub enum Value {
     Null,
     Bool(bool),
     Integer(i64),
+    /// Unsigned 64-bit integer. Values above i64::MAX (e.g. MySQL UNSIGNED
+    /// BIGINT, PostgreSQL NUMERIC exceeding i64 range) cannot be represented
+    /// as Integer(i64) — serde untagged tries Integer first, so values in the
+    /// i64 range land there and only overflow values reach U64.
+    U64(u64),
     Float(f64),
     String(String),
     Array(Vec<Value>),
@@ -42,6 +47,17 @@ pub enum Value {
 impl From<i64> for Value {
     fn from(v: i64) -> Self {
         Self::Integer(v)
+    }
+}
+impl From<u64> for Value {
+    fn from(v: u64) -> Self {
+        // Values that fit in i64 go to Integer for consistency with the
+        // serde untagged deserialization path (Integer is tried first).
+        if v <= i64::MAX as u64 {
+            Self::Integer(v as i64)
+        } else {
+            Self::U64(v)
+        }
     }
 }
 impl From<f64> for Value {
@@ -356,5 +372,53 @@ mod blob_tests {
             Some(&Value::Integer((MAX_INLINE_BLOB_BYTES + 1) as i64))
         );
         assert!(!inner.contains_key("base64"));
+    }
+
+    #[test]
+    fn u64_value_serde_roundtrip() {
+        // 值 > i64::MAX 必须走 U64 变体——serde untagged 先试 Integer(i64)，
+        // 失败后落 U64(u64)。JSON 和 msgpack 两条路径都必须保真。
+        let big: u64 = (i64::MAX as u64) + 1;
+        let v = Value::U64(big);
+
+        // JSON roundtrip
+        let json = serde_json::to_string(&v).unwrap();
+        let back: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v, back, "JSON roundtrip 丢失 u64 精度");
+        assert!(
+            matches!(back, Value::U64(_)),
+            "值 > i64::MAX 必须落在 U64 变体"
+        );
+
+        // msgpack roundtrip
+        let msgpack = rmp_serde::to_vec(&v).unwrap();
+        let back2: Value = rmp_serde::from_slice(&msgpack).unwrap();
+        assert_eq!(v, back2, "msgpack roundtrip 丢失 u64 精度");
+        assert!(
+            matches!(back2, Value::U64(_)),
+            "msgpack 值 > i64::MAX 必须落在 U64 变体"
+        );
+    }
+
+    #[test]
+    fn u64_value_within_i64_range_stays_integer() {
+        // From<u64> 对 ≤ i64::MAX 的值走 Integer——与 serde untagged
+        // 的反序列化路径保持一致（Integer 是 untagged 的第一个匹配）。
+        let v: Value = 42u64.into();
+        assert!(
+            matches!(v, Value::Integer(_)),
+            "u64 值 ≤ i64::MAX 必须落在 Integer 变体"
+        );
+        assert_eq!(v, Value::Integer(42));
+    }
+
+    #[test]
+    fn u64_max_value_serde_roundtrip() {
+        // u64::MAX 是边界——i64::MAX + 1 和 u64::MAX 都必须保真。
+        let v = Value::U64(u64::MAX);
+        let json = serde_json::to_string(&v).unwrap();
+        let back: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v, back);
+        assert!(matches!(back, Value::U64(_)));
     }
 }

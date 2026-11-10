@@ -52,7 +52,44 @@ func CheckSide(spec *Spec, side *Side, label string) []string {
 			}
 		}
 	}
+	// DocOnly 枚举（ErrorCodes）：不作为独立 wire 类型生成，但取值集合必须与
+	// 双端常量逐一相等——这是错误码表（behavior.md §4）的唯一机器防线。
+	for _, name := range spec.Order {
+		def := spec.get(name)
+		if def == nil || !def.DocOnly || def.Kind != "enum" {
+			continue
+		}
+		st := side.get(name)
+		if st == nil {
+			errs = append(errs, fmt.Sprintf("[%s] missing %s constants", label, name))
+			continue
+		}
+		if !equalSets(def.Enum, st.Enum) {
+			errs = append(errs, fmt.Sprintf("[%s] %s: error code drift\n    spec: %v\n    %s:  %v",
+				label, name, setDiff(def.Enum, st.Enum), label, setDiff(st.Enum, def.Enum)))
+		}
+	}
 	return errs
+}
+
+// setDiff 返回 in a but not in b（排序），用于漂移消息的可读性。
+func setDiff(a, b []string) []string {
+	var out []string
+	for _, v := range a {
+		if !containsStr(b, v) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func containsStr(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 func labelLang(label string) string {

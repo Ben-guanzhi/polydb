@@ -17,6 +17,8 @@ var (
 	rustFieldRe   = regexp.MustCompile(`^\s*(?:pub\s+)?(\w+):\s*(.+?),?$`)
 	rustVariantRe = regexp.MustCompile(`^(\w+)\s*(\{|$)`)
 	serdeAttrRe   = regexp.MustCompile(`#\[\s*serde\s*\((.*)\)\s*\]`)
+	// pub const NAME: &str = "POLYDB_ERR_XXX"; —— 错误码常量（error.rs 的 codes 模块）。
+	rustConstRe = regexp.MustCompile(`^pub const (\w+):\s*&?str\s*=\s*"([^"]+)"\s*;`)
 )
 
 // rustSnake camelCase → snake_case（模拟 serde rename_all）。
@@ -167,6 +169,19 @@ func parseRustFile(side *Side, src string) error {
 			side.Types[m[1]] = st
 			pa.reset()
 			i = next - 1
+			continue
+		}
+		if m := rustConstRe.FindStringSubmatch(line); m != nil {
+			// 与 Go 侧 parse_go.go 同规则：值匹配 POLYDB_ERR_ 的字符串常量
+			// 归入 ErrorCodes 集合，供 CheckSide 做 spec ↔ 双端比对。
+			if strings.HasPrefix(m[2], "POLYDB_ERR_") {
+				et := side.Types["ErrorCodes"]
+				if et == nil {
+					et = &SideType{Name: "ErrorCodes", Kind: "enum", EnumBase: "string"}
+					side.Types["ErrorCodes"] = et
+				}
+				et.Enum = append(et.Enum, m[2])
+			}
 			continue
 		}
 		if strings.HasPrefix(line, "pub use") || strings.HasPrefix(line, "pub mod") {

@@ -31,6 +31,9 @@ type TypeDef struct {
 	Alias    string    // alias 的规范目标（"str"/"any"/"union:..."/"ref:..."）
 	Fields   []Field   // object
 	Variants []Variant // tagged
+	// DocOnly 表示该类型不生成 TS/不作为独立 wire 结构，但其取值集合
+	// 仍参与 spec ↔ 双端比对（ErrorCodes：错误码全集）。
+	DocOnly bool
 }
 
 // Spec 是全部契约类型的集合。

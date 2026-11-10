@@ -101,19 +101,23 @@ func TestPlaceholderTokensAreNotRequired(t *testing.T) {
 	}
 }
 
-func TestProseOutsideBackticksIsIgnored(t *testing.T) {
+func TestProseOutsideBackticksIsChecked(t *testing.T) {
 	repo := writeRepo(t, map[string]string{
 		"go/pkg/protocol/error.go": "package protocol\nconst Timeout = \"POLYDB_ERR_TIMEOUT\"\n",
-		"docs/errors.md":           "POLYDB_ERR_UNDOCUMENTED_SHOULD_BE_IGNORED appears only in prose.",
+		"docs/errors.md":           "POLYDB_ERR_UNDOCUMENTED_SHOULD_BE_CHECKED appears only in prose.",
 	})
 
 	drift, refs, _, _, _ := checkDocTokens(repo)
 
-	if len(drift) != 0 {
-		t.Fatalf("drift = %v, want none: unquoted prose is not a code reference", drift)
+	if len(drift) != 1 {
+		t.Fatalf("drift = %v, want exactly one finding: prose tokens are code references too", drift)
 	}
-	if refs != 0 {
-		t.Errorf("refs = %d, want 0", refs)
+	got := drift[0]
+	if !strings.Contains(got, "POLYDB_ERR_UNDOCUMENTED_SHOULD_BE_CHECKED") {
+		t.Errorf("finding %q must name the dead identifier", got)
+	}
+	if refs != 1 {
+		t.Errorf("refs = %d, want 1", refs)
 	}
 }
 
@@ -140,7 +144,7 @@ func TestNonAuthoritativeDocsAreIgnored(t *testing.T) {
 	}
 }
 
-func TestSpansAreExtractedFromSurroundingProse(t *testing.T) {
+func TestTokensInProseAndBackticksAreBothChecked(t *testing.T) {
 	const quoted = "`POLYDB_ERR_TIMEOUT`"
 
 	repo := writeRepo(t, map[string]string{
@@ -153,8 +157,8 @@ func TestSpansAreExtractedFromSurroundingProse(t *testing.T) {
 	if len(drift) != 0 {
 		t.Fatalf("drift = %v, want none", drift)
 	}
-	if refs != 1 {
-		t.Errorf("refs = %d, want 1: only the backticked mention counts", refs)
+	if refs != 2 {
+		t.Errorf("refs = %d, want 2: both prose and backticked mentions count", refs)
 	}
 }
 

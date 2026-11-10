@@ -91,7 +91,11 @@ func buildTypeDef(spec *Spec, file, name, ctxKey string, def *omap) (*TypeDef, e
 	if e := asArr(def.get("enum")); len(e) > 0 {
 		td := &TypeDef{Name: name, Kind: "enum", Enum: strSlice(e)}
 		if name == "ErrorCodes" {
-			td.Kind = "skip" // spec 自述：documentation only, not a wire type
+			// ErrorCodes 是 wire 上真正会出现的错误码全集：spec 的枚举值
+			// 必须与 Go/Rust 两侧的常量逐一比对，缺失或漂移即门禁红灯。
+			// （曾经标 skip 视作"documentation only"，结果 Go 悄悄多出
+			// PAYLOAD_TOO_LARGE、Rust 缺 TRANSACTION_NOT_FOUND 都无人发现。）
+			td.DocOnly = true
 		}
 		return td, nil
 	}
@@ -103,7 +107,7 @@ func buildTypeDef(spec *Spec, file, name, ctxKey string, def *omap) (*TypeDef, e
 	case "string":
 		td := &TypeDef{Name: name, Kind: "alias", Alias: "str"}
 		if name == "ErrorCodes" {
-			td.Kind = "skip" // spec 自述：documentation only, not a wire type
+			td.DocOnly = true // 与枚举形态同义：不进 TS 生成，但参与比对
 		}
 		return td, nil
 	case "object":

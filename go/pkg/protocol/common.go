@@ -50,6 +50,18 @@ func NewStringValue(v string) Value {
 	return Value{raw: appendJSONString(nil, v)}
 }
 
+// NewRawNumberValue 从精确十进制文本构造数值 Value（int64/uint64/decimal 的
+// 唯一保真形态——Value 的 raw 就是 JSON 数字原文）。文本必须是合法的 JSON
+// 数字（语法校验经 encoding/json 往返）；非法文本返回零值 Value（null 语义），
+// 与 NewFloatValue 对 Inf/NaN 的降级一致。
+func NewRawNumberValue(lit string) Value {
+	var probe any
+	if err := json.Unmarshal([]byte(lit), &probe); err != nil {
+		return Value{}
+	}
+	return Value{raw: json.RawMessage(lit)}
+}
+
 // NewObjectValue 构造 JSON 对象 Value（如 spec/encoding.md §5 的 $blob 编码）。
 func NewObjectValue(fields map[string]any) Value {
 	b, _ := json.Marshal(fields)
@@ -70,6 +82,12 @@ func (v *Value) UnmarshalJSON(data []byte) error {
 
 func (v Value) IsNull() bool {
 	return len(v.raw) == 0 || string(v.raw) == "null"
+}
+
+// Raw 返回该值的 JSON 原文（msgpack 由它再编码）。长度是响应负载估计的
+// 下界——server 的响应字节上限用它做截断判据。
+func (v Value) Raw() json.RawMessage {
+	return v.raw
 }
 
 type SshTunnelConfig struct {

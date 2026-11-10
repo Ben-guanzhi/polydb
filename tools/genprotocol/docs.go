@@ -11,17 +11,10 @@ import (
 )
 
 // POLYDB_* is the project's own naming convention for error codes and
-// environment variables, so a doc token matching it is by construction meant
-// to point at real code. Anything else in backticks — "SELECT 1", 127.0.0.1,
-// a table name, a shell command — is prose, and guessing at it produces noise
-// instead of signal.
+// environment variables, so any doc token matching it is by construction meant
+// to point at real code. Non-POLYDB tokens — "SELECT 1", 127.0.0.1, a table
+// name, a shell command — are ignored, whether in backticks or prose.
 var docTokenRe = regexp.MustCompile(`POLYDB_[A-Z0-9_]{2,}`)
-
-// Restrict the search to backticked spans. Prose can mention an identifier
-// without making a code reference, and chasing those down yields false
-// positives rather than drift. The trade is one-way: a doc that forgets the
-// backticks is not checked, which is a false negative instead of a false alarm.
-var backtickSpanRe = regexp.MustCompile("`([^`\n]+)`")
 
 // Extensions eligible to *define* an identifier. Markdown is the subject of
 // this check and never part of the corpus — otherwise two docs naming the same
@@ -62,7 +55,7 @@ func runDocs(repo string) {
 		fmt.Fprintln(os.Stderr, "\nthe docs name something the code no longer has — rename the docs or restore the identifier")
 		os.Exit(1)
 	}
-	fmt.Printf("doc check OK: %d backticked POLYDB_* references across %d docs, %d distinct identifiers in %d source files\n",
+	fmt.Printf("doc check OK: %d POLYDB_* references across %d docs, %d distinct identifiers in %d source files\n",
 		refs, docs, known, corpus)
 }
 
@@ -80,16 +73,19 @@ func checkDocTokens(repo string) (drift []string, refs, known, corpus, docs int)
 		}
 		docs++
 		for i, line := range strings.Split(string(data), "\n") {
-			for _, span := range backtickSpanRe.FindAllStringSubmatch(line, -1) {
-				for _, tok := range docTokenRe.FindAllString(span[1], -1) {
-					refs++
-					if isTemplate(tok) || knownSet[tok] {
-						continue
-					}
-					drift = append(drift, fmt.Sprintf(
-						"%s:%d: error: `%s` is documented but defined nowhere in the source tree",
-						rel, i+1, tok))
+			// Scan the entire line, not just backticked spans. A POLYDB_* token
+			// in plain prose is still a code reference — the prefix is specific
+			// enough that prose false positives are negligible, while the false
+			// negative (a dead identifier mentioned without backticks) was a
+			// real gap. Templates are still filtered by isTemplate.
+			for _, tok := range docTokenRe.FindAllString(line, -1) {
+				refs++
+				if isTemplate(tok) || knownSet[tok] {
+					continue
 				}
+				drift = append(drift, fmt.Sprintf(
+					"%s:%d: error: `%s` is documented but defined nowhere in the source tree",
+					rel, i+1, tok))
 			}
 		}
 	})

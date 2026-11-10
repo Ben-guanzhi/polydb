@@ -16,7 +16,7 @@ func GenTS(spec *Spec) string {
 
 	for _, name := range spec.Order {
 		def := spec.get(name)
-		if def == nil || def.Kind == "skip" || def.Name == "ClientMessage" || def.Name == "ServerMessage" {
+		if def == nil || def.Kind == "skip" || def.DocOnly || def.Name == "ClientMessage" || def.Name == "ServerMessage" {
 			continue
 		}
 		switch def.Kind {
