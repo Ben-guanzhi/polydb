@@ -14,8 +14,8 @@ use polydb_core::{
     TableRowsResult, TableType, TransactionInfo, TransactionStatus, UpdateConnectionRequest, Value,
 };
 use polydb_db_core::{
-    set_blob_sink, clear_blob_sink, BlobSink, Connection, DatabaseDriver, RedisValueLimit, RedisValueWindow,
-    SqlDriver, TxManager, TxMode, Sweepable,
+    clear_blob_sink, set_blob_sink, BlobSink, Connection, DatabaseDriver, RedisValueLimit,
+    RedisValueWindow, SqlDriver, Sweepable, TxManager, TxMode,
 };
 use polydb_protocol::common::SshTunnelConfig;
 use polydb_protocol::error::{codes, PolyDBError};
@@ -537,7 +537,11 @@ impl AppCore {
                 if let Some(r) = ssh.password_ref.clone().filter(|r| !r.is_empty()) {
                     refs.push(r);
                 }
-                if let Some(r) = ssh.private_key_passphrase_ref.clone().filter(|r| !r.is_empty()) {
+                if let Some(r) = ssh
+                    .private_key_passphrase_ref
+                    .clone()
+                    .filter(|r| !r.is_empty())
+                {
                     refs.push(r);
                 }
             }
@@ -1539,7 +1543,10 @@ mod tests {
             ssh.password_ref.clone().unwrap_or_default(),
             ssh.private_key_passphrase_ref.clone().unwrap_or_default(),
         ];
-        assert!(refs.iter().all(|r| !r.is_empty()), "refs must be non-empty: {refs:?}");
+        assert!(
+            refs.iter().all(|r| !r.is_empty()),
+            "refs must be non-empty: {refs:?}"
+        );
         for r in &refs {
             assert!(observer.get(r).is_ok(), "secret {r} readable before delete");
         }
