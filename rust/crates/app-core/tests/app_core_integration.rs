@@ -5,13 +5,32 @@ use polydb_core::{
 };
 use polydb_db_core::{blob_value, sink_ref_count};
 use polydb_storage::{FileKeyring, Storage};
+use std::sync::Mutex;
 
-fn setup() -> AppCore {
+/// 串行化本二进制的全部测试（PD-37）。
+///
+/// `AppCore::with_keyring` 会递增**进程级全局**的 blob sink 引用计数、
+/// `Drop` 递减。`drop_clears_blob_sink` 要断言「建一个 AppCore 再 drop，
+/// 计数净 -1」——只要有任何其它测试的 AppCore 在测量窗口内存亡，计数就被
+/// 并发 +1/-1 打断（实测 before=2, after=0）。全局计数器无法与并行测试
+/// 共存，故所有触碰 sink 的测试共用这把锁：`setup()` 返回 guard，测试
+/// 持有到结束即串行执行。锁中毒（某测试 panic）时取回内部值继续，
+/// 不让一个失败级联成整二进制全红。
+static SINK_LOCK: Mutex<()> = Mutex::new(());
+
+fn setup() -> (AppCore, std::sync::MutexGuard<'static, ()>) {
+    // 先拿锁再建 AppCore：保证 sink 计数的观察窗口内没有其它测试的增删。
+    let guard = SINK_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let dir = std::env::temp_dir().join(format!("polydb-test-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let storage = Storage::open(dir.join("test.db").to_str().unwrap()).unwrap();
     let kr = FileKeyring::open(&dir.to_string_lossy(), "").unwrap();
-    AppCore::with_keyring(storage, std::sync::Arc::new(kr))
+    (
+        AppCore::with_keyring(storage, std::sync::Arc::new(kr)),
+        guard,
+    )
 }
 
 fn sqlite_req(name: &str) -> CreateConnectionRequest {
@@ -35,7 +54,7 @@ fn sqlite_req(name: &str) -> CreateConnectionRequest {
 
 #[test]
 fn connection_crud() {
-    let app = setup();
+    let (app, _sink_guard) = setup();
 
     let info = app.create_connection(&sqlite_req("local")).unwrap();
     assert_eq!(info.name, "local");
@@ -69,7 +88,7 @@ fn connection_crud() {
 
 #[test]
 fn connect_and_execute_flow() {
-    let app = setup();
+    let (app, _sink_guard) = setup();
     let info = app.create_connection(&sqlite_req("mem")).unwrap();
     let id = info.id;
 
@@ -114,7 +133,7 @@ fn connect_and_execute_flow() {
 
 #[test]
 fn execute_lazily_connects() {
-    let app = setup();
+    let (app, _sink_guard) = setup();
     let info = app.create_connection(&sqlite_req("lazy")).unwrap();
 
     // 未显式 connect 时，查询/元数据调用应自动连接（与 Go 侧 ensure 一致）。
@@ -129,7 +148,7 @@ fn execute_lazily_connects() {
 
 #[test]
 fn execute_on_missing_connection_errors() {
-    let app = setup();
+    let (app, _sink_guard) = setup();
     let missing = uuid::Uuid::new_v4();
 
     let result: CoreResult<_> =
@@ -142,7 +161,7 @@ fn failed_in_tx_execute_keeps_the_transaction_rollbackable() {
     // 回归：事务条目从注册表借出后，任何退出路径都必须把它放回。spec §10 要求
     // 事务内 SQL 失败时事务保持 active，客户端仍可 rollback；回插原先是一条手写
     // 语句（取消时会被跳过，事务永久失踪），现在落在借出守卫的 Drop 里。
-    let app = setup();
+    let (app, _sink_guard) = setup();
     let info = app.create_connection(&sqlite_req("tx")).unwrap();
     let id = info.id;
     app.connect(id).unwrap();
@@ -201,7 +220,8 @@ fn failed_in_tx_execute_keeps_the_transaction_rollbackable() {
 fn concurrent_connect_is_thread_safe() {
     // 并发 connect 同一 id：所有调用都必须成功返回，注册表里恰好一条连接。
     // 与 Go 侧 TestConcurrentEnsureCoalescesToSingleConnection 对齐。
-    let app = std::sync::Arc::new(setup());
+    let (app, _sink_guard) = setup();
+    let app = std::sync::Arc::new(app);
     let info = app.create_connection(&sqlite_req("concurrent")).unwrap();
     let id = info.id;
 
@@ -238,7 +258,8 @@ fn concurrent_connect_is_thread_safe() {
 fn concurrent_lazy_connect_via_execute() {
     // 并发 execute 同一未连接 id：懒连接路径必须工作，所有调用成功。
     // 与 Go 侧 ensure 的并发归并语义对齐（Rust 侧无 singleflight，但必须线程安全）。
-    let app = std::sync::Arc::new(setup());
+    let (app, _sink_guard) = setup();
+    let app = std::sync::Arc::new(app);
     let info = app
         .create_connection(&sqlite_req("lazy-concurrent"))
         .unwrap();
@@ -289,9 +310,11 @@ fn concurrent_lazy_connect_via_execute() {
 // 连接**、断开后首次 execute 仍可懒连接。
 #[test]
 fn ping_respects_user_disconnect() {
+    // setup() 在 block_on **之前**：guard 留在同步测试帧，不跨 await
+    // （否则 clippy 的 await_holding_lock 报警），串行化语义不变。
+    let (app, _sink_guard) = setup();
     let rt = polydb_rt::runtime();
     rt.block_on(async {
-        let app = setup();
         let info = app.create_connection(&sqlite_req("hb")).unwrap();
         let id = info.id;
 
@@ -323,9 +346,10 @@ fn ping_respects_user_disconnect() {
 // 上一次的断开意图挡住（只有后台心跳受约束）。
 #[test]
 fn execute_still_lazily_connects_after_disconnect() {
+    // 同上：setup() 提到 block_on 之前，避免 guard 跨 await。
+    let (app, _sink_guard) = setup();
     let rt = polydb_rt::runtime();
     rt.block_on(async {
-        let app = setup();
         let info = app.create_connection(&sqlite_req("hb-lazy")).unwrap();
         let id = info.id;
 
@@ -349,7 +373,7 @@ fn execute_still_lazily_connects_after_disconnect() {
 // 拦截——只读红线（behavior.md §12.3）的静默绕过。
 #[test]
 fn update_connection_read_only_hot_update_applies_to_connected() {
-    let app = setup();
+    let (app, _sink_guard) = setup();
     let info = app.create_connection(&sqlite_req("ro-hot")).unwrap();
     let id = info.id;
     app.connect(id).unwrap();
@@ -411,7 +435,7 @@ fn update_connection_read_only_hot_update_applies_to_connected() {
 // 行为不保证且错误被静默吞掉。断开后旧 tx id 不应再存在于注册表。
 #[test]
 fn disconnect_rolls_back_and_clears_active_transactions() {
-    let app = setup();
+    let (app, _sink_guard) = setup();
     let info = app.create_connection(&sqlite_req("disc-tx")).unwrap();
     let id = info.id;
     app.connect(id).unwrap();
@@ -460,7 +484,7 @@ fn disconnect_rolls_back_and_clears_active_transactions() {
 // 连接被覆盖后仍可 commit/rollback，违反"卸载前先失活依赖"的 guard。
 #[test]
 fn reconnect_rolls_back_and_clears_old_transactions() {
-    let app = setup();
+    let (app, _sink_guard) = setup();
     let info = app.create_connection(&sqlite_req("reconnect")).unwrap();
     let id = info.id;
     app.connect(id).unwrap();
@@ -516,7 +540,7 @@ fn reconnect_rolls_back_and_clears_old_transactions() {
 // 后连接被移除且不再可查——保证调用路径确实走到了 close 分支。
 #[test]
 fn disconnect_closes_driver_and_removes_connection() {
-    let app = setup();
+    let (app, _sink_guard) = setup();
     let info = app.create_connection(&sqlite_req("disc-close")).unwrap();
     let id = info.id;
     app.connect(id).unwrap();
@@ -545,7 +569,7 @@ fn disconnect_closes_driver_and_removes_connection() {
 // 驱动句柄（MySQL 池连接、PG 池连接、SQLite 写锁泄漏）。
 #[test]
 fn sweep_collects_idle_transactions() {
-    let app = setup();
+    let (app, _sink_guard) = setup();
     let info = app.create_connection(&sqlite_req("sweep-idle")).unwrap();
     let id = info.id;
     app.connect(id).unwrap();
@@ -584,7 +608,7 @@ fn sweep_collects_idle_transactions() {
 // P2-B 回归：idle TTL 内的事务不应被回收。
 #[test]
 fn sweep_preserves_active_transactions() {
-    let app = setup();
+    let (app, _sink_guard) = setup();
     let info = app.create_connection(&sqlite_req("sweep-active")).unwrap();
     let id = info.id;
     app.connect(id).unwrap();
@@ -621,7 +645,7 @@ fn sweep_preserves_active_transactions() {
 // 活跃事务会被误判为 idle 而回收。
 #[test]
 fn sweep_refreshes_last_active_on_execute() {
-    let app = setup();
+    let (app, _sink_guard) = setup();
     let info = app.create_connection(&sqlite_req("sweep-refresh")).unwrap();
     let id = info.id;
     app.connect(id).unwrap();
@@ -670,7 +694,7 @@ fn sweep_refreshes_last_active_on_execute() {
 // P2-B 回归：容量上限——超过 maxEntries 时按最久未活跃回收多余事务。
 #[test]
 fn sweep_enforces_max_entries() {
-    let app = setup();
+    let (app, _sink_guard) = setup();
     let mut txids: Vec<(uuid::Uuid, String)> = Vec::new();
     polydb_rt::block_on(async {
         // 创建 3 个连接，每个 begin 一个事务（SQLite 单连接不支持并发 tx）。
@@ -720,7 +744,7 @@ fn sweep_enforces_max_entries() {
 #[test]
 fn drop_clears_blob_sink() {
     // 创建 AppCore（with_keyring 内部 set_blob_sink → 计数 +1）。
-    let app = setup();
+    let (app, _sink_guard) = setup();
     let count_after_create = sink_ref_count();
     assert!(
         count_after_create >= 1,
@@ -766,7 +790,7 @@ fn drop_clears_blob_sink() {
 /// 检查推迟到 COMMIT 时触发。
 #[test]
 fn commit_failure_finalizes_transaction() {
-    let app = setup();
+    let (app, _sink_guard) = setup();
     let info = app.create_connection(&sqlite_req("tx")).unwrap();
     let id = info.id;
     app.connect(id).unwrap();
