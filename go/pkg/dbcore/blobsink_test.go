@@ -44,7 +44,7 @@ func blobFields(t *testing.T, v protocol.Value) map[string]any {
 func TestBlobValueInlineUnaffectedBySink(t *testing.T) {
 	sink := &fakeSink{}
 	SetBlobSink(sink)
-	defer SetBlobSink(nil)
+	defer ClearBlobSink()
 
 	inner := blobFields(t, BlobValue([]byte{1, 2}))
 	if inner["len"] != float64(2) {
@@ -64,7 +64,7 @@ func TestBlobValueInlineUnaffectedBySink(t *testing.T) {
 func TestBlobValueRefWhenSinkEnabled(t *testing.T) {
 	sink := &fakeSink{}
 	SetBlobSink(sink)
-	defer SetBlobSink(nil)
+	defer ClearBlobSink()
 
 	big := make([]byte, MaxInlineBlobBytes+1)
 	inner := blobFields(t, BlobValue(big))
@@ -85,7 +85,7 @@ func TestBlobValueRefWhenSinkEnabled(t *testing.T) {
 
 func TestBlobValueSinkErrorFallsBackWithTruncated(t *testing.T) {
 	SetBlobSink(&fakeSink{err: errors.New("disk full")})
-	defer SetBlobSink(nil)
+	defer ClearBlobSink()
 
 	inner := blobFields(t, BlobValue(make([]byte, MaxInlineBlobBytes+1)))
 	if len(inner) != 2 {
@@ -103,7 +103,7 @@ func TestBlobValueSinkErrorFallsBackWithTruncated(t *testing.T) {
 }
 
 func TestBlobValueNoSinkKeepsPlaceholderWithTruncated(t *testing.T) {
-	SetBlobSink(nil)
+	ClearBlobSink()
 	inner := blobFields(t, BlobValue(make([]byte, MaxInlineBlobBytes+1)))
 	if len(inner) != 2 {
 		t.Fatalf("no-sink fields = %v, want len + truncated", inner)

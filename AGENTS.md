@@ -307,6 +307,15 @@ Go 侧经 `database/sql` 拿不到字符集形态，仍报族名（VARCHAR2/CHAR
 使用（如 Oracle 的 `oracleValue` 靠它解析 TIMESTAMP 精度/时区），
 **必须把原始拼写与对外名字拆成两个变量**，否则改类型名会静默破坏取值。
 
+**blob sink 是进程级全局，多 AppCore 共存是支持的但有已知限制**（PD-38，
+2026-11-11）：Rust 侧 `db-core/blobsink.rs` 用引用计数（`set_blob_sink`
+递增、`clear_blob_sink` 递减、归零才清除），销毁一个 AppCore 不会误清
+另一个的 sink。Go 侧此前无引用计数——`SetBlobSink(nil)` 直接清空，A 关闭
+会清掉 B 的 sink（PD-03 注释说"严格镜像"但实际不一致，§7 红线）。已修复：
+Go 侧加 `count` + `ClearBlobSink()`，与 Rust 严格镜像。深层限制：sink
+本身被覆盖（"重复调用以最后一次为准"），A 和 B 有不同 BlobStore 时 A 的
+sink 在 B 创建时丢失——这是驱动注入点改造的范畴，非当前波次。
+
 CI 双跑：
 
 Rust：cargo test + cargo clippy

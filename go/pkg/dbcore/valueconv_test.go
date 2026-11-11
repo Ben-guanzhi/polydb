@@ -58,7 +58,7 @@ func valuesEqual(a, b protocol.Value) bool {
 // 超过 spec/encoding.md §5 的 1MB 阈值：不内联 base64，走旁路引用或降级。
 // 无 sink 时降级为 len + truncated 标记。
 func TestBlobValueOverThresholdOmitsBase64(t *testing.T) {
-	SetBlobSink(nil)
+	ClearBlobSink()
 	big := make([]byte, MaxInlineBlobBytes+1)
 	want := protocol.NewObjectValue(map[string]any{
 		"$blob": map[string]any{"len": len(big), "truncated": true},

@@ -759,9 +759,11 @@ func (a *AppCore) Close() {
 		}
 		// PD-03（2026-11-09）：销毁 AppCore 时摘掉进程级旁路写入端。此前只在
 		// New 里 set 从不 clear，销毁后全局 sink 仍指向已释放的 BlobStore（悬垂），
-		// 多实例互相覆盖，且新实例的 blob 可能写进旧实例的目录。与 Rust 侧
-		// Drop::drop 的 clear_blob_sink 严格镜像（双实现一致）。
-		dbcore.SetBlobSink(nil)
+		// 多实例互相覆盖，且新实例的 blob 可能写进旧实例的目录。
+		// PD-38（2026-11-11）：改用 ClearBlobSink（递减引用计数，归零才清除），
+		// 与 Rust 侧 Drop::drop 的 clear_blob_sink 严格镜像——此前 SetBlobSink(nil)
+		// 直接清空，会误清其他存活实例的 sink。
+		dbcore.ClearBlobSink()
 	})
 }
 
