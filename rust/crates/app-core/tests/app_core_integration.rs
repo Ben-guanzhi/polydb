@@ -1,7 +1,7 @@
 use polydb_app_core::AppCore;
 use polydb_core::{
-    MAX_INLINE_BLOB_BYTES, BeginTransactionRequest, CoreResult, CreateConnectionRequest,
-    DatabaseKind, IsolationLevel, TransactionStatus, Value,
+    BeginTransactionRequest, CoreResult, CreateConnectionRequest, DatabaseKind, IsolationLevel,
+    TransactionStatus, Value, MAX_INLINE_BLOB_BYTES,
 };
 use polydb_db_core::{blob_value, sink_ref_count};
 use polydb_storage::{FileKeyring, Storage};
@@ -356,13 +356,9 @@ fn update_connection_read_only_hot_update_applies_to_connected() {
 
     // 初始非只读，写操作应成功。
     polydb_rt::block_on(async {
-        app.execute(
-            id,
-            "CREATE TABLE t (id INTEGER PRIMARY KEY)",
-            &[],
-        )
-        .await
-        .unwrap();
+        app.execute(id, "CREATE TABLE t (id INTEGER PRIMARY KEY)", &[])
+            .await
+            .unwrap();
     });
 
     // 把已连接连接改成只读：内存快照必须同步，否则写操作不被拦截。
@@ -376,18 +372,15 @@ fn update_connection_read_only_hot_update_applies_to_connected() {
     .unwrap();
 
     // 写操作应被拒绝。
-    let result = polydb_rt::block_on(async {
-        app.execute(id, "INSERT INTO t (id) VALUES (1)", &[]).await
-    });
+    let result =
+        polydb_rt::block_on(async { app.execute(id, "INSERT INTO t (id) VALUES (1)", &[]).await });
     assert!(
         result.is_err(),
         "write on read-only connected connection should fail"
     );
 
     // 读操作应正常。
-    let result = polydb_rt::block_on(async {
-        app.execute(id, "SELECT * FROM t", &[]).await
-    });
+    let result = polydb_rt::block_on(async { app.execute(id, "SELECT * FROM t", &[]).await });
     assert!(
         result.is_ok(),
         "read on read-only connected connection should work"
@@ -403,9 +396,8 @@ fn update_connection_read_only_hot_update_applies_to_connected() {
     )
     .unwrap();
 
-    let result = polydb_rt::block_on(async {
-        app.execute(id, "INSERT INTO t (id) VALUES (2)", &[]).await
-    });
+    let result =
+        polydb_rt::block_on(async { app.execute(id, "INSERT INTO t (id) VALUES (2)", &[]).await });
     assert!(
         result.is_ok(),
         "write after read-only removed should succeed"
@@ -535,7 +527,10 @@ fn disconnect_closes_driver_and_removes_connection() {
     // 断开：连接被移除，状态变为未连接。
     app.disconnect(id);
     let status = app.connection_status(id).unwrap();
-    assert!(!status.connected, "connection must be removed after disconnect");
+    assert!(
+        !status.connected,
+        "connection must be removed after disconnect"
+    );
 
     // 用户断开标记已设置。
     let err = polydb_rt::block_on(async { app.ping(id).await }).unwrap_err();
@@ -680,7 +675,9 @@ fn sweep_enforces_max_entries() {
     polydb_rt::block_on(async {
         // 创建 3 个连接，每个 begin 一个事务（SQLite 单连接不支持并发 tx）。
         for i in 0..3 {
-            let info = app.create_connection(&sqlite_req(&format!("sweep-cap-{i}"))).unwrap();
+            let info = app
+                .create_connection(&sqlite_req(&format!("sweep-cap-{i}")))
+                .unwrap();
             app.connect(info.id).unwrap();
             let txn = app
                 .begin_transaction(&BeginTransactionRequest {
