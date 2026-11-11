@@ -1,0 +1,151 @@
+{
+  "name": "d19_fk_local_columns_change",
+  "note": "外键仅**本侧列**变化：§14.6.1 规定 reason 只含「列 a → b」分句（引用表/引用列/ON DELETE/ON UPDATE 都没变就整条省略）。此前语料只有『四项全变』的形态（10_fk_change），单分句形态没有任何用例钉住——不钉就等于允许两端在这里漂移。",
+  "options": {
+    "ignore_defaults": false,
+    "select_destructive": false
+  },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "users",
+        "type": "table",
+        "columns": [
+          {
+            "name": "id",
+            "data_type": "INTEGER",
+            "nullable": false,
+            "ordinal_position": 1
+          }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      },
+      {
+        "name": "orders",
+        "type": "table",
+        "columns": [
+          {
+            "name": "id",
+            "data_type": "INTEGER",
+            "nullable": false,
+            "ordinal_position": 1
+          },
+          {
+            "name": "a",
+            "data_type": "INTEGER",
+            "nullable": true,
+            "ordinal_position": 2
+          },
+          {
+            "name": "b",
+            "data_type": "INTEGER",
+            "nullable": true,
+            "ordinal_position": 3
+          }
+        ],
+        "indexes": [],
+        "foreign_keys": [
+          {
+            "name": "fk_x",
+            "columns": [
+              "a"
+            ],
+            "referenced_schema": "main",
+            "referenced_table": "users",
+            "referenced_columns": [
+              "id"
+            ],
+            "on_delete": "cascade"
+          }
+        ]
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "users",
+        "type": "table",
+        "columns": [
+          {
+            "name": "id",
+            "data_type": "INTEGER",
+            "nullable": false,
+            "ordinal_position": 1
+          }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      },
+      {
+        "name": "orders",
+        "type": "table",
+        "columns": [
+          {
+            "name": "id",
+            "data_type": "INTEGER",
+            "nullable": false,
+            "ordinal_position": 1
+          },
+          {
+            "name": "a",
+            "data_type": "INTEGER",
+            "nullable": true,
+            "ordinal_position": 2
+          },
+          {
+            "name": "b",
+            "data_type": "INTEGER",
+            "nullable": true,
+            "ordinal_position": 3
+          }
+        ],
+        "indexes": [],
+        "foreign_keys": [
+          {
+            "name": "fk_x",
+            "columns": [
+              "b"
+            ],
+            "referenced_schema": "main",
+            "referenced_table": "users",
+            "referenced_columns": [
+              "id"
+            ],
+            "on_delete": "cascade"
+          }
+        ]
+      }
+    ]
+  },
+  "selected": null,
+  "expected": [
+    {
+      "id": "orders/fk_x/drop_foreign_key",
+      "op": "drop_foreign_key",
+      "phase": 10,
+      "table": "orders",
+      "object": "fk_x",
+      "destructive": true,
+      "selected": false,
+      "reason": "列 a → b"
+    },
+    {
+      "id": "orders/fk_x/add_foreign_key",
+      "op": "add_foreign_key",
+      "phase": 90,
+      "table": "orders",
+      "object": "fk_x",
+      "destructive": false,
+      "selected": true,
+      "reason": "列 a → b"
+    }
+  ],
+  "error_code": "",
+  "error_message": ""
+}

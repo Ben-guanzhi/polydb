@@ -1,0 +1,80 @@
+{
+  "name": "d18_char_length_change",
+  "note": "改**字符类型的长度**是真实变更（PD-30 的 diff 面）：oracle 的类型归一曾把所有括号当噪声，varchar(20)→varchar(30) 被判无变化、漏掉 alter_column，17/17 全绿把 bug 遮住——直到 ddl 语料的 d06 才逼出来。本条把该规则组合直接锁进 diff 语料：flags 只含 type，reason 的类型分句按 §14.6.1 给出归一后的两侧拼写。",
+  "options": {
+    "ignore_defaults": false,
+    "select_destructive": false
+  },
+  "source": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          {
+            "name": "id",
+            "data_type": "INTEGER",
+            "nullable": false,
+            "ordinal_position": 1
+          },
+          {
+            "name": "name",
+            "data_type": "varchar(20)",
+            "nullable": true,
+            "ordinal_position": 2
+          }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "target": {
+    "kind": "sqlite",
+    "schema": "main",
+    "tables": [
+      {
+        "name": "t",
+        "type": "table",
+        "columns": [
+          {
+            "name": "id",
+            "data_type": "INTEGER",
+            "nullable": false,
+            "ordinal_position": 1
+          },
+          {
+            "name": "name",
+            "data_type": "varchar(30)",
+            "nullable": true,
+            "ordinal_position": 2
+          }
+        ],
+        "indexes": [],
+        "foreign_keys": []
+      }
+    ]
+  },
+  "selected": null,
+  "expected": [
+    {
+      "id": "t/name/alter_column",
+      "op": "alter_column",
+      "phase": 70,
+      "table": "t",
+      "object": "name",
+      "from": "varchar(20)",
+      "to": "varchar(30)",
+      "flags": [
+        "type"
+      ],
+      "destructive": false,
+      "selected": true,
+      "reason": "类型 varchar(20) → varchar(30)"
+    }
+  ],
+  "error_code": "",
+  "error_message": ""
+}

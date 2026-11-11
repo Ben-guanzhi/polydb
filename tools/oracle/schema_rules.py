@@ -256,8 +256,19 @@ def index_sig(idx):
 
 
 def fk_sig(fk):
-    """外键的可比签名（`10_fk_change`）：引用表/列 + ON DELETE/ON UPDATE。"""
+    """外键的可比签名（`10_fk_change` + §14.6.1 的「列」分句）：
+
+    **本侧列** + 引用 schema/表 + 引用列 + ON DELETE/ON UPDATE。
+
+    > PD-36（2026-11-11）：早先的实现漏了**本侧列**——Go 的
+    > `diffForeignKeys`（schemadiff.go:442）有
+    > `joinLower(s.Columns) != joinLower(t.Columns) ⇒ 「列 a → b」分句`
+    > 的分支，oracle 没跟上。diff 语料里 FK 的本侧列从未变过
+    > （10 号改的是引用侧四项），17/17 全绿把缺口遮住；写 d19 语料时
+    > 才暴露（又一个"语料覆盖不足 ⇒ oracle 规则 bug 隐身"）。
+    """
     return (
+        tuple(c.lower() for c in fk.get("columns", []) or []),
         (fk.get("referenced_schema") or "").lower(),
         (fk.get("referenced_table") or "").lower(),
         tuple(c.lower() for c in fk.get("referenced_columns", []) or []),
