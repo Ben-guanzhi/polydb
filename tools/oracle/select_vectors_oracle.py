@@ -326,6 +326,22 @@ def derive(v):
     return ("ok", [i for i in plan_ids if i in picked])
 
 
+def check_loaded(v):
+    """对一个**已加载**的语料 dict 做校验；返回 (ok, 失败说明)。
+
+    单独拆出来与 diff/ddl oracle 同型：判别力自检（selftest.py）在**内存里**
+    篡改语料再校验，不改磁盘文件——改磁盘会与并行的 oracle 读进程竞态
+    （§146 §2 的偶发红就是它）。
+    """
+    kind, got = derive(v)
+    expected = v.get("expected")
+    want_kind = "err" if expected is None else "ok"
+    ok = (kind == want_kind) and (want_kind == "err" or got == expected)
+    if ok:
+        return True, []
+    return False, [f"oracle 推导 {kind} {got!r}，语料 expected {want_kind} {expected!r}"]
+
+
 def load_vectors():
     d = vectors_dir()
     if not os.path.isdir(d):
