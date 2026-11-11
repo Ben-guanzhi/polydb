@@ -25,8 +25,12 @@ package contract
 //      类型名（Go: pkg/dboracle/typename.go；Rust: db-oracle 的
 //      oracle_type_name），实测逐字一致
 //      （VARCHAR2/CHAR/NUMBER/DATE/TIMESTAMP/BINARY_DOUBLE/BINARY_FLOAT/RAW）。
-//      字符族按**族名**归并（VARCHAR2/CHAR）——Go 侧经 database/sql 拿不到
-//      字符集形态，这是两端可达成一致的最大分辨率，不是哪一侧的缺陷。
+//      **§151（2026-11-11）起字符族分辨率不对称**：快照路径两端都已查
+//      ALL_TAB_COLUMNS 拿到精确名；查询结果路径（ResultColumn.type）Rust 侧
+//      输出精确名（NVARCHAR2/NCHAR/NCLOB），Go 侧经 database/sql 拿不到
+//      字符集形态仍报族名（VARCHAR2/CHAR/CLOB）。这是 database/sql 接口限制，
+//      不是 polydb 缺陷，是用户在 §149 §7 明确接受的取舍。契约测试用 VARCHAR2
+//      表（非 NVARCHAR2）故不受影响。
 //      未识别类型两端都回落 "OTHER"，构造性保证奇类型也一致。
 //      故**三个 net 引擎（MySQL/MSSQL/Oracle）的列类型现在都纳入断言**，
 //      没有引擎再需要 onlyColumnNames。

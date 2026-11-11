@@ -51,9 +51,16 @@ use polydb_db_core::{has_returning_clause, DatabaseDriver, SqlDriver, TxMode};
 fn oracle_type_name(t: &oracle::sql_type::OracleType) -> &'static str {
     use oracle::sql_type::OracleType as T;
     match t {
-        // 字符族（族名，不含长度/字符集；见上「分辨率上限」）。
-        T::Varchar2(_) | T::NVarchar2(_) => "VARCHAR2",
-        T::Char(_) | T::NChar(_) => "CHAR",
+        // 字符族——**精确名**（§151，2026-11-11）。
+        // 此前归并到族名（VARCHAR2/CHAR）是为了与 Go 侧一致，但 Go 侧经
+        // database/sql 拿不到字符集形态是 go-ora/database/sql 的接口限制，
+        // 不是 polydb 的缺陷。Rust 侧 oracle crate 能区分四个变体，故输出
+        // 精确名。两端不对称：Go 侧对 NVARCHAR2/NCHAR 仍报族名。
+        // 这是用户在 §149 §7 明确接受的取舍（"多一次往返换精确度"）。
+        T::Varchar2(_) => "VARCHAR2",
+        T::NVarchar2(_) => "NVARCHAR2",
+        T::Char(_) => "CHAR",
+        T::NChar(_) => "NCHAR",
 
         // 数值。Int64/UInt64 在 Oracle 里由 NUMBER 承载。
         T::Number(_, _) | T::Int64 | T::UInt64 => "NUMBER",
@@ -67,11 +74,12 @@ fn oracle_type_name(t: &oracle::sql_type::OracleType) -> &'static str {
         T::IntervalYM(_) => "INTERVAL YEAR TO MONTH",
         T::IntervalDS(_, _) => "INTERVAL DAY TO SECOND",
 
-        // 二进制与大对象。NCLOB 归 CLOB（Go 侧无独立变体）。
+        // 二进制与大对象。NCLOB 报精确名（Go 侧无独立变体，报 "CLOB"）。
         T::Raw(_) => "RAW",
         T::Long => "LONG",
         T::LongRaw => "LONG RAW",
-        T::CLOB | T::NCLOB => "CLOB",
+        T::CLOB => "CLOB",
+        T::NCLOB => "NCLOB",
         T::BLOB => "BLOB",
         T::BFILE => "BFILE",
 
@@ -854,19 +862,23 @@ mod tests {
     use super::*;
     use oracle::sql_type::OracleType as T;
 
-    /// 列类型名映射逐类钉住（PD-28，2026-11-10）。
+    /// 列类型名映射逐类钉住（PD-28，2026-11-10；§151 精确名，2026-11-11）。
     ///
     /// 规范形态是 **Oracle SQL 类型名、全大写、不含长度/精度**——与其它
     /// 引擎同口径（PG `INT4`、MySQL `VARCHAR`、MSSQL `NVARCHAR`），且符合
     /// spec 对 `ResultColumn.type` 的 "Database-specific type name" 定义。
+    ///
+    /// §151 起字符族输出**精确名**（NVARCHAR2/NCHAR），不再是族名归并。
+    /// 这是用户在 §149 §7 明确接受的取舍：Rust 侧 oracle crate 能区分
+    /// 四个变体，Go 侧经 database/sql 拿不到字符集形态故仍报族名——
+    /// 两端不对称是已知的，契约测试用 VARCHAR2 表（非 NVARCHAR2）故不受影响。
     #[test]
     fn oracle_type_names_are_sql_type_names() {
-        // 字符族：四个变体归成两个族名（Go 侧拿不到字符集形态，
-        // 见函数文档的「分辨率上限」）。
+        // 字符族：精确名（§151）。Rust 能区分四个变体。
         assert_eq!(oracle_type_name(&T::Varchar2(50)), "VARCHAR2");
-        assert_eq!(oracle_type_name(&T::NVarchar2(50)), "VARCHAR2");
+        assert_eq!(oracle_type_name(&T::NVarchar2(50)), "NVARCHAR2");
         assert_eq!(oracle_type_name(&T::Char(10)), "CHAR");
-        assert_eq!(oracle_type_name(&T::NChar(10)), "CHAR");
+        assert_eq!(oracle_type_name(&T::NChar(10)), "NCHAR");
 
         // 数值。
         assert_eq!(oracle_type_name(&T::Number(10, 2)), "NUMBER");
@@ -894,12 +906,12 @@ mod tests {
             "INTERVAL DAY TO SECOND"
         );
 
-        // 二进制与大对象。NCLOB 归 CLOB（Go 侧无独立变体）。
+        // 二进制与大对象。NCLOB 报精确名（§151；Go 侧无独立变体仍报 CLOB）。
         assert_eq!(oracle_type_name(&T::Raw(16)), "RAW");
         assert_eq!(oracle_type_name(&T::Long), "LONG");
         assert_eq!(oracle_type_name(&T::LongRaw), "LONG RAW");
         assert_eq!(oracle_type_name(&T::CLOB), "CLOB");
-        assert_eq!(oracle_type_name(&T::NCLOB), "CLOB");
+        assert_eq!(oracle_type_name(&T::NCLOB), "NCLOB");
         assert_eq!(oracle_type_name(&T::BLOB), "BLOB");
         assert_eq!(oracle_type_name(&T::BFILE), "BFILE");
 

@@ -35,11 +35,16 @@ package dboracle
 //	CHAR 族（码 96/97）覆盖 CHAR + NCHAR   ⇒ 归为 "CHAR"
 //	VARCHAR 族（码 1）覆盖 VARCHAR2 + NVARCHAR2 ⇒ 归为 "VARCHAR2"
 //
-// Rust 侧 oracle crate 能区分 Varchar2/NVarchar2/Char/NChar 四个变体
-// （`sql_type/oracle_type.rs:205`），但为了两端一致**同样归到族名**。
-// 这是两端可达成一致的最大分辨率，不是哪一侧的缺陷。
+// §151（2026-11-11）起：Rust 侧 oracle crate 能区分四个变体，已改为输出
+// **精确名**（NVARCHAR2/NCHAR/NCLOB）。Go 侧仍报族名——这是
+// `database/sql` 接口的限制，不是 polydb 的缺陷。**两端不对称**是用户
+// 在 §149 §7 明确接受的取舍（"多一次往返换精确度"：快照路径两端都已
+// 查 ALL_TAB_COLUMNS 拿到精确名，查询结果路径只有 Rust 能区分）。
 //
-// 同理 NCLOB（Rust 有独立变体、Go 只有 OCIClobLocator）归为 "CLOB"。
+// 契约测试用 VARCHAR2 表（非 NVARCHAR2），故不受此不对称影响。
+//
+// 同理 NCLOB（Rust 有独立变体、Go 只有 OCIClobLocator）——Rust 报 "NCLOB"，
+// Go 报 "CLOB"。
 //
 // 未识别的类型两端都回落到 "OTHER"——**构造性保证**任何奇类型也两端一致，
 // 而不是各自输出原生拼写后再也照不上面。

@@ -297,12 +297,15 @@ spec/ 是唯一真相源，改 spec → 重新生成两端代码。
 的 `Debug` 给的是 `Number(10, 0)`，两者都不是类型名。映射表见
 `go/pkg/dboracle/typename.go` 与 `rust/crates/db-oracle` 的
 `oracle_type_name`；未识别类型两端都回落 `OTHER`，以保证奇类型也一致
-（PD-28，2026-11-10）。**注意 Oracle 的字符族分辨率上限**：Go 侧经
-`database/sql` 拿不到字符集形态，故 VARCHAR2/NVARCHAR2 归 `VARCHAR2`、
-CHAR/NCHAR 归 `CHAR`——这是两端可一致的最大分辨率，别去追求"精确名"。
-另外：`ResultColumn.DataType` 若同时被取值解码逻辑使用（如 Oracle 的
-`oracleValue` 靠它解析 TIMESTAMP 精度/时区），**必须把原始拼写与对外名字
-拆成两个变量**，否则改类型名会静默破坏取值。
+（PD-28，2026-11-10）。**Oracle 的字符族分辨率（§151，2026-11-11）**：
+快照路径两端都已查 `ALL_TAB_COLUMNS`，拿到精确名。查询结果路径
+（`ResultColumn.type`）Rust 侧输出精确名（NVARCHAR2/NCHAR/NCLOB），
+Go 侧经 `database/sql` 拿不到字符集形态，仍报族名（VARCHAR2/CHAR/CLOB）
+——**两端不对称**是 `database/sql` 接口限制，不是 polydb 缺陷。
+这是用户在 §149 §7 明确接受的取舍。契约测试用 VARCHAR2 表（非 NVARCHAR2）
+故不受此不对称影响。另外：`ResultColumn.DataType` 若同时被取值解码逻辑
+使用（如 Oracle 的 `oracleValue` 靠它解析 TIMESTAMP 精度/时区），
+**必须把原始拼写与对外名字拆成两个变量**，否则改类型名会静默破坏取值。
 
 CI 双跑：
 
