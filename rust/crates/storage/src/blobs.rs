@@ -44,8 +44,7 @@ impl BlobStore {
         // 崩溃/断电会留下截断文件——size() 报截断长度，read_range 在 EOF
         // 处 read_exact 失败，引用 $polydb_blob:<uuid> 永久不可用且无自愈。
         let tmp = self.dir.join(format!("{id}.tmp"));
-        fs::write(&tmp, data)
-            .map_err(|e| CoreError::Storage(format!("write blob tmp: {e}")))?;
+        fs::write(&tmp, data).map_err(|e| CoreError::Storage(format!("write blob tmp: {e}")))?;
         fs::rename(&tmp, self.dir.join(&id))
             .map_err(|e| CoreError::Storage(format!("rename blob: {e}")))?;
         self.sweep();
@@ -244,7 +243,8 @@ mod tests {
         assert_eq!(store.get(id).unwrap(), b"hello world");
 
         // 无 .tmp 残留
-        let leftover = fs::read_dir(store.dir()).unwrap()
+        let leftover = fs::read_dir(store.dir())
+            .unwrap()
             .filter_map(|e| e.ok())
             .any(|e| e.file_name().to_string_lossy().ends_with(".tmp"));
         assert!(!leftover, "put_blob 成功后不应留下 .tmp 文件");

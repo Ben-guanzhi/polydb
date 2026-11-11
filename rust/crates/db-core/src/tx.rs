@@ -146,7 +146,10 @@ impl<T: Sweepable> TxManager<T> {
 
     /// 启动后台 sweeper 线程。线程持有 `Arc<Self>` 的克隆（不持有 `Arc<AppCore>`），
     /// 看到 `stop` 后退出。间隔 = idleTTL / 6，与 Go TxManager sweeper 同节奏。
-    pub fn spawn(self: &Arc<Self>) where T: Send + 'static {
+    pub fn spawn(self: &Arc<Self>)
+    where
+        T: Send + 'static,
+    {
         let manager = Arc::clone(self);
         let spawn_res = std::thread::Builder::new()
             .name("polydb-tx-sweeper".into())
