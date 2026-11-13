@@ -34,3 +34,10 @@ pub const DRIVER_MAX_ROWS: usize = 10_000;
 pub fn row_cap() -> usize {
     DRIVER_MAX_ROWS
 }
+
+/// catalog 的 `COALESCE(comment, '')` 统一成 None（C1）：线协议上「没有注释」
+/// 与「注释是空串」对 UI 是一回事，而 `Some("")` 会让前端画出空 tooltip。
+/// 四引擎（PG/MySQL/MSSQL/Oracle）共用这一处归一。
+pub fn non_empty(v: Option<String>) -> Option<String> {
+    v.filter(|s| !s.is_empty())
+}

@@ -26,6 +26,12 @@ use polydb_storage::{keyring_ref, BlobStore, FileKeyring, Keyring, Storage};
 type Snapshot = schema_diff::Snapshot;
 type TableSnapshot = schema_diff::TableSnapshot;
 
+/// 每条连接同时打开的事务上限（PR-01）。事务把池连接钉到提交/回滚为止，
+/// 而 MySQL/PG 的池只有 8 槽（见 db-mysql/db-postgres 的 open）：4 个事务
+/// 恰好占一半，另一半留给查询与元数据刷新。超限时回语义化错误，而不是让
+/// 第 5 个请求在池上等 5s 后报 "pool timed out"。
+const MAX_CONCURRENT_TX_PER_CONNECTION: usize = 4;
+
 /// Per-engine metadata: default port, schema, host requirement, DSN style.
 /// Adding a new engine means adding one entry here.
 struct DriverSpec {
@@ -967,6 +973,25 @@ impl AppCore {
                 foreign_keys,
             });
         }
+        // The snapshot is assembled from several statements with no enclosing
+        // transaction. If a DDL lands mid-collect, the pieces can describe
+        // states that never existed together (A-table columns against a
+        // B-time table list) and the diff then emits a plan pointing at
+        // objects that were never real. Re-list the tables and refuse the
+        // snapshot when the set moved; the caller retries against the settled
+        // schema instead of persisting a phantom.
+        let mut before: Vec<&str> = tables.iter().map(|t| t.name.as_str()).collect();
+        // Bind the fresh list before borrowing its names: collecting &str out of
+        // a temporary Vec would dangle at the end of the statement.
+        let tables_now = sql.list_tables(&schema).await?;
+        let mut after: Vec<&str> = tables_now.iter().map(|t| t.name.as_str()).collect();
+        before.sort_unstable();
+        after.sort_unstable();
+        if before != after {
+            return Err(CoreError::SnapshotMoved(
+                "the table list changed while the snapshot was being collected; retry".into(),
+            ));
+        }
         Ok(Snapshot::new(kind, schema, tables))
     }
 
@@ -1144,7 +1169,24 @@ impl AppCore {
             last_active: now,
         };
         let info = entry.info();
-        self.txs.insert(info.id.to_string(), entry);
+        // PR-01：事务把连接钉在池里直到提交/回滚，所以这里必须设上限——否则
+        // 事务吃光池后，连元数据刷新都只能在 acquire_timeout 后报 "pool timed
+        // out"，错误完全指不到真正原因。上限与池容量（8）配套：事务最多占一半。
+        if let Err(mut rejected) = self.txs.insert_limited(
+            info.id.to_string(),
+            entry,
+            MAX_CONCURRENT_TX_PER_CONNECTION,
+            |t| t.connection_id == req.connection_id,
+        ) {
+            // 已被拒绝：它刚打开的句柄必须回滚，否则那条连接就漏在池外。
+            rejected.rollback();
+            return Err(CoreError::Protocol(Box::new(PolyDBError::new(
+                codes::TRANSACTION_FAILED,
+                format!(
+                    "该连接已有 {MAX_CONCURRENT_TX_PER_CONNECTION} 个打开的事务（达到上限）；请先提交或回滚一个再开新事务"
+                ),
+            ))));
+        }
         Ok(info)
     }
 

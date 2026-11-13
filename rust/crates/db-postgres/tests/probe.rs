@@ -202,7 +202,13 @@ async fn p7_auto_increment_readback() {
         auto("id"),
         "IDENTITY 列 id 回读 is_auto_increment=false ⇒ pg 驱动读侧漏了 attidentity，见 A.26 P7"
     );
-    // 观测（不赌）：serial 走 nextval 默认值而非 attidentity，sqlx 这头认不认它。
+    // C2 的活体钉子：serial 列靠默认值 `nextval(...)`（不是 attidentity）自增，
+    // 与内核 `postgres.go:546-549` 同口径后必须回读为 true。此前 Rust 侧只看
+    // attidentity/attgenerated，这一列恒为 false（P7 当时只 println 观测）。
+    assert!(
+        auto("legacy"),
+        "serial 列（nextval 默认值）回读 is_auto_increment=false ⇒ 与内核口径漂移（C2）"
+    );
     println!(
         "OBS[p7] identity_auto={} serial_auto={}",
         auto("id"),
@@ -486,4 +492,103 @@ async fn p12_batch_metadata_equivalence() {
         );
     }
     println!("OBS[p12] 外键等价：t1/t2/t3 批量 == 逐表");
+}
+
+/// P13（C4）：`create_table_sql` 的形状必须与内核 `CreateTableSQL` 一致——
+/// 复合主键走表级 ALTER（旧实现给每一列各加一个 PRIMARY KEY = 非法 SQL）、
+/// serial 列不发 IDENTITY、列默认值必须渲染（旧实现整段丢弃，serial 的序列就丢了）。
+#[tokio::test]
+async fn p13_create_table_ddl_shape() {
+    let Some((c, schema)) = probe_conn("p13").await else {
+        return;
+    };
+    must_exec(
+        &c,
+        &[&format!(
+            "CREATE TABLE {schema}.p13 (a bigint, b bigint, legacy serial, note text DEFAULT 'x', PRIMARY KEY (a, b))"
+        )],
+    )
+    .await;
+
+    let ddl = c.create_table_sql(&schema, "p13").await.unwrap();
+    println!("OBS[p13] ddl=\n{ddl}");
+
+    assert!(
+        !ddl.contains("bigint PRIMARY KEY"),
+        "主键不得内联进列定义（复合主键会变成两个 PRIMARY KEY = 非法 SQL）：{ddl}"
+    );
+    assert_eq!(
+        ddl.matches("PRIMARY KEY").count(),
+        1,
+        "整段 DDL 只能有一个 PRIMARY KEY（表级）：{ddl}"
+    );
+    assert!(
+        ddl.contains("ADD CONSTRAINT \"p13_pkey\" PRIMARY KEY (\"a\", \"b\")"),
+        "表级主键约束缺列序或约束名：{ddl}"
+    );
+    assert!(
+        ddl.contains("DEFAULT nextval("),
+        "serial 列的默认值必须渲染（否则重建表丢序列）：{ddl}"
+    );
+    assert!(
+        !ddl.contains("IDENTITY"),
+        "serial 列不得渲染成 GENERATED ALWAYS AS IDENTITY（PG 直接拒绝）：{ddl}"
+    );
+}
+
+/// P14（C1）：表/列注释必须上报。Go 内核用 `obj_description`/`col_description`
+/// 取注释，Rust 此前全仓 0 处注释 SQL、`comment` 恒 None——同一个表，Go 后端
+/// 有注释、Rust 后端空。批量列也必须同源（p12 的等价契约在带注释表上的延伸）。
+#[tokio::test]
+async fn p14_comments_reported() {
+    let Some((c, schema)) = probe_conn("p14").await else {
+        return;
+    };
+    must_exec(
+        &c,
+        &[
+            &format!("CREATE TABLE {schema}.p14 (id bigint PRIMARY KEY, note text)"),
+            &format!("COMMENT ON TABLE {schema}.p14 IS 'table comment'"),
+            &format!("COMMENT ON COLUMN {schema}.p14.note IS 'column comment'"),
+        ],
+    )
+    .await;
+
+    let tables = c.list_tables(&schema).await.unwrap();
+    let t = tables.iter().find(|t| t.name == "p14").expect("p14 table");
+    assert_eq!(
+        t.comment.as_deref(),
+        Some("table comment"),
+        "表注释未上报（C1）"
+    );
+
+    let cols = c.list_columns(&schema, "p14").await.unwrap();
+    let note = cols
+        .iter()
+        .find(|x| x.name == "note")
+        .expect("note column");
+    assert_eq!(
+        note.comment.as_deref(),
+        Some("column comment"),
+        "列注释未上报（C1）"
+    );
+    // 无注释的列必须是 None（不是 Some("")）：空串会让前端画空 tooltip。
+    let id = cols.iter().find(|x| x.name == "id").expect("id column");
+    assert_eq!(id.comment, None, "空注释应归一为 None");
+
+    // 批量列与逐表同源（p12 的等价契约在带注释的表上再验一次）。
+    let Some(batch) = c.batch_columns(&schema).await.unwrap() else {
+        panic!("PG 应实现 batch_columns");
+    };
+    let batch_note = batch
+        .iter()
+        .filter(|(t, _)| t == "p14")
+        .map(|(_, col)| col.clone())
+        .find(|x| x.name == "note")
+        .expect("batch note column");
+    assert_eq!(
+        batch_note.comment.as_deref(),
+        Some("column comment"),
+        "批量列注释与逐表不同源（C1）"
+    );
 }

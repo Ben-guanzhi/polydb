@@ -685,3 +685,51 @@ async fn mysql_conn_kind() {
     let conn = MySqlConn::open(dsn).expect("lazy open should succeed");
     assert_eq!(conn.kind(), DatabaseKind::MySql);
 }
+
+/// M14（C1）：表/列注释必须上报——内核 `CatalogTables/CatalogColumns` 取
+/// `TABLE_COMMENT`/`COLUMN_COMMENT`，Rust 全仓此前 0 处注释 SQL、`comment`
+/// 恒 None（同一张表，Go 后端有注释、Rust 后端空）。
+#[tokio::test]
+async fn m14_comments_reported() {
+    let Some(c) = probe_conn("m14").await else {
+        return;
+    };
+    let schema = "polydb_probe_m14";
+    let setup = vec![
+        format!("DROP DATABASE IF EXISTS {schema}"),
+        format!("CREATE DATABASE {schema}"),
+        format!(
+            "CREATE TABLE {schema}.m14 (id int primary key, note text comment 'column comment') comment='table comment'"
+        ),
+    ];
+    let refs: Vec<&str> = setup.iter().map(|s| s.as_str()).collect();
+    must_exec(&c, &refs).await;
+
+    let tables = c.list_tables(schema).await.unwrap();
+    let t = tables
+        .iter()
+        .find(|t| t.name == "m14")
+        .expect("m14 table");
+    assert_eq!(
+        t.comment.as_deref(),
+        Some("table comment"),
+        "表注释未上报（C1）"
+    );
+
+    let cols = c.list_columns(schema, "m14").await.unwrap();
+    let note = cols
+        .iter()
+        .find(|x| x.name == "note")
+        .expect("note column");
+    assert_eq!(
+        note.comment.as_deref(),
+        Some("column comment"),
+        "列注释未上报（C1）"
+    );
+    let id = cols.iter().find(|x| x.name == "id").expect("id column");
+    assert_eq!(id.comment, None, "空注释应归一为 None");
+
+    let _ = c
+        .execute(&format!("DROP DATABASE IF EXISTS {schema}"), &[])
+        .await;
+}

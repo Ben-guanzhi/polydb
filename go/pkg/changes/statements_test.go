@@ -72,3 +72,36 @@ func TestRowCountValidation(t *testing.T) {
 		t.Error("keyed-update mismatch logic wrong")
 	}
 }
+
+// NeedsRowProbe / ProbeAllowsCommit 是 R2-02 守卫的**策略**部分，下沉到内核
+// 后各前端只提供探针执行（LENS-04）。这里钉住三分归因：
+// 行数不符 → 冲突；keyed 语句 0 行 → 需探针；探针后行在且 AllowZero 才放行。
+func TestNeedsRowProbeAndVerdict(t *testing.T) {
+	keyed := Statement{AllowZero: true, ExpectAffected: 1, Table: "t", Where: "id = ?"}
+	if !NeedsRowProbe(keyed, 0) {
+		t.Error("keyed zero-row update must be probed (same-value no-op vs vanished row)")
+	}
+	if NeedsRowProbe(keyed, 1) {
+		t.Error("an exact one-row keyed update needs no probe")
+	}
+	if !NeedsRowProbe(keyed, 2) {
+		t.Error("a count above the expectation is a conflict and must be probed")
+	}
+	insert := Statement{AllowZero: false, ExpectAffected: 1, Table: "t"}
+	if !NeedsRowProbe(insert, 0) {
+		t.Error("an insert shortfall is a conflict and must be probed")
+	}
+
+	if !ProbeAllowsCommit(keyed, 0, true) {
+		t.Error("row still there + allow-zero must commit the no-op")
+	}
+	if ProbeAllowsCommit(keyed, 0, false) {
+		t.Error("a vanished row must not commit")
+	}
+	if ProbeAllowsCommit(insert, 0, true) {
+		t.Error("a statement without allow-zero must never commit a shortfall")
+	}
+	if ProbeAllowsCommit(keyed, 2, true) {
+		t.Error("a count above the expectation must not commit, even when the row exists")
+	}
+}

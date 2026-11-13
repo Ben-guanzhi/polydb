@@ -288,20 +288,14 @@ func commitQueue(be backend.Backend, ns, table, schema string, q *changes.Queue)
 		// 影响行数守卫：0 行可能只是 MySQL changed-rows 语义下的同值更新
 		// （行还在，无事发生），也可能是行已被别的会话删掉/PK 已改——
 		// 后者必须中止并回滚整个批次，否则余下语句都打在错误的状态上。
-		// allow_zero 让 RowsMismatch 对 0 行放行，所以守卫挂在**0 行本身**：
-		// 带定位谓词的语句（UPDATE/DELETE）0 行一律探针；探针跑在**本事务
-		// 内**，它读到的正是这条语句作用的那个快照，换连接读既会撞 SQLite
+		// 判定策略归内核（changes.NeedsRowProbe / ProbeAllowsCommit，
+		// LENS-04）：带定位谓词的语句 0 行一律探针，探针跑在**本事务内**，
+		// 它读到的正是这条语句作用的那个快照，换连接读既会撞 SQLite
 		// 的写锁，读到的也不是同一状态。
 		// （与 TableProGo 的 zeroRowVerdict/rowStillThere、db-dev 的
 		// zeroRowVerdict 三分归因同课；R2-02，ANALYSIS-db-architecture
 		// -db-clients-round2-2026-11-06.md。）
-		probe := false
-		if changes.RowsMismatch(s, uint64(affected)) {
-			probe = true // 行数不符（>1 或非 0 的不足）：直接按冲突处理
-		} else if affected == 0 && s.Table != "" && s.Where != "" {
-			probe = true // 0 行：同值更新 no-op 还是行已消失，探针见分晓
-		}
-		if probe {
+		if changes.NeedsRowProbe(s, uint64(affected)) {
 			present, perr := rowStillThere(tx, id, s)
 			if perr != nil {
 				_ = tx.Rollback(id)
@@ -309,7 +303,7 @@ func commitQueue(be backend.Backend, ns, table, schema string, q *changes.Queue)
 			}
 			// 行在 + keyed update 的 0 行 → 同值 no-op，放行；其余 0 行
 			// （行已消失，或 DELETE/INSERT 形态的不足）一律冲突回滚。
-			if !present || !s.AllowZero {
+			if !changes.ProbeAllowsCommit(s, uint64(affected), present) {
 				_ = tx.Rollback(id)
 				return 0, fmt.Errorf("statement %d: %s matched %d rows (expected %d); the data changed since it was read, nothing was committed",
 					i+1, s.SQL, affected, s.ExpectAffected)

@@ -17,7 +17,7 @@ use polydb_core::{
     ColumnInfo, CoreError, CoreResult, DatabaseKind, ForeignKeyInfo, IndexInfo, IsolationLevel,
     QueryResult, ResultColumn, SchemaInfo, StatementType, TableInfo, TableType, Value,
 };
-use polydb_db_core::{has_returning_clause, DatabaseDriver, SqlDriver, TxMode};
+use polydb_db_core::{has_returning_clause, non_empty, DatabaseDriver, SqlDriver, TxMode};
 
 pub struct PostgresConn {
     pool: PgPool,
@@ -34,8 +34,23 @@ impl PostgresConn {
     /// DSN 形如 postgres://user@host:port/dbname（不含密码）。懒连接：真正建连发生在首次查询。
     pub fn open(dsn: &str) -> CoreResult<Self> {
         let pool = PgPoolOptions::new()
-            .max_connections(4)
+            // PR-01：与 MySQL 侧同理——事务钉住连接，4 槽会被 4 个事务吃光。
+            // 8 槽 + app-core 的每连接 4 个事务上限，事务最多占一半。
+            .max_connections(8)
             .acquire_timeout(std::time::Duration::from_secs(5))
+            // 空闲回收：PG 的 idle_session_timeout / 代理都会杀空闲会话，
+            // 别把半死连接留在池里（sqlx 默认 idle_timeout=None）。
+            .idle_timeout(Some(std::time::Duration::from_secs(300)))
+            // 语句级墙钟（PR-01）：PG 原生支持 statement_timeout（毫秒），
+            // 与 MSSQL 的 300s 兜底对齐；角色级设置可覆盖它，那是运维选择。
+            .after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    let _ = sqlx::query("SET statement_timeout = 300000")
+                        .execute(&mut *conn)
+                        .await;
+                    Ok(())
+                })
+            })
             .connect_lazy(dsn)
             .map_err(|e| CoreError::Driver(format!("open postgres: {e}")))?;
         Ok(Self {
@@ -394,6 +409,47 @@ impl DatabaseDriver for PostgresConn {
     }
 }
 
+/// 目录配方（C3）。`pub` 是为了让本 crate 的 `catalog_contract` 测试直接断言 SQL
+/// 内容——跨语言契约由内核仓库的 `dbcore/spec/vectors/catalog-contract.json` 持有，
+/// Go 侧断言**生成 SQL**，这边断言这三个常量。
+pub const TABLES_SQL: &str =
+    "SELECT c.relname, CASE c.relkind WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized_view' ELSE 'table' END, \
+            COALESCE(obj_description(c.oid, 'pg_class'), '') \
+     FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','p') ORDER BY c.relname";
+
+pub const COLUMNS_SQL: &str =
+    "SELECT a.attname, format_type(a.atttypid, a.atttypmod), NOT a.attnotnull, pg_get_expr(d.adbin, d.adrelid), \
+            CASE WHEN COALESCE(a.attidentity <> '', false) \
+                   OR COALESCE(a.attgenerated <> '', false) \
+                   OR COALESCE(pg_get_expr(d.adbin, d.adrelid) LIKE 'nextval(%', false) \
+                 THEN true ELSE false END, a.attnum, \
+            COALESCE(col_description(a.attrelid, a.attnum), '') \
+     FROM pg_catalog.pg_attribute a \
+     JOIN pg_catalog.pg_class cl ON cl.oid = a.attrelid \
+     JOIN pg_catalog.pg_namespace n ON n.oid = cl.relnamespace \
+     LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+     WHERE n.nspname = $1 AND cl.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped \
+     ORDER BY a.attnum";
+
+pub const BATCH_COLUMNS_SQL: &str =
+    "SELECT cl.relname, a.attname, format_type(a.atttypid, a.atttypmod), \
+             NOT a.attnotnull, pg_get_expr(d.adbin, d.adrelid), \
+             CASE WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k \
+                                WHERE k.conrelid = a.attrelid AND k.contype = 'p' \
+                                  AND a.attnum = ANY(k.conkey)) THEN 1 ELSE 0 END, \
+             CASE WHEN COALESCE(a.attidentity <> '', false) \
+                    OR COALESCE(a.attgenerated <> '', false) \
+                    OR COALESCE(pg_get_expr(d.adbin, d.adrelid) LIKE 'nextval(%', false) \
+                  THEN true ELSE false END, a.attnum, \
+             COALESCE(col_description(a.attrelid, a.attnum), '') \
+      FROM pg_catalog.pg_attribute a \
+      JOIN pg_catalog.pg_class cl ON cl.oid = a.attrelid \
+      JOIN pg_catalog.pg_namespace n ON n.oid = cl.relnamespace \
+      LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+      WHERE n.nspname = $1 AND a.attnum > 0 AND NOT a.attisdropped \
+      ORDER BY cl.relname, a.attnum";
+
 #[async_trait]
 impl SqlDriver for PostgresConn {
     async fn browse_rows(
@@ -482,11 +538,8 @@ impl SqlDriver for PostgresConn {
     }
 
     async fn list_tables(&self, schema: &str) -> CoreResult<Vec<TableInfo>> {
-        let rows = sqlx::query(
-            "SELECT c.relname, CASE c.relkind WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized_view' ELSE 'table' END \
-             FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-             WHERE n.nspname = $1 AND c.relkind IN ('r','v','m','p') ORDER BY c.relname",
-        )
+        // C1：表注释与内核 `CatalogTables` 同源——`obj_description(oid,'pg_class')`。
+        let rows = sqlx::query(TABLES_SQL)
         .bind(schema)
         .fetch_all(&self.pool)
         .await
@@ -502,22 +555,13 @@ impl SqlDriver for PostgresConn {
                     _ => TableType::Table,
                 },
                 row_count: None,
-                comment: None,
+                comment: non_empty(r.get::<Option<String>, _>(2)),
             })
             .collect())
     }
 
     async fn list_columns(&self, schema: &str, table: &str) -> CoreResult<Vec<ColumnInfo>> {
-        let rows = sqlx::query(
-            "SELECT a.attname, format_type(a.atttypid, a.atttypmod), NOT a.attnotnull, pg_get_expr(d.adbin, d.adrelid), \
-                    COALESCE(a.attidentity <> '', a.attgenerated <> ''), a.attnum \
-             FROM pg_catalog.pg_attribute a \
-             JOIN pg_catalog.pg_class cl ON cl.oid = a.attrelid \
-             JOIN pg_catalog.pg_namespace n ON n.oid = cl.relnamespace \
-             LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
-             WHERE n.nspname = $1 AND cl.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped \
-             ORDER BY a.attnum",
-        )
+        let rows = sqlx::query(COLUMNS_SQL)
         .bind(schema)
         .bind(table)
         .fetch_all(&self.pool)
@@ -537,7 +581,8 @@ impl SqlDriver for PostgresConn {
                 scale: None,
                 is_primary_key: false,
                 is_auto_increment: r.get::<bool, _>(4),
-                comment: None,
+                // C1：列注释与内核 `CatalogColumns` 同源（col_description）。
+                comment: non_empty(r.get::<Option<String>, _>(6)),
                 // attnum 在 pg_catalog 里是 int2（不是 int4）：sqlx 严格按 SQL 类型解码，
                 // 用 i32 读会 ColumnDecode 失败（探测 p10 钉下的真值）。先读 i16 再转。
                 ordinal_position: r.get::<i16, _>(5) as i32,
@@ -711,22 +756,10 @@ impl SqlDriver for PostgresConn {
         // 故批量结果与逐表结果行对行相等（等价契约见 equivalence 测试）。
         //
         // 主键一次算出（EXISTS pg_constraint contype='p'），免去逐表的第二次查询；
-        // auto_increment 口径**照抄逐表**（只 attidentity/attgenerated，不含
-        // nextval）——逐表侧就是这么读的，批量若加 nextval 会与逐表不一致。
-        let rows = sqlx::query(
-            "SELECT cl.relname, a.attname, format_type(a.atttypid, a.atttypmod), \
-                     NOT a.attnotnull, pg_get_expr(d.adbin, d.adrelid), \
-                     CASE WHEN EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k \
-                                        WHERE k.conrelid = a.attrelid AND k.contype = 'p' \
-                                          AND a.attnum = ANY(k.conkey)) THEN 1 ELSE 0 END, \
-                     COALESCE(a.attidentity <> '', a.attgenerated <> ''), a.attnum \
-              FROM pg_catalog.pg_attribute a \
-              JOIN pg_catalog.pg_class cl ON cl.oid = a.attrelid \
-              JOIN pg_catalog.pg_namespace n ON n.oid = cl.relnamespace \
-              LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
-              WHERE n.nspname = $1 AND a.attnum > 0 AND NOT a.attisdropped \
-              ORDER BY cl.relname, a.attnum",
-        )
+        // auto_increment 口径**照抄逐表**（C2：含 nextval serial 判定）——两侧
+        // 表达式必须同形，否则批量与逐表对同一列给出不同的 is_auto_increment
+        //（等价契约测试会红）。
+        let rows = sqlx::query(BATCH_COLUMNS_SQL)
         .bind(schema)
         .fetch_all(&self.pool)
         .await
@@ -747,7 +780,8 @@ impl SqlDriver for PostgresConn {
                         scale: None,
                         is_primary_key: r.get::<i32, _>(5) != 0,
                         is_auto_increment: r.get::<bool, _>(6),
-                        comment: None,
+                        // C1：与逐表同源的注释列（批量/逐表等价契约会比对这一列）。
+                        comment: non_empty(r.get::<Option<String>, _>(8)),
                         ordinal_position: r.get::<i16, _>(7) as i32,
                     };
                     (r.get::<String, _>(0), col)
@@ -836,40 +870,115 @@ impl SqlDriver for PostgresConn {
                 "table not found: {schema}.{table}"
             )));
         }
-        let mut b = format!(
-            "CREATE TABLE {}.{} (\n",
-            quote_ident(schema),
-            quote_ident(table)
-        );
-        for (i, col) in cols.iter().enumerate() {
-            let suffix = if col.is_primary_key {
-                " PRIMARY KEY"
-            } else if col.is_auto_increment {
-                " GENERATED ALWAYS AS IDENTITY"
-            } else if !col.nullable {
-                " NOT NULL"
-            } else {
-                ""
-            };
-            if i < cols.len() - 1 {
-                b.push_str(&format!(
-                    "  {} {}{},\n",
-                    quote_ident(&col.name),
-                    col.data_type,
-                    suffix
-                ));
-            } else {
-                b.push_str(&format!(
-                    "  {} {}{}\n",
-                    quote_ident(&col.name),
-                    col.data_type,
-                    suffix
-                ));
+        // C4：与内核 `CreateTableSQL` 同形状——列里**不**内联主键（复合主键会
+        // 生成两个 PRIMARY KEY = 非法 SQL），主键走表级
+        // `;\nALTER TABLE … ADD CONSTRAINT <name> PRIMARY KEY (…)`；
+        // 收尾不带分号（与 Go 侧逐字一致）。
+        let qualified = format!("{}.{}", quote_ident(schema), quote_ident(table));
+        let pk = self.primary_key_constraint(schema, table).await?;
+        Ok(render_create_table(
+            &qualified,
+            &cols,
+            pk.as_ref().map(|(n, c)| (n.as_str(), c.as_slice())),
+        ))
+    }
+}
+
+impl PostgresConn {
+    /// 主键约束名 + 按约束顺序排列的列（C4）。内核用 `CatalogPrimaryKey` 单独
+    /// 查这一条；`list_columns` 的 `is_primary_key` 只有列标记，没有约束名。
+    async fn primary_key_constraint(
+        &self,
+        schema: &str,
+        table: &str,
+    ) -> CoreResult<Option<(String, Vec<String>)>> {
+        let rows = sqlx::query(
+            "SELECT k.conname, a.attname \
+             FROM pg_catalog.pg_constraint k \
+             JOIN pg_catalog.pg_class cl ON cl.oid = k.conrelid \
+             JOIN pg_catalog.pg_namespace n ON n.oid = cl.relnamespace \
+             CROSS JOIN LATERAL unnest(k.conkey) WITH ORDINALITY AS ck(attnum, N) \
+             JOIN pg_catalog.pg_attribute a ON a.attrelid = cl.oid AND a.attnum = ck.attnum \
+             WHERE k.contype = 'p' AND n.nspname = $1 AND cl.relname = $2 \
+             ORDER BY ck.N",
+        )
+        .bind(schema)
+        .bind(table)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| CoreError::Driver(format!("primary key: {e}")))?;
+        let Some(first) = rows.first() else {
+            return Ok(None);
+        };
+        let name: String = first.get(0);
+        let cols: Vec<String> = rows.iter().map(|r| r.get::<String, _>(1)).collect();
+        Ok(Some((name, cols)))
+    }
+}
+
+/// 整段 DDL 装配（纯函数）：`CREATE TABLE …(列…)`，主键存在时追加表级
+/// `;\nALTER TABLE … ADD CONSTRAINT … PRIMARY KEY (…)`。与内核
+/// `CreateTableSQL`（`dbcore/postgres/postgres.go:323-362`）同形状。
+fn render_create_table(
+    qualified: &str,
+    cols: &[ColumnInfo],
+    pk: Option<(&str, &[String])>,
+) -> String {
+    let mut out = format!("CREATE TABLE {qualified} (\n{})", render_create_columns(cols));
+    if let Some((name, pk_cols)) = pk {
+        let quoted: Vec<String> = pk_cols.iter().map(|c| quote_ident(c)).collect();
+        out.push_str(&format!(
+            ";\nALTER TABLE {qualified} ADD CONSTRAINT {} PRIMARY KEY ({})",
+            quote_ident(name),
+            quoted.join(", ")
+        ));
+    }
+    out
+}
+
+/// 列渲染（纯函数，可无服务端测试）。与内核 `renderCreateColumns`
+/// （`dbcore/postgres/postgres.go:371-396`）同形状：
+/// `    <ident> <type>[ GENERATED ALWAYS AS IDENTITY][ NULL| NOT NULL][ DEFAULT <expr>]`
+///
+/// 两条口径不能丢：
+/// - 只有**真正的 identity 列**发 `GENERATED ALWAYS AS IDENTITY`——serial 列的
+///   默认值已经是序列机制，再套这个子句会被 PostgreSQL 直接拒绝
+///   （"cannot create identity column of type serial"）；
+/// - 主键**不**在这里内联（C4）：复合主键会让每一列各带一个 `PRIMARY KEY`，
+///   PostgreSQL 报 "multiple primary keys"；约束由调用方以表级 ALTER 追加。
+fn render_create_columns(cols: &[ColumnInfo]) -> String {
+    let mut b = String::new();
+    let last = cols.len().saturating_sub(1);
+    for (i, col) in cols.iter().enumerate() {
+        let serial_default = col
+            .default_value
+            .as_deref()
+            .map(|d| d.trim_start().starts_with("nextval("))
+            .unwrap_or(false);
+        b.push_str("    ");
+        b.push_str(&quote_ident(&col.name));
+        b.push(' ');
+        b.push_str(&col.data_type);
+        if col.is_auto_increment && !serial_default {
+            b.push_str(" GENERATED ALWAYS AS IDENTITY");
+        }
+        if col.nullable {
+            b.push_str(" NULL");
+        } else {
+            b.push_str(" NOT NULL");
+        }
+        if let Some(d) = col.default_value.as_deref() {
+            if !d.is_empty() {
+                b.push_str(" DEFAULT ");
+                b.push_str(d);
             }
         }
-        b.push_str(");");
-        Ok(b)
+        if i < last {
+            b.push(',');
+        }
+        b.push('\n');
     }
+    b
 }
 
 // sqlx errors carry SQLSTATE + ErrorKind: the strongest evidence of the six.
@@ -937,5 +1046,127 @@ mod bind_contract_tests {
             "NaN must be preserved as string, not null"
         );
         assert_eq!(parsed[2], "Infinity");
+    }
+}
+
+#[cfg(test)]
+mod create_ddl_tests {
+    use super::*;
+
+    fn col(name: &str, ty: &str, auto: bool, default: Option<&str>) -> ColumnInfo {
+        ColumnInfo {
+            name: name.to_string(),
+            data_type: ty.to_string(),
+            generic_type: None,
+            nullable: true,
+            default_value: default.map(|s| s.to_string()),
+            max_length: None,
+            precision: None,
+            scale: None,
+            is_primary_key: false,
+            is_auto_increment: auto,
+            comment: None,
+            ordinal_position: 1,
+        }
+    }
+
+    fn not_null(name: &str, ty: &str) -> ColumnInfo {
+        ColumnInfo {
+            nullable: false,
+            ..col(name, ty, false, None)
+        }
+    }
+
+    /// C2：serial 列（默认值 nextval(...)）必须**不**发 IDENTITY——PostgreSQL
+    /// 对这个组合直接报 "cannot create identity column of type serial"。
+    /// 真正的 identity 列（默认值不是 nextval）继续发。
+    #[test]
+    fn serial_never_emits_identity_clause() {
+        let serial = col("id", "integer", true, Some("nextval('t_id_seq'::regclass)"));
+        let out = render_create_columns(&[serial]);
+        assert!(
+            !out.contains("IDENTITY"),
+            "serial column must not emit IDENTITY: {out}"
+        );
+
+        let identity = col("id", "integer", true, None);
+        let out = render_create_columns(&[identity]);
+        assert!(
+            out.contains("GENERATED ALWAYS AS IDENTITY"),
+            "identity column must keep the clause: {out}"
+        );
+    }
+
+    /// C4：主键不进列定义，改走表级 `ALTER TABLE … ADD CONSTRAINT … PRIMARY KEY`。
+    /// 旧实现给每一列各加一个 `PRIMARY KEY`——复合主键直接是非法 SQL
+    ///（"multiple primary keys"），而且把 `NOT NULL` 顶掉了。
+    #[test]
+    fn primary_key_is_table_level_not_inline() {
+        let cols = vec![not_null("a", "int"), not_null("b", "int")];
+        let pk = vec!["a".to_string(), "b".to_string()];
+        let out = render_create_table("\"s\".\"t\"", &cols, Some(("t_pkey", pk.as_slice())));
+        assert!(
+            !out.contains("int PRIMARY KEY"),
+            "primary key must not be inlined into a column: {out}"
+        );
+        assert!(
+            out.contains("ALTER TABLE \"s\".\"t\" ADD CONSTRAINT \"t_pkey\" PRIMARY KEY (\"a\", \"b\")"),
+            "table-level constraint missing: {out}"
+        );
+        // 列本身仍要保留 NOT NULL（旧实现被 PRIMARY KEY 顶掉）。
+        assert!(out.contains("\"a\" int NOT NULL"), "{out}");
+    }
+
+    /// C4：`DEFAULT` 必须渲染——旧实现整段丢弃，serial 列的序列默认值就丢了。
+    #[test]
+    fn defaults_are_rendered() {
+        let cols = vec![col("note", "text", false, Some("'x'::text"))];
+        let out = render_create_table("\"s\".\"t\"", &cols, None);
+        assert!(
+            out.contains("\"note\" text NULL DEFAULT 'x'::text"),
+            "default missing: {out}"
+        );
+        // 无主键时与内核一致：收尾只有 `)`，不追加 ALTER。
+        assert!(!out.contains("ALTER TABLE"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod catalog_contract {
+    use super::*;
+
+    /// 契约向量（内核仓库持有）：本 crate 只断言自己的三个 SQL 常量。
+    fn markers(engine: &str, kind: &str) -> Vec<String> {
+        let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../../dbcore/spec/vectors/catalog-contract.json");
+        let raw = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
+        let doc: serde_json::Value = serde_json::from_str(&raw).expect("parse catalog contract");
+        doc["engines"][engine][kind]
+            .as_array()
+            .unwrap_or_else(|| panic!("向量缺 {engine}/{kind}"))
+            .iter()
+            .map(|m| collapse(m.as_str().expect("marker string")))
+            .collect()
+    }
+
+    fn collapse(s: &str) -> String {
+        s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    }
+
+    fn assert_markers(engine: &str, kind: &str, sql: &str) {
+        let hay = collapse(sql);
+        for m in markers(engine, kind) {
+            assert!(
+                hay.contains(&m),
+                "{engine}/{kind}: 目录 SQL 缺 marker {m:?}（C1 注释 / C2 serial 自增这类漂移）\nSQL={sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_the_catalog_contract() {
+        assert_markers("postgres", "tables", TABLES_SQL);
+        assert_markers("postgres", "columns", COLUMNS_SQL);
+        assert_markers("postgres", "batch_columns", BATCH_COLUMNS_SQL);
     }
 }

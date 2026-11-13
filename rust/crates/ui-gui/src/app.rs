@@ -2585,12 +2585,12 @@ impl PolyDBApp {
                             .await
                         {
                             Ok(r) => {
-                                if changes::rows_mismatch(s, r.affected_rows) {
+                                if changes::needs_row_probe(s, r.affected_rows) {
                                     // 0 行守卫：UPDATE 的 0 可能是同值更新 no-op
                                     // （行在，放行），也可能是行已被删/PK 已改——
-                                    // 同事务探针区分（TableProGo zeroRowVerdict
-                                    // 同课；R2-02）。探针读本事务快照，与提交
-                                    // 语句的定位谓词同源生成。
+                                    // 同事务探针区分（spec/zero-row-guard.md，
+                                    // TableProGo zeroRowVerdict 同课；R2-02）。
+                                    // 探针读本事务快照，与提交语句的定位谓词同源生成。
                                     let present = if s.table.is_empty() || s.where_clause.is_empty()
                                     {
                                         Ok(true)
@@ -2603,34 +2603,39 @@ impl PolyDBApp {
                                             .await
                                             .map(|p| !p.rows.is_empty())
                                     };
-                                    match present {
-                                        Ok(true) if s.allow_zero => {
-                                            // 行还在：同值更新，无事发生。
-                                        }
-                                        present => {
-                                            let _ = t.rollback_transaction(&txn).await;
-                                            let why = match present {
-                                                Ok(false) => "目标行已不存在",
-                                                Ok(true) => "同值更新但该语句不容许 0 行",
-                                                Err(pe) => return CommitResult {
-                                                    ok: false,
-                                                    applied,
-                                                    error: Some(format!(
-                                                        "第 {} 条 0 行，探针失败: {pe}",
-                                                        applied + 1
-                                                    )),
-                                                },
-                                            };
-                                            return CommitResult {
+                                    // 裁决归内核（契约里的 probe_allows_commit），
+                                    // 本处只提供探针执行。
+                                    let allowed = match &present {
+                                        Ok(p) => changes::probe_allows_commit(
+                                            s,
+                                            r.affected_rows,
+                                            *p,
+                                        ),
+                                        Err(_) => false,
+                                    };
+                                    if !allowed {
+                                        let _ = t.rollback_transaction(&txn).await;
+                                        let why = match &present {
+                                            Ok(false) => "目标行已不存在",
+                                            Ok(true) => "同值更新但该语句不容许 0 行",
+                                            Err(pe) => return CommitResult {
                                                 ok: false,
                                                 applied,
                                                 error: Some(format!(
-                                                    "影响行数与预期不符（第 {} 条，{}），已整体回滚",
-                                                    applied + 1,
-                                                    why
+                                                    "第 {} 条 0 行，探针失败: {pe}",
+                                                    applied + 1
                                                 )),
-                                            };
-                                        }
+                                            },
+                                        };
+                                        return CommitResult {
+                                            ok: false,
+                                            applied,
+                                            error: Some(format!(
+                                                "影响行数与预期不符（第 {} 条，{}），已整体回滚",
+                                                applied + 1,
+                                                why
+                                            )),
+                                        };
                                     }
                                 }
                                 applied += 1;

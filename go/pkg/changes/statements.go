@@ -190,3 +190,27 @@ func RowsMismatch(s Statement, actual uint64) bool {
 	}
 	return actual != s.ExpectAffected
 }
+
+// NeedsRowProbe 报告一个影响行数是否必须先由探针裁决才能算作已应用。已经
+// 触发 RowsMismatch 的计数本身就是冲突；唯一歧义的是带定位谓词的语句报 0——
+// MySQL 的 changed-rows 语义让同值更新也报 0，而行被并发删掉同样报 0。
+// 探针必须跑在调用方的事务里，读的正是这条语句作用过的那个快照（换连接读
+// 既撞 SQLite 写锁，读到的也不是同一状态）。策略归内核所有（LENS-04），
+// 各前端只提供探针执行。
+func NeedsRowProbe(s Statement, actual uint64) bool {
+	if RowsMismatch(s, actual) {
+		return true
+	}
+	return actual == 0 && s.Table != "" && s.Where != ""
+}
+
+// ProbeAllowsCommit 是守卫的**总裁决**（spec/zero-row-guard.md）：无需探针的
+// 语句直接放行；需要探针时，未越界 + 行还在 + allow_zero 才放行。**越界一律
+// 冲突**——谓词匹配到比预期更多的行说明批次已经打偏，哪怕探针找到了行也不能
+// 放行（这条在旧实现里缺失：allow_zero 语句 actual>expect 且行在时会被放过去）。
+func ProbeAllowsCommit(s Statement, actual uint64, present bool) bool {
+	if !NeedsRowProbe(s, actual) {
+		return true
+	}
+	return !RowsMismatch(s, actual) && present && s.AllowZero
+}

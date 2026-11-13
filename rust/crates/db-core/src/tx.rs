@@ -73,6 +73,21 @@ impl<T: Sweepable> TxManager<T> {
         self.txs.lock().insert(id, entry);
     }
 
+    /// 「上限检查 + 插入」在同一把锁内完成（PR-01）：先查后插的 TOCTOU 会让
+    /// 并发 begin 各自看到 `n-1` 然后都插入，上限形同虚设。拒绝时把条目原样
+    /// 还回调用方（它必须回滚已打开的句柄，否则那条连接就漏在池外）。
+    pub fn insert_limited<F>(&self, id: String, entry: T, limit: usize, pred: F) -> Result<(), T>
+    where
+        F: Fn(&T) -> bool,
+    {
+        let mut map = self.txs.lock();
+        if map.values().filter(|e| pred(*e)).count() >= limit {
+            return Err(entry);
+        }
+        map.insert(id, entry);
+        Ok(())
+    }
+
     /// 借出并移除一条事务；不存在返回 None。
     pub fn take(&self, id: &str) -> Option<T> {
         self.txs.lock().remove(id)
@@ -98,8 +113,13 @@ impl<T: Sweepable> TxManager<T> {
         let mut candidates: Vec<String> = Vec::new();
         {
             let map = self.txs.lock();
+            // PR-06：候选去重用 HashSet。此前 `candidates.contains(id)` 是
+            // O(n²) 的 String 比较，而且是在注册表锁内跑的——1024 上限下无感，
+            // 上限一调大就会变成真问题。
+            let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
             for (id, entry) in map.iter() {
                 if now - entry.last_active() > idle_cutoff {
+                    seen.insert(id.as_str());
                     candidates.push(id.clone());
                 }
             }
@@ -107,7 +127,7 @@ impl<T: Sweepable> TxManager<T> {
             if map.len() > max {
                 let mut by_age: Vec<(String, DateTime<Utc>)> = map
                     .iter()
-                    .filter(|(id, _)| !candidates.contains(id))
+                    .filter(|(id, _)| !seen.contains(id.as_str()))
                     .map(|(id, e)| (id.clone(), e.last_active()))
                     .collect();
                 by_age.sort_by_key(|(_, t)| *t);
@@ -191,5 +211,81 @@ impl<T: Sweepable> Default for TxManager<T> {
             max_entries: Arc::new(Mutex::new(1024)),
             stop: Arc::new(AtomicBool::new(false)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    /// 最小条目：只为验证「上限检查 + 插入」的原子性（PR-01）。
+    struct Entry {
+        conn: u32,
+        at: DateTime<Utc>,
+    }
+
+    impl Sweepable for Entry {
+        fn last_active(&self) -> DateTime<Utc> {
+            self.at
+        }
+        fn rollback(&mut self) {}
+    }
+
+    fn entry(conn: u32) -> Entry {
+        Entry {
+            conn,
+            at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn insert_limited_enforces_the_per_connection_cap_atomically() {
+        let m = TxManager::<Entry>::new();
+        for i in 0..3 {
+            assert!(
+                m.insert_limited(format!("t{i}"), entry(1), 3, |e| e.conn == 1)
+                    .is_ok(),
+                "第 {i} 条应被接受"
+            );
+        }
+        // 第 4 条被拒：条目必须原样还回，调用方才有机会回滚它已打开的句柄
+        //（否则那条池连接就漏在外面）。
+        assert!(
+            m.insert_limited("t3".into(), entry(1), 3, |e| e.conn == 1)
+                .is_err(),
+            "达到上限后必须拒绝"
+        );
+        // 上限是**每连接**的：别的连接不受影响（谓词同样是「这一条连接」）。
+        assert!(
+            m.insert_limited("other".into(), entry(2), 3, |e| e.conn == 2)
+                .is_ok(),
+            "另一个连接不应被这条连接的上限挡住"
+        );
+        assert_eq!(m.ids_matching(|e| e.conn == 1).len(), 3);
+        assert_eq!(m.ids_matching(|e| e.conn == 2).len(), 1);
+    }
+
+    /// PR-06：候选去重回 HashSet 后，sweep 仍然只回滚一次每条 idle 事务。
+    #[test]
+    fn sweep_rolls_back_each_idle_entry_once() {
+        let rolled = std::sync::Arc::new(AtomicUsize::new(0));
+        struct Counting(std::sync::Arc<AtomicUsize>, DateTime<Utc>);
+        impl Sweepable for Counting {
+            fn last_active(&self) -> DateTime<Utc> {
+                self.1
+            }
+            fn rollback(&mut self) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let m = TxManager::<Counting>::new();
+        let old = Utc::now() - chrono::Duration::minutes(31);
+        m.insert("a".into(), Counting(rolled.clone(), old));
+        m.insert("b".into(), Counting(rolled.clone(), old));
+        m.insert("fresh".into(), Counting(rolled.clone(), Utc::now()));
+        assert_eq!(m.sweep(), 2);
+        assert_eq!(rolled.load(Ordering::Relaxed), 2);
+        assert_eq!(m.ids_matching(|_| true).len(), 1);
     }
 }

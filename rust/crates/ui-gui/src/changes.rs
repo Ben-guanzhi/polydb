@@ -572,6 +572,26 @@ pub(crate) fn rows_mismatch(stmt: &GeneratedStatement, actual: u64) -> bool {
     }
 }
 
+/// 是否必须先由同事务探针裁决才能算作已应用（spec/zero-row-guard.md）。
+/// 行数不符本身就是冲突；唯一歧义的是带定位谓词的语句报 0——MySQL 的
+/// changed-rows 语义让同值更新也报 0，而行被并发删掉同样报 0。
+pub(crate) fn needs_row_probe(stmt: &GeneratedStatement, actual: u64) -> bool {
+    if rows_mismatch(stmt, actual) {
+        return true;
+    }
+    actual == 0 && !stmt.table.is_empty() && !stmt.where_clause.is_empty()
+}
+
+/// 守卫的总裁决（spec/zero-row-guard.md）：无需探针直接放行；需要探针时，
+/// 未越界 + 行还在 + allow_zero 才放行。越界一律冲突——谓词匹配到比预期
+/// 更多的行说明批次已经打偏，哪怕探针找到了行也不能放行。
+pub(crate) fn probe_allows_commit(stmt: &GeneratedStatement, actual: u64, present: bool) -> bool {
+    if !needs_row_probe(stmt, actual) {
+        return true;
+    }
+    !rows_mismatch(stmt, actual) && present && stmt.allow_zero
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -794,5 +814,49 @@ mod tests {
         assert!(!rows_mismatch(&upd, 0));
         assert!(!rows_mismatch(&upd, 1));
         assert!(rows_mismatch(&upd, 2));
+    }
+
+    /// 0 行守卫是跨语言契约（spec/zero-row-guard.md）：本测试读共享向量，
+    /// 三份实现因此不能各自漂移（LENS-04）。
+    #[test]
+    fn zero_row_guard_vectors_agree() {
+        let path = format!(
+            "{}/../../../spec/vectors/zero-row-guard.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let raw =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let doc: serde_json::Value = serde_json::from_str(&raw).expect("parse vectors");
+        let cases = doc["cases"].as_array().expect("cases array");
+        assert!(!cases.is_empty(), "shared vectors are empty");
+        for c in cases {
+            let name = c["name"].as_str().unwrap_or("?");
+            let has_predicate = c["has_predicate"].as_bool().expect("has_predicate");
+            let stmt = GeneratedStatement {
+                sql: String::new(),
+                param_sql: String::new(),
+                params: vec![],
+                expect_affected: c["expect_affected"].as_u64().expect("expect_affected"),
+                allow_zero: c["allow_zero"].as_bool().expect("allow_zero"),
+                table: if has_predicate { "t".into() } else { String::new() },
+                where_clause: if has_predicate {
+                    "id = ?".into()
+                } else {
+                    String::new()
+                },
+            };
+            let actual = c["actual"].as_u64().expect("actual");
+            let present = c["present"].as_bool().expect("present");
+            assert_eq!(
+                needs_row_probe(&stmt, actual),
+                c["needs_probe"].as_bool().expect("needs_probe"),
+                "{name}: needs_row_probe"
+            );
+            assert_eq!(
+                probe_allows_commit(&stmt, actual, present),
+                c["allows_commit"].as_bool().expect("allows_commit"),
+                "{name}: probe_allows_commit"
+            );
+        }
     }
 }

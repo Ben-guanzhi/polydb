@@ -16,7 +16,7 @@ use polydb_core::{
     IndexType, IsolationLevel, QueryResult, ResultColumn, SchemaInfo, StatementType, TableInfo,
     TableType, Value,
 };
-use polydb_db_core::{has_returning_clause, DatabaseDriver, SqlDriver, TxMode};
+use polydb_db_core::{has_returning_clause, non_empty, DatabaseDriver, SqlDriver, TxMode};
 
 pub struct MySqlConn {
     pool: MySqlPool,
@@ -52,8 +52,26 @@ impl MySqlConn {
     /// DSN 形如 mysql://user@host:port/dbname（不含密码）。懒连接。
     pub fn open(dsn: &str) -> CoreResult<Self> {
         let pool = MySqlPoolOptions::new()
-            .max_connections(4)
+            // PR-01：4 槽与「钉住到提交」的手动事务共用时，4 个事务就吃光整池，
+            // 之后连元数据刷新都只能在 5s 后报 "pool timed out"。8 槽 + app-core
+            // 的每连接 4 个事务上限，保证事务最多占一半容量。
+            .max_connections(8)
             .acquire_timeout(std::time::Duration::from_secs(5))
+            // 服务端（或代理）会按 wait_timeout 杀空闲会话；主动回收空闲连接，
+            // 别把半死的连接留在池里等下一个请求踩（sqlx 默认 idle_timeout=None）。
+            .idle_timeout(Some(std::time::Duration::from_secs(300)))
+            // 语句级墙钟（PR-01，best-effort）：MySQL 5.7.8+ 的
+            // max_execution_time 只约束 SELECT。MariaDB 用另一个变量名
+            // （max_statement_time，单位秒），SET 会失败——那是兼容性差异而不
+            // 是连接故障，所以这里吞掉错误，只让支持的引擎拿到超时。
+            .after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    let _ = sqlx::query("SET SESSION max_execution_time = 300000")
+                        .execute(&mut *conn)
+                        .await;
+                    Ok(())
+                })
+            })
             .connect_lazy(dsn)
             .map_err(|e| CoreError::Driver(format!("open mysql: {e}")))?;
         Ok(Self {
@@ -368,6 +386,15 @@ impl DatabaseDriver for MySqlConn {
     }
 }
 
+/// 目录配方（C3）。`pub` 让本 crate 的 `catalog_contract` 测试直接断言 SQL 内容；
+/// 跨语言契约由内核仓库的 `dbcore/spec/vectors/catalog-contract.json` 持有。
+pub const TABLES_SQL: &str = "SELECT TABLE_NAME, TABLE_TYPE, TABLE_COMMENT FROM information_schema.TABLES \
+     WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME";
+
+pub const COLUMNS_SQL: &str = "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE = 'YES', COLUMN_DEFAULT, EXTRA, ORDINAL_POSITION, \
+            COLUMN_COMMENT \
+     FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION";
+
 #[async_trait]
 impl SqlDriver for MySqlConn {
     async fn browse_rows(
@@ -455,10 +482,8 @@ impl SqlDriver for MySqlConn {
     }
 
     async fn list_tables(&self, schema: &str) -> CoreResult<Vec<TableInfo>> {
-        let rows = sqlx::query(
-            "SELECT TABLE_NAME, TABLE_TYPE FROM information_schema.TABLES \
-             WHERE TABLE_SCHEMA = ? ORDER BY TABLE_NAME",
-        )
+        // C1：表注释与内核 `CatalogTables` 同源（`information_schema.TABLES.TABLE_COMMENT`）。
+        let rows = sqlx::query(TABLES_SQL)
         .bind(schema)
         .fetch_all(&self.pool)
         .await
@@ -474,16 +499,14 @@ impl SqlDriver for MySqlConn {
                     TableType::Table
                 },
                 row_count: None,
-                comment: None,
+                comment: non_empty(r.get::<Option<String>, _>(2)),
             })
             .collect())
     }
 
     async fn list_columns(&self, schema: &str, table: &str) -> CoreResult<Vec<ColumnInfo>> {
-        let rows = sqlx::query(
-            "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE = 'YES', COLUMN_DEFAULT, EXTRA, ORDINAL_POSITION \
-             FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION",
-        )
+        // C1：列注释同理（`COLUMN_COMMENT`，内核 `CatalogColumns` 的同一列）。
+        let rows = sqlx::query(COLUMNS_SQL)
         .bind(schema)
         .bind(table)
         .fetch_all(&self.pool)
@@ -505,7 +528,7 @@ impl SqlDriver for MySqlConn {
                     scale: None,
                     is_primary_key: false,
                     is_auto_increment: extra.to_lowercase().contains("auto_increment"),
-                    comment: None,
+                    comment: non_empty(r.get::<Option<String>, _>(6)),
                     ordinal_position: r.get::<u32, _>(5) as i32,
                 }
             })
@@ -845,5 +868,44 @@ mod bind_contract_tests {
             pos < placeholder,
             "u64 分支必须排在类型名占位符之前（否则超界整数落回占位符，数据全丢）"
         );
+    }
+}
+
+#[cfg(test)]
+mod catalog_contract {
+    use super::*;
+
+    fn collapse(s: &str) -> String {
+        s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    }
+
+    /// 契约向量（内核仓库持有）：本 crate 只断言自己的目录 SQL 常量。
+    fn markers(engine: &str, kind: &str) -> Vec<String> {
+        let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../../dbcore/spec/vectors/catalog-contract.json");
+        let raw = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
+        let doc: serde_json::Value = serde_json::from_str(&raw).expect("parse catalog contract");
+        doc["engines"][engine][kind]
+            .as_array()
+            .unwrap_or_else(|| panic!("向量缺 {engine}/{kind}"))
+            .iter()
+            .map(|m| collapse(m.as_str().expect("marker string")))
+            .collect()
+    }
+
+    fn assert_markers(engine: &str, kind: &str, sql: &str) {
+        let hay = collapse(sql);
+        for m in markers(engine, kind) {
+            assert!(
+                hay.contains(&m),
+                "{engine}/{kind}: 目录 SQL 缺 marker {m:?}（C1 注释 / C2 serial 自增这类漂移）\nSQL={sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_the_catalog_contract() {
+        assert_markers("mysql", "tables", TABLES_SQL);
+        assert_markers("mysql", "columns", COLUMNS_SQL);
     }
 }

@@ -45,6 +45,11 @@ pub enum CoreError {
     #[error("not supported: {0}")]
     NotSupported(String),
 
+    /// A multi-statement snapshot observed the schema moving mid-collect; the
+    /// caller retries rather than persisting a mixture of states.
+    #[error("schema changed during collection: {0}")]
+    SnapshotMoved(String),
+
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -95,6 +100,9 @@ impl CoreError {
                 PolyDBError::new("POLYDB_ERR_SSH_TUNNEL_FAILED", msg.clone()).retryable()
             }
             Self::NotSupported(msg) => PolyDBError::new("POLYDB_ERR_NOT_SUPPORTED", msg.clone()),
+            Self::SnapshotMoved(msg) => {
+                PolyDBError::new("POLYDB_ERR_SNAPSHOT_MOVED", msg.clone()).retryable()
+            }
             Self::Internal(msg) => PolyDBError::new("POLYDB_ERR_UNKNOWN", msg.clone()),
         }
     }

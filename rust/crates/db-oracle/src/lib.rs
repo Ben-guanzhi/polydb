@@ -7,6 +7,7 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use oracle::sql_type::ToSql;
@@ -19,7 +20,15 @@ use polydb_core::{
     IndexType, IsolationLevel, QueryResult, ResultColumn, SchemaInfo, StatementType, TableInfo,
     TableType, Value,
 };
-use polydb_db_core::{has_returning_clause, DatabaseDriver, SqlDriver, TxMode};
+use polydb_db_core::{has_returning_clause, non_empty, DatabaseDriver, SqlDriver, TxMode};
+
+/// Oracle 调用级墙钟（PR-02）：ODPI-C 是阻塞 API，一次调用挂在丢包/半开连接上
+/// 会同时占住 spawn_blocking 线程与 `Arc<Mutex<Connection>>`——后续每个 Oracle
+/// 操作都在锁上排队，驱动整体假死，而 WS 的 cancel 只能丢弃调用方的 future，
+/// 收不回这条阻塞线程。`set_call_timeout` 让 OCI 自己放弃该调用并返回错误，
+/// 锁随之释放。取值与 MSSQL 的 STATEMENT_TIMEOUT 对齐（300s）：它只是
+/// "服务器失联"的兜底，不该误杀合法的长查询。
+const ORACLE_CALL_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// 把 oracle crate 的 [`OracleType`] 映射成 **Oracle SQL 类型名**（PD-28，
 /// 2026-11-10）。
@@ -137,6 +146,9 @@ impl OracleConn {
         let connect_string = format!("{host}:{port}/{service}");
         let conn = Connection::connect(username, password, &connect_string)
             .map_err(|e| CoreError::Driver(format!("connect oracle: {e}")))?;
+        // PR-02：没有这行，一次失联的调用会永久持锁（见 ORACLE_CALL_TIMEOUT 注释）。
+        conn.set_call_timeout(Some(ORACLE_CALL_TIMEOUT))
+            .map_err(|e| CoreError::Driver(format!("oracle call timeout: {e}")))?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             _dsn: connect_string,
@@ -420,6 +432,31 @@ impl DatabaseDriver for OracleConn {
     }
 }
 
+/// 目录配方（C3）。`pub` 让本 crate 的 `catalog_contract` 测试直接断言 SQL 内容；
+/// 跨语言契约由内核仓库的 `dbcore/spec/vectors/catalog-contract.json` 持有。
+pub const TABLES_SQL: &str = "SELECT t.name, t.type, NVL(c.comments, '') \
+     FROM (SELECT table_name AS name, 'table' AS type FROM all_tables WHERE owner = :1 \
+           UNION ALL \
+           SELECT view_name, 'view' FROM all_views WHERE owner = :1) t \
+     LEFT JOIN all_tab_comments c \
+            ON c.owner = :1 AND c.table_name = t.name \
+     ORDER BY 1";
+
+pub const COLUMNS_SQL: &str = "SELECT c.column_name, \
+            c.data_type || CASE \
+              WHEN c.data_type IN ('VARCHAR2','VARCHAR','CHAR','NVARCHAR2','NCHAR') \
+                THEN '(' || c.char_length || ')' \
+              WHEN c.data_type = 'NUMBER' AND c.data_precision IS NOT NULL \
+                THEN '(' || c.data_precision || ',' || NVL(c.data_scale, 0) || ')' \
+              ELSE '' END, \
+            c.nullable, c.column_id, ic.column_name, NVL(cm.comments, '') \
+     FROM all_tab_columns c \
+     LEFT JOIN all_tab_identity_cols ic \
+            ON ic.owner = c.owner AND ic.table_name = c.table_name AND ic.column_name = c.column_name \
+     LEFT JOIN all_col_comments cm \
+            ON cm.owner = c.owner AND cm.table_name = c.table_name AND cm.column_name = c.column_name \
+     WHERE c.owner = :1 AND c.table_name = :2 ORDER BY c.column_id";
+
 #[async_trait]
 impl SqlDriver for OracleConn {
     async fn browse_rows(
@@ -592,14 +629,12 @@ impl SqlDriver for OracleConn {
 
     async fn list_tables(&self, schema: &str) -> CoreResult<Vec<TableInfo>> {
         let conn = self.conn.lock();
-        let sql = "SELECT table_name, 'table' FROM all_tables WHERE owner = :1 \
-                   UNION ALL \
-                   SELECT view_name, 'view' FROM all_views WHERE owner = :1 ORDER BY 1";
+        // C1：表注释走 `ALL_TAB_COMMENTS`（内核 `CatalogTables` 的同一配方）。
         let mut rows = conn
-            .query_as::<(String, String)>(sql, &[&schema])
+            .query_as::<(String, String, String)>(TABLES_SQL, &[&schema])
             .map_err(|e| CoreError::Driver(format!("list_tables: {e}")))?;
         let mut out = Vec::new();
-        while let Some((name, typ)) = rows
+        while let Some((name, typ, comment)) = rows
             .next()
             .transpose()
             .map_err(|e| CoreError::Driver(format!("list_tables row: {e}")))?
@@ -613,7 +648,7 @@ impl SqlDriver for OracleConn {
                     TableType::Table
                 },
                 row_count: None,
-                comment: None,
+                comment: non_empty(Some(comment)),
             });
         }
         Ok(out)
@@ -621,24 +656,12 @@ impl SqlDriver for OracleConn {
 
     async fn list_columns(&self, schema: &str, table: &str) -> CoreResult<Vec<ColumnInfo>> {
         let conn = self.conn.lock();
-        let sql = "SELECT c.column_name, \
-                        c.data_type || CASE \
-                          WHEN c.data_type IN ('VARCHAR2','VARCHAR','CHAR','NVARCHAR2','NCHAR') \
-                            THEN '(' || c.char_length || ')' \
-                          WHEN c.data_type = 'NUMBER' AND c.data_precision IS NOT NULL \
-                            THEN '(' || c.data_precision || ',' || NVL(c.data_scale, 0) || ')' \
-                          ELSE '' END, \
-                        c.nullable, c.column_id, ic.column_name \
-                   FROM all_tab_columns c \
-                   LEFT JOIN all_tab_identity_cols ic \
-                          ON ic.owner = c.owner AND ic.table_name = c.table_name AND ic.column_name = c.column_name \
-                   WHERE c.owner = :1 AND c.table_name = :2 ORDER BY c.column_id";
         let mut rows = conn
-            .query_as::<(String, String, String, i32, Option<String>)>(sql, &[&schema, &table])
+            .query_as::<(String, String, String, i32, Option<String>, String)>(COLUMNS_SQL, &[&schema, &table])
             .map_err(|e| CoreError::Driver(format!("list_columns: {e}")))?;
 
         let mut cols: Vec<ColumnInfo> = Vec::new();
-        while let Some((name, data_type, nullable, pos, auto)) = rows
+        while let Some((name, data_type, nullable, pos, auto, comment)) = rows
             .next()
             .transpose()
             .map_err(|e| CoreError::Driver(format!("list_columns row: {e}")))?
@@ -654,7 +677,8 @@ impl SqlDriver for OracleConn {
                 scale: None,
                 is_primary_key: false,
                 is_auto_increment: auto.is_some(),
-                comment: None,
+                // C1：列注释来自 ALL_COL_COMMENTS（内核同一配方）。
+                comment: non_empty(Some(comment)),
                 ordinal_position: pos,
             });
         }
@@ -1081,5 +1105,44 @@ mod tests {
             .and_prec(6)
             .unwrap();
         assert_eq!(ts.to_string(), "2012-03-04 05:06:07.890123");
+    }
+}
+
+#[cfg(test)]
+mod catalog_contract {
+    use super::*;
+
+    fn collapse(s: &str) -> String {
+        s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    }
+
+    /// 契约向量（内核仓库持有）：本 crate 只断言自己的目录 SQL 常量。
+    fn markers(engine: &str, kind: &str) -> Vec<String> {
+        let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../../dbcore/spec/vectors/catalog-contract.json");
+        let raw = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
+        let doc: serde_json::Value = serde_json::from_str(&raw).expect("parse catalog contract");
+        doc["engines"][engine][kind]
+            .as_array()
+            .unwrap_or_else(|| panic!("向量缺 {engine}/{kind}"))
+            .iter()
+            .map(|m| collapse(m.as_str().expect("marker string")))
+            .collect()
+    }
+
+    fn assert_markers(engine: &str, kind: &str, sql: &str) {
+        let hay = collapse(sql);
+        for m in markers(engine, kind) {
+            assert!(
+                hay.contains(&m),
+                "{engine}/{kind}: 目录 SQL 缺 marker {m:?}（C1 注释 / C2 serial 自增这类漂移）\nSQL={sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_the_catalog_contract() {
+        assert_markers("oracle", "tables", TABLES_SQL);
+        assert_markers("oracle", "columns", COLUMNS_SQL);
     }
 }

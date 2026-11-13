@@ -23,7 +23,7 @@ use polydb_core::{
     IndexType, IsolationLevel, QueryResult, ResultColumn, SchemaInfo, StatementType, TableInfo,
     TableType, Value,
 };
-use polydb_db_core::{has_returning_clause, DatabaseDriver, SqlDriver, TxMode};
+use polydb_db_core::{has_returning_clause, non_empty, DatabaseDriver, SqlDriver, TxMode};
 
 // tiberius 0.12 无内置连接/查询超时；不可达主机（防火墙丢包）会让 TCP 握手
 // 挂到系统超时（本机实测 ~4s/地址，tokio 会串行尝试多个地址）。所有 block_on
@@ -335,10 +335,11 @@ impl MssqlConn {
         what: &str,
     ) -> CoreResult<(Vec<Row>, Option<Vec<ResultColumn>>)> {
         let mut client = self.client.lock();
+        let client = Self::locked_client(&mut client)?;
         let stream = timed_within(
             what,
             STATEMENT_TIMEOUT,
-            client.as_mut().unwrap().query(sql, refs),
+            client.query(sql, refs),
         )?;
         // 物化上限（polydb_db_core::row_cap，behavior.md §5）：逐行拉取到上限
         // 即停——into_first_result 会把整个结果集收进内存。MSSQL 另有
@@ -395,6 +396,18 @@ fn quote_ident(s: &str) -> String {
 pub struct MssqlTxHandle;
 
 impl MssqlConn {
+    /// 关闭后的调用必须报错而不是 panic（PR-04）：`close()` 把 client 置 None，
+    /// 与它竞争的请求（心跳 ping、正在执行的语句）仍会走到这里。`unwrap()` 会让
+    /// 服务端任务直接中止——客户端只看到"没有响应"，而且 parking_lot 的锁不
+    /// 中毒，下一次照样 panic。统一从这里取引用，错误码稳定可判。
+    fn locked_client<'a>(
+        client: &'a mut Option<Client<Compat<TcpStream>>>,
+    ) -> CoreResult<&'a mut Client<Compat<TcpStream>>> {
+        client
+            .as_mut()
+            .ok_or_else(|| CoreError::Driver("mssql connection is closed".into()))
+    }
+
     fn begin_stmt(mode: TxMode) -> Option<&'static str> {
         match mode.isolation_level {
             IsolationLevel::ReadCommitted => None,
@@ -412,11 +425,8 @@ impl MssqlConn {
 
     fn run_batch(&self, sql: &str, what: &str) -> CoreResult<()> {
         let mut client = self.client.lock();
-        let stream = timed_within(
-            what,
-            STATEMENT_TIMEOUT,
-            client.as_mut().unwrap().simple_query(sql),
-        )?;
+        let client = Self::locked_client(&mut client)?;
+        let stream = timed_within(what, STATEMENT_TIMEOUT, client.simple_query(sql))?;
         timed_within(what, STATEMENT_TIMEOUT, stream.into_first_result())?;
         Ok(())
     }
@@ -473,11 +483,8 @@ impl MssqlConn {
             })
         } else {
             let mut client = self.client.lock();
-            let result = timed_within(
-                "execute failed",
-                STATEMENT_TIMEOUT,
-                client.as_mut().unwrap().execute(sql, &refs),
-            )?;
+            let client = Self::locked_client(&mut client)?;
+            let result = timed_within("execute failed", STATEMENT_TIMEOUT, client.execute(sql, &refs))?;
             let affected = result.rows_affected().first().copied().unwrap_or(0);
             Ok(QueryResult {
                 columns: vec![],
@@ -501,10 +508,8 @@ impl DatabaseDriver for MssqlConn {
 
     async fn ping(&self) -> CoreResult<()> {
         let mut client = self.client.lock();
-        let stream = timed(
-            "ping failed",
-            client.as_mut().unwrap().simple_query("SELECT 1"),
-        )?;
+        let client = Self::locked_client(&mut client)?;
+        let stream = timed("ping failed", client.simple_query("SELECT 1"))?;
         timed("ping failed", stream.into_first_result())?;
         Ok(())
     }
@@ -520,6 +525,36 @@ impl DatabaseDriver for MssqlConn {
         Some(self)
     }
 }
+
+/// 目录配方（C3）。`pub` 让本 crate 的 `catalog_contract` 测试直接断言 SQL 内容；
+/// 跨语言契约由内核仓库的 `dbcore/spec/vectors/catalog-contract.json` 持有。
+pub const TABLES_SQL: &str =
+    "SELECT t.name, t.type, CAST(ep.value AS nvarchar(4000)) \
+     FROM (SELECT name, 'table' AS type, object_id FROM sys.tables WHERE schema_id = SCHEMA_ID(@P1) \
+           UNION ALL \
+           SELECT name, 'view', object_id FROM sys.views WHERE schema_id = SCHEMA_ID(@P1)) t \
+     LEFT JOIN sys.extended_properties ep \
+       ON ep.class = 1 AND ep.major_id = t.object_id AND ep.minor_id = 0 AND ep.name = N'MS_Description' \
+     ORDER BY t.name";
+
+pub const COLUMNS_SQL: &str =
+    "SELECT c.name, \
+            CASE WHEN t.name IN ('nvarchar','nchar','varchar','char','binary','varbinary') \
+                 THEN t.name + '(' + CASE WHEN c.max_length = -1 THEN 'max' ELSE CAST(c.max_length AS varchar) END + ')' \
+                 WHEN t.name IN ('decimal','numeric') \
+                 THEN t.name + '(' + CAST(c.precision AS varchar) + ',' + CAST(c.scale AS varchar) + ')' \
+                 ELSE t.name END AS data_type, \
+            c.is_nullable, d.definition, c.is_identity, c.column_id, \
+            CAST(ep.value AS nvarchar(4000)) \
+     FROM sys.columns c \
+     JOIN sys.types t ON t.user_type_id = c.user_type_id \
+     JOIN sys.tables tb ON tb.object_id = c.object_id \
+     JOIN sys.schemas s ON s.schema_id = tb.schema_id \
+     LEFT JOIN sys.default_constraints d ON d.object_id = c.default_object_id \
+     LEFT JOIN sys.extended_properties ep \
+       ON ep.class = 1 AND ep.major_id = c.object_id AND ep.minor_id = c.column_id \
+          AND ep.name = N'MS_Description' \
+     WHERE s.name = @P1 AND tb.name = @P2 ORDER BY c.column_id";
 
 #[async_trait]
 impl SqlDriver for MssqlConn {
@@ -617,11 +652,8 @@ impl SqlDriver for MssqlConn {
             })
         } else {
             let mut client = self.client.lock();
-            let result = timed_within(
-                "execute failed",
-                STATEMENT_TIMEOUT,
-                client.as_mut().unwrap().execute(sql, &refs),
-            )?;
+            let client = Self::locked_client(&mut client)?;
+            let result = timed_within("execute failed", STATEMENT_TIMEOUT, client.execute(sql, &refs))?;
             let affected = result.rows_affected().first().copied().unwrap_or(0);
             Ok(QueryResult {
                 columns: vec![],
@@ -664,14 +696,9 @@ impl SqlDriver for MssqlConn {
     }
 
     async fn list_tables(&self, schema: &str) -> CoreResult<Vec<TableInfo>> {
-        let (rows, _) = self.query_rows(
-            "SELECT t.name, 'table' AS type FROM sys.tables t WHERE t.schema_id = SCHEMA_ID(@P1) \
-             UNION ALL \
-             SELECT v.name, 'view' FROM sys.views v WHERE v.schema_id = SCHEMA_ID(@P1) \
-             ORDER BY name",
-            &[&schema],
-            "list_tables",
-        )?;
+        // C1：表注释走 `sys.extended_properties` 的 MS_Description（minor_id=0），
+        // 与内核 `CatalogTables` 同一配方。
+        let (rows, _) = self.query_rows(TABLES_SQL, &[&schema], "list_tables")?;
         Ok(rows
             .iter()
             .map(|r| TableInfo {
@@ -687,29 +714,18 @@ impl SqlDriver for MssqlConn {
                     _ => TableType::Table,
                 },
                 row_count: None,
-                comment: None,
+                comment: non_empty(
+                    r.try_get::<&str, usize>(2)
+                        .ok()
+                        .flatten()
+                        .map(|s| s.to_string()),
+                ),
             })
             .collect())
     }
 
     async fn list_columns(&self, schema: &str, table: &str) -> CoreResult<Vec<ColumnInfo>> {
-        let (rows, _) = self.query_rows(
-            "SELECT c.name, \
-                    CASE WHEN t.name IN ('nvarchar','nchar','varchar','char','binary','varbinary') \
-                         THEN t.name + '(' + CASE WHEN c.max_length = -1 THEN 'max' ELSE CAST(c.max_length AS varchar) END + ')' \
-                         WHEN t.name IN ('decimal','numeric') \
-                         THEN t.name + '(' + CAST(c.precision AS varchar) + ',' + CAST(c.scale AS varchar) + ')' \
-                         ELSE t.name END AS data_type, \
-                    c.is_nullable, d.definition, c.is_identity, c.column_id \
-             FROM sys.columns c \
-             JOIN sys.types t ON t.user_type_id = c.user_type_id \
-             JOIN sys.tables tb ON tb.object_id = c.object_id \
-             JOIN sys.schemas s ON s.schema_id = tb.schema_id \
-             LEFT JOIN sys.default_constraints d ON d.object_id = c.default_object_id \
-             WHERE s.name = @P1 AND tb.name = @P2 ORDER BY c.column_id",
-            &[&schema, &table],
-            "list_columns",
-        )?;
+        let (rows, _) = self.query_rows(COLUMNS_SQL, &[&schema, &table], "list_columns")?;
 
         let mut cols: Vec<ColumnInfo> = rows
             .iter()
@@ -738,7 +754,13 @@ impl SqlDriver for MssqlConn {
                 scale: None,
                 is_primary_key: false,
                 is_auto_increment: r.try_get::<bool, usize>(4).ok().flatten().unwrap_or(false),
-                comment: None,
+                // C1：列注释 = MS_Description（minor_id = column_id）。
+                comment: non_empty(
+                    r.try_get::<&str, usize>(6)
+                        .ok()
+                        .flatten()
+                        .map(|s| s.to_string()),
+                ),
                 ordinal_position: r.try_get::<i32, usize>(5).ok().flatten().unwrap_or(0),
             })
             .collect();
@@ -1110,5 +1132,44 @@ mod tests {
             pos < tail,
             "Uuid 分支必须排在链尾 Value::Null 之前（否则 GUID 落到 Null，数据丢失）"
         );
+    }
+}
+
+#[cfg(test)]
+mod catalog_contract {
+    use super::*;
+
+    fn collapse(s: &str) -> String {
+        s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    }
+
+    /// 契约向量（内核仓库持有）：本 crate 只断言自己的目录 SQL 常量。
+    fn markers(engine: &str, kind: &str) -> Vec<String> {
+        let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../../dbcore/spec/vectors/catalog-contract.json");
+        let raw = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
+        let doc: serde_json::Value = serde_json::from_str(&raw).expect("parse catalog contract");
+        doc["engines"][engine][kind]
+            .as_array()
+            .unwrap_or_else(|| panic!("向量缺 {engine}/{kind}"))
+            .iter()
+            .map(|m| collapse(m.as_str().expect("marker string")))
+            .collect()
+    }
+
+    fn assert_markers(engine: &str, kind: &str, sql: &str) {
+        let hay = collapse(sql);
+        for m in markers(engine, kind) {
+            assert!(
+                hay.contains(&m),
+                "{engine}/{kind}: 目录 SQL 缺 marker {m:?}（C1 注释 / C2 serial 自增这类漂移）\nSQL={sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeps_the_catalog_contract() {
+        assert_markers("mssql", "tables", TABLES_SQL);
+        assert_markers("mssql", "columns", COLUMNS_SQL);
     }
 }

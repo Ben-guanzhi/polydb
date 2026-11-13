@@ -322,6 +322,40 @@ export interface CommitOutcome {
   error?: string;
 }
 
+/** 0 行守卫需要的最小语句形状（spec/zero-row-guard.md）。 */
+export interface GuardStatement {
+  allowZero: boolean;
+  expectAffected: number;
+  table: string;
+  whereClause: string;
+}
+
+/**
+ * 影响行数是否不符：delete/insert 期望恰 1；keyed update 仅当 actual > expect
+ * 才拦（MySQL changed-rows 语义让同值更新报 0）。
+ */
+export function rowsMismatch(s: GuardStatement, actual: number): boolean {
+  return s.allowZero ? actual > s.expectAffected : actual !== s.expectAffected;
+}
+
+/**
+ * 是否必须先由同事务探针裁决才能算作已应用（spec/zero-row-guard.md）。
+ * 行数不符本身就是冲突；唯一歧义的是带定位谓词的语句报 0。
+ */
+export function needsRowProbe(s: GuardStatement, actual: number): boolean {
+  if (rowsMismatch(s, actual)) return true;
+  return actual === 0 && s.table !== '' && s.whereClause !== '';
+}
+
+/**
+ * 守卫的总裁决：无需探针直接放行；需要探针时，未越界 + 行还在 + allowZero
+ * 才放行。越界一律冲突——谓词匹配到比预期更多的行说明批次已经打偏。
+ */
+export function probeAllowsCommit(s: GuardStatement, actual: number, present: boolean): boolean {
+  if (!needsRowProbe(s, actual)) return true;
+  return !rowsMismatch(s, actual) && present && s.allowZero;
+}
+
 /**
  * 在单事务内按序执行提交语句并校验影响行数（§2-4）：
  * delete/insert：actual !== 1 → 中止；keyed update：actual > 1 → 中止。
@@ -349,28 +383,24 @@ export async function commitInTransaction(
   try {
     for (const s of stmts) {
       const { affected_rows: actual, rows } = await execTxn(txId, s.parameterized as unknown as QueryRequest);
-      const mismatched = s.allowZero ? actual > s.expectAffected : actual !== s.expectAffected;
-      // 0 行守卫：0 行本身可能合法（keyed update 同值更新），只有定位谓词查不到行才是
-      // 并发冲突。表/谓词为空（INSERT）不探针，按行数校验直接判。
-      const zeroRow = actual === 0 && s.table !== '' && s.whereClause !== '';
-      if (mismatched || zeroRow) {
+      // 0 行守卫的判定与裁决归内核（spec/zero-row-guard.md）：表/谓词为空
+      // （INSERT）不探针，按行数校验直接判；带谓词的 0 行由同事务探针裁决。
+      if (needsRowProbe(s, actual)) {
         let present = false;
-        if (zeroRow) {
+        if (actual === 0 && s.table !== '' && s.whereClause !== '') {
           const probe = await execTxn(txId, {
             sql: `SELECT 1 FROM ${s.table} WHERE ${s.whereClause}`,
             params: [],
           } as unknown as QueryRequest);
           present = Array.isArray(probe.rows) && probe.rows.length > 0;
         }
-        // mismatched（行数超过预期，或 delete/insert 实际 0 行）必须无条件回滚；
-        // 探针查到行只对"keyed update 的 0 行同值更新"（allowZero && zeroRow &&
-        // present，此时 mismatched 为 false）是合法豁免，不能用来放行其他 mismatch。
-        if (mismatched || !present) {
+        if (!probeAllowsCommit(s, actual, present)) {
           await finalizeTxn(txId, false);
-          const why = mismatched ? `预期 ${s.expectAffected}，实际 ${actual}` : '目标行已不存在（同事务探针）';
+          const why = rowsMismatch(s, actual)
+            ? `预期 ${s.expectAffected}，实际 ${actual}`
+            : '目标行已不存在（同事务探针）';
           return { ok: false, applied, error: `影响行数与预期不符：${why}（第 ${applied + 1} 条），已整体回滚` };
         }
-        // 行在且未 mismatch：keyed update 的 0 行 no-op，放行。
       }
       applied += 1;
     }

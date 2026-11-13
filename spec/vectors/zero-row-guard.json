@@ -1,0 +1,85 @@
+{
+  "comment": "Shared cases for the zero-row guard policy. spec/zero-row-guard.md. Go/Rust/Web each run a test that loads this file.",
+  "cases": [
+    {
+      "name": "keyed update, 0 rows, row still there: same-value no-op",
+      "allow_zero": true,
+      "expect_affected": 1,
+      "has_predicate": true,
+      "actual": 0,
+      "present": true,
+      "needs_probe": true,
+      "allows_commit": true
+    },
+    {
+      "name": "keyed update, 0 rows, row gone: conflict",
+      "allow_zero": true,
+      "expect_affected": 1,
+      "has_predicate": true,
+      "actual": 0,
+      "present": false,
+      "needs_probe": true,
+      "allows_commit": false
+    },
+    {
+      "name": "keyed update, exactly one row: no probe",
+      "allow_zero": true,
+      "expect_affected": 1,
+      "has_predicate": true,
+      "actual": 1,
+      "present": true,
+      "needs_probe": false,
+      "allows_commit": true
+    },
+    {
+      "name": "keyed update above expectation: conflict even when the row exists",
+      "allow_zero": true,
+      "expect_affected": 1,
+      "has_predicate": true,
+      "actual": 2,
+      "present": true,
+      "needs_probe": true,
+      "allows_commit": false
+    },
+    {
+      "name": "delete, 0 rows, row still there: still a conflict",
+      "allow_zero": false,
+      "expect_affected": 1,
+      "has_predicate": true,
+      "actual": 0,
+      "present": true,
+      "needs_probe": true,
+      "allows_commit": false
+    },
+    {
+      "name": "delete, exactly one row",
+      "allow_zero": false,
+      "expect_affected": 1,
+      "has_predicate": true,
+      "actual": 1,
+      "present": true,
+      "needs_probe": false,
+      "allows_commit": true
+    },
+    {
+      "name": "insert, 0 rows: shortfall without a predicate",
+      "allow_zero": false,
+      "expect_affected": 1,
+      "has_predicate": false,
+      "actual": 0,
+      "present": true,
+      "needs_probe": true,
+      "allows_commit": false
+    },
+    {
+      "name": "insert, exactly one row",
+      "allow_zero": false,
+      "expect_affected": 1,
+      "has_predicate": false,
+      "actual": 1,
+      "present": true,
+      "needs_probe": false,
+      "allows_commit": true
+    }
+  ]
+}

@@ -14,11 +14,16 @@ use std::sync::OnceLock;
 
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
-/// 进程级共享的 tokio 运行时（单 worker + 全 feature：io/time 皆可用）。
+/// 进程级共享的 tokio 运行时。
+///
+/// PR-05：worker 从 1 提到 4——`block_on` 的所有非 runtime 线程调用点（tx sweeper、
+/// 连接卸载、ui-gui）都排队在这套运行时上，单 worker 会让两条 MSSQL 连接的查询
+/// 互相串行，一次 300s 的 MSSQL 兜底超时足以堵住其它所有调用。4 个 worker 与
+/// server 的 16 并发门控、各引擎的连接数（4-8）相称，不会把线程数抬高到 OS 有压力。
 pub fn runtime() -> &'static tokio::runtime::Runtime {
     RT.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
+            .worker_threads(4)
             .thread_name("polydb-rt")
             .enable_all()
             .build()

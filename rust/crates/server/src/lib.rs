@@ -955,6 +955,14 @@ async fn execute_query(
             resp
         }
         Outcome::Cancelled => {
+            // PR-03：cancel 只「放弃等待」——worker 任务被 detach，仍在跑并占着
+            // 池连接与准入 permit 直到自然结束（见 872-875 的注释）。这条日志是
+            // 唯一能解释「刚取消完就 pool timed out」的信号。
+            tracing::info!(
+                query_id = %query_id,
+                connection_id = ?conn_id,
+                "query cancelled by client; the abandoned worker keeps its pool slot until it finishes"
+            );
             let pe = CoreError::Protocol(Box::new(PolyDBError::new(
                 codes::CANCELLED,
                 format!("query cancelled: {query_id}"),
@@ -965,6 +973,13 @@ async fn execute_query(
         }
         Outcome::TimedOut => {
             // behavior.md §4：TIMEOUT 是 retryable 错误（与 Go 侧一致）。
+            // PR-03：与 cancel 同理，超时只是不再等，查询本身还在后台跑。
+            tracing::warn!(
+                query_id = %query_id,
+                connection_id = ?conn_id,
+                timeout_ms = req.timeout_ms,
+                "query timed out; the abandoned worker keeps its pool slot until it finishes"
+            );
             let pe = CoreError::Protocol(Box::new(
                 PolyDBError::new(codes::TIMEOUT, format!("query timed out: {query_id}"))
                     .retryable(),

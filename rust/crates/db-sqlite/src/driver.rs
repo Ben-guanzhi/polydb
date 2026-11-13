@@ -7,8 +7,9 @@ use rusqlite::Connection as RusqliteConnection;
 
 use polydb_core::error_classify::driver_error;
 use polydb_core::{
-    ColumnInfo, CoreError, CoreResult, DatabaseKind, ForeignKeyAction, ForeignKeyInfo, IndexInfo,
-    QueryResult, ResultColumn, SchemaInfo, StatementType, TableInfo, TableType, Value,
+    ColumnInfo, CoreError, CoreResult, DatabaseKind, ForeignKeyAction, ForeignKeyInfo,
+    IndexInfo, IsolationLevel, QueryResult, ResultColumn, SchemaInfo, StatementType,
+    TableInfo, TableType, Value,
 };
 use polydb_db_core::{DatabaseDriver, SqlDriver, TxMode};
 
@@ -110,6 +111,18 @@ impl SqliteConn {
             "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA synchronous=NORMAL;",
         )
         .map_err(|e| CoreError::Driver(format!("sqlite pragma failed: {e}")))?;
+        // WAL can silently fall back to the rollback journal on media that
+        // cannot host the -wal file (network shares, read-only images), and then
+        // synchronous=NORMAL is the wrong pairing: the durability it assumes
+        // comes from the WAL. Read the mode back and, when WAL did not take,
+        // keep the rollback journal's safe setting instead of pretending.
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .map_err(|e| CoreError::Driver(format!("sqlite journal_mode probe failed: {e}")))?;
+        if !mode.eq_ignore_ascii_case("wal") {
+            conn.execute_batch("PRAGMA synchronous=FULL")
+                .map_err(|e| CoreError::Driver(format!("sqlite pragma failed: {e}")))?;
+        }
         register_regexp_fn(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -443,7 +456,22 @@ impl SqlDriver for SqliteConn {
         arc
     }
 
-    async fn begin_tx(&self, _mode: TxMode) -> CoreResult<Box<dyn Any + Send>> {
+    async fn begin_tx(&self, mode: TxMode) -> CoreResult<Box<dyn Any + Send>> {
+        // SQLite only ever runs `BEGIN IMMEDIATE`: one writer, and readers see
+        // a consistent snapshot — that is at least REPEATABLE READ, i.e. as
+        // strong as every level the protocol offers *except* READ UNCOMMITTED,
+        // which would need PRAGMA read_uncommitted and is not implemented here.
+        // The old signature discarded the mode (`_mode`), so a caller asking
+        // for dirty reads silently received serializable semantics. Refuse the
+        // one level the driver cannot honor instead of pretending it did; the
+        // stronger-than-requested levels below are safe (no anomaly the caller
+        // did not already ask to be protected from).
+        if matches!(mode.isolation_level, IsolationLevel::ReadUncommitted) {
+            return Err(CoreError::NotSupported(
+                "sqlite cannot run READ UNCOMMITTED: transactions execute BEGIN IMMEDIATE (serializable)"
+                    .into(),
+            ));
+        }
         Ok(Box::new(self.begin_tx_impl().await?))
     }
 
