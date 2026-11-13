@@ -11,9 +11,11 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/vmihailenco/msgpack/v5"
@@ -48,11 +50,21 @@ type Server struct {
 const httpMaxConcurrentQueries = 16
 
 func New(app *appcore.AppCore) *Server {
+	// S-01：进程级记录器；POLYDB_USABILITY 未开时是 no-op（Record 不写文件）。
+	InitUsability(userDataDir())
 	return &Server{
 		app:          app,
 		httpInFlight: map[string]context.CancelFunc{},
 		httpGate:     make(chan struct{}, httpMaxConcurrentQueries),
 	}
+}
+
+// userDataDir 返回 server 的本地数据目录（无用户目录时退回当前目录）。
+func userDataDir() string {
+	if base, err := os.UserConfigDir(); err == nil && base != "" {
+		return base + "/polydb"
+	}
+	return "."
 }
 
 // NewWithToken 以启用 Bearer 鉴权的方式创建 Server（POLYDB_SERVER_TOKEN）。
@@ -465,21 +477,50 @@ func (s *Server) executeQuery(w http.ResponseWriter, r *http.Request) {
 		defer timer.Stop()
 		timeoutCh = timer.C
 	}
+	started := time.Now()
 	select {
 	case out := <-ch:
 		if out.err != nil {
 			// 若是 ctx 被取消（来自 /cancel 端点），返回 CANCELLED 错误码
 			if ctx.Err() != nil {
+				recordQuery(started, out.err, true, 0, stmtKeyword(req.SQL))
 				writeError(w, &protocol.PolyDBError{Code: protocol.ErrCancelled, Message: "query cancelled: " + queryID})
 				return
 			}
+			recordQuery(started, out.err, false, 0, stmtKeyword(req.SQL))
 			writeError(w, out.err)
 			return
 		}
+		rows := 0
+		if out.res != nil {
+			rows = len(out.res.Rows)
+		}
+		recordQuery(started, nil, false, rows, stmtKeyword(req.SQL))
 		writeMsgpack(w, http.StatusOK, applyMaxRows(out.res, queryRowLimit(&req)))
 	case <-timeoutCh:
+		// S-01：超时是"用户视角的取消"——server 放弃等待，查询仍在后台跑。
+		recordQuery(started, nil, true, 0, stmtKeyword(req.SQL))
 		writeError(w, &protocol.PolyDBError{Code: protocol.ErrTimeout, Retryable: true, Message: fmt.Sprintf("query timed out: %s", queryID)})
 	}
+}
+
+// stmtKeyword 取语句首个关键字（SELECT/INSERT/…），与 dbstudio/TableProGo 的
+// statement_type 同口径。
+func stmtKeyword(sql string) string {
+	s := strings.TrimLeftFunc(sql, func(r rune) bool {
+		return unicode.IsSpace(r) || r == '(' || r == '/' || r == '*' || r == '-'
+	})
+	i := 0
+	for i < len(s) && (s[i] == '_' || s[i] >= 'A' && s[i] <= 'Z' || s[i] >= 'a' && s[i] <= 'z') {
+		i++
+	}
+	if i == 0 {
+		return "unknown"
+	}
+	if i > 12 {
+		i = 12
+	}
+	return strings.ToUpper(s[:i])
 }
 
 // queryRowLimit 计算 effective 行数上限（behavior.md §5）：默认 10000，
