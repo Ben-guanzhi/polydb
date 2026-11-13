@@ -334,6 +334,8 @@ func (s *wsSession) handleQuery(msg protocol.ClientMessage) {
 // covers HTTP handler goroutines, so a panicking driver on this path would
 // otherwise take the process down.
 func (s *wsSession) runQuery(msg protocol.ClientMessage, connID string) {
+	// S-01：任务起点——WS 与 HTTP 的 recordQuery 共用，四态收口见 select。
+	started := time.Now()
 	defer func() {
 		if r := recover(); r != nil {
 			s.retireQuery(msg.QueryID)
@@ -385,6 +387,11 @@ func (s *wsSession) runQuery(msg protocol.ClientMessage, connID string) {
 		// cancelFn，晚一步读 ctx.Err() 会把正常完成误判成已取消。
 		cancelled := ctx.Err() != nil
 		s.retireQuery(msg.QueryID)
+		rows := 0
+		if result.res != nil {
+			rows = len(result.res.Rows)
+		}
+		recordQuery(started, result.err, cancelled, rows, stmtKeyword(msg.SQL))
 		if cancelled {
 			s.send(&protocol.ServerMessage{
 				Type:    protocol.ServerMsgQueryCancelled,
@@ -424,6 +431,7 @@ func (s *wsSession) runQuery(msg protocol.ClientMessage, connID string) {
 			})
 			return
 		}
+		recordQuery(started, nil, false, rows, stmtKeyword(msg.SQL))
 		s.send(&protocol.ServerMessage{
 			Type:    protocol.ServerMsgQueryResult,
 			QueryID: msg.QueryID,
@@ -431,7 +439,9 @@ func (s *wsSession) runQuery(msg protocol.ClientMessage, connID string) {
 		})
 	case <-timeoutCh:
 		// 到点先回 TIMEOUT，被放弃的执行在后台自然结束（best-effort）。
+		// S-01：超时是"用户视角的取消"。
 		s.retireQuery(msg.QueryID)
+		recordQuery(started, nil, true, 0, stmtKeyword(msg.SQL))
 		s.send(&protocol.ServerMessage{
 			Type:    protocol.ServerMsgQueryError,
 			QueryID: msg.QueryID,
