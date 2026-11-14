@@ -144,7 +144,9 @@ func (s *Server) callTool(ctx context.Context, params json.RawMessage) (string, 
 		if err != nil {
 			return err.Error(), true
 		}
-		return jsonText(res), false
+		// Q-03：行内容出机器前脱敏（列名层 + 形态层），结果带 masked 标记供
+		// 客户端区分——与 db-dev 的 MCP 面同构（dbcore/masking 默认档）。
+		return jsonText(map[string]any{"result": maskQueryResult(res), "masked": true}), false
 	default:
 		return "unknown tool: " + name, true
 	}
