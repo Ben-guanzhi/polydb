@@ -27,6 +27,7 @@ import type { ParamItem, ParamType } from '../lib/tabStore';
 import { genId, loadTabState, nextTabTitle, saveTabState, type EditorTab } from '../lib/tabStore';
 import CollapsiblePane from './CollapsiblePane';
 import ContextMenu, { type ContextMenuEntry } from './ContextMenu';
+import { computeVisibleRange, type VisibleRange } from '../lib/gridVirtual';
 import CellPreviewPanel from './CellPreview';
 import TabStrip from './TabStrip';
 import { PlayIcon, StopIcon } from './Icons';
@@ -1281,25 +1282,56 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
     });
   }, [result, sortCol, sortDir, colFilters, editDrafts]);
 
-  // 增量渲染：服务端最多回 10000 行（spec/behavior.md §5），整表 DOM 会让大结果集
-  // 冻结滚动/编辑。这里只渲染前 renderLimit 行，触底哨兵进入视口即扩窗；
-  // 渲染的仍是真实行，选择/编辑/导出（作用于全量数组）行为不变。
+  // 渲染层（波 100）：只渲染可视区 + 缓冲行，杜绝大批量 DOM 一次性挂载。
+  //
+  // 非 wrap 模式（默认）：行高固定 → 完整虚拟窗口（gridVirtual.computeVisible
+  // Range），滚动只改窗口，DOM 恒为 O(viewport)，topPad/bottomPad 两个 spacer
+  // 撑住 scrollHeight；选择/编辑/导出仍作用于全量数组（origIdx 是身份）。
+  //
+  // wrap 模式：行高随内容变化，窗口算术会错位——降级为增量渲染（300 行起步、
+  // 触底扩窗），DOM 会累积但不撒谎。
   const [renderLimit, setRenderLimit] = useState(GRID_RENDER_WINDOW);
   useEffect(() => {
     setRenderLimit(GRID_RENDER_WINDOW);
   }, [result, sortCol, sortDir, colFilters]);
   const gridSentinelRef = useRef<HTMLTableRowElement>(null);
   useEffect(() => {
-    const el = gridSentinelRef.current;
-    if (!el || renderLimit >= displayRows.length) return;
-    const io = new IntersectionObserver((entries) => {
-      if (entries.some((e) => e.isIntersecting)) {
-        setRenderLimit((n) => Math.min(n + GRID_RENDER_WINDOW, displayRows.length));
-      }
-    });
-    io.observe(el);
-    return () => io.disconnect();
-  }, [renderLimit, displayRows.length]);
+    if (settings.gridWrap) {
+      const el = gridSentinelRef.current;
+      if (!el || renderLimit >= displayRows.length) return;
+      const io = new IntersectionObserver((entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          setRenderLimit((n) => Math.min(n + GRID_RENDER_WINDOW, displayRows.length));
+        }
+      });
+      io.observe(el);
+      return () => io.disconnect();
+    }
+  }, [settings.gridWrap, renderLimit, displayRows.length]);
+
+  // The grid's scroller: the window follows its scrollTop.
+  const gridScrollRef = useRef<HTMLDivElement>(null);
+  const [gridWin, setGridWin] = useState<VisibleRange>({ i0: 0, i1: -1, topPad: 0, bottomPad: 0 });
+  const gridHeadRef = useRef<HTMLTableSectionElement>(null);
+  useEffect(() => {
+    if (settings.gridWrap) {
+      setGridWin({ i0: 0, i1: -1, topPad: 0, bottomPad: 0 });
+      return;
+    }
+    const el = gridScrollRef.current;
+    if (!el) return;
+    const update = () => {
+      setGridWin(computeVisibleRange(
+        el.scrollTop,
+        el.clientHeight,
+        gridHeadRef.current?.getBoundingClientRect().height ?? 0,
+        displayRows.length,
+      ));
+    };
+    update();
+    el.addEventListener('scroll', update, { passive: true });
+    return () => el.removeEventListener('scroll', update);
+  }, [settings.gridWrap, displayRows.length, result, sortCol, sortDir, colFilters]);
 
   const flashCell = (row: number, col: number, kind: 'ok' | 'err') => {
     const k = draftKey(row, col);
@@ -3145,7 +3177,7 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
             })}
           </div>
         )}
-        <div className="query-result" style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
+        <div ref={gridScrollRef} className="query-result" style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
           {!result && !error && (
             (() => {
               // 多语句下 active 条目是 cancelled/skipped/pending/running 时给一条明确的空态说明，
@@ -3900,7 +3932,7 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
                     </div>
                   )}
                   <table className={`grid${settings.gridWrap ? ' wrap' : ''}`}>
-                  <thead>
+                  <thead ref={gridHeadRef}>
                     <tr>
                       <th style={{ width: 40 }}>#</th>
                       {visibleColumns.map((c, _vj) => {
@@ -3923,7 +3955,10 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
                     </tr>
                   </thead>
                   <tbody>
-                    {visibleRows.slice(0, renderLimit).map((entry, i) => {
+                    {(settings.gridWrap
+                      ? visibleRows.slice(0, renderLimit)
+                      : visibleRows.slice(gridWin.i0, gridWin.i1 + 1)
+                    ).map((entry, i) => {
                       const realIdx = entry.origIdx;
                       const selected = selRows.has(realIdx);
                       const fullRow = (result.rows ?? [])[realIdx];
@@ -4016,11 +4051,23 @@ export default function QueryWorkspace({ connId, prefillSql, contextLabel, conte
                         </tr>
                       );
                     })}
-                    {renderLimit < displayRows.length && (
+                    {settings.gridWrap && renderLimit < displayRows.length && (
                       <tr ref={gridSentinelRef}>
                         <td colSpan={visibleColumns.length + 1} style={{ textAlign: 'center', color: 'var(--muted)', fontSize: 11 }}>
                           已加载 {Math.min(renderLimit, displayRows.length)} / {displayRows.length} 行 · 继续滚动以加载更多
                         </td>
+                      </tr>
+                    )}
+                    {/* 虚拟窗口的 scrollHeight 支柱（波 100）：未渲染的行以两段空
+                        spacer 撑住，滚动条长度与全量一致；窗口滑动只换 DOM 内容。 */}
+                    {!settings.gridWrap && gridWin.topPad > 0 && (
+                      <tr aria-hidden style={{ height: gridWin.topPad }}>
+                        <td colSpan={visibleColumns.length + 1} style={{ padding: 0, border: 0 }} />
+                      </tr>
+                    )}
+                    {!settings.gridWrap && gridWin.bottomPad > 0 && (
+                      <tr aria-hidden style={{ height: gridWin.bottomPad }}>
+                        <td colSpan={visibleColumns.length + 1} style={{ padding: 0, border: 0 }} />
                       </tr>
                     )}
                   </tbody>
