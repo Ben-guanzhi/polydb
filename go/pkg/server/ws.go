@@ -55,12 +55,13 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		token:    s.token,
 		inFlight: make(map[string]chan struct{}),
 		writeCh:  make(chan []byte, 32),
+		outDone:  make(chan struct{}),
 		shutdown: make(chan struct{}),
 	}
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); sess.runOutbound() }()
+	go func() { defer wg.Done(); defer close(sess.outDone); sess.runOutbound() }()
 	go func() { defer wg.Done(); sess.runInbound() }()
 	wg.Wait()
 
@@ -79,6 +80,9 @@ type wsSession struct {
 	inFlight   map[string]chan struct{}
 	writeCh    chan []byte
 	shutdown   chan struct{}
+	// outDone 在 runOutbound 退出后关闭：stop() 排干 writeCh 前必须等它，
+	// 否则 close 帧会抢在队列里的 query_error 之前落盘（乱序）。
+	outDone chan struct{}
 }
 
 // wsWriteTimeout bounds a single outbound frame write. Without it, a client
@@ -109,6 +113,32 @@ func (s *wsSession) stop() {
 	default:
 		close(s.shutdown)
 	}
+	// 拒绝后必须立刻解除对端的阻塞：只 close(shutdown) 时 runInbound 仍阻塞在
+	// ReadMessage（60s idle deadline），ServeWS 的 wg.Wait() 等着它 → conn.Close
+	// 不执行 → 客户端等 TCP FIN 等满自己的读死线（测试实测 3s+；生产里就是拒绝
+	// 后连接滞留到 idle reaper）。
+	//
+	// 顺序敏感：stop() 通常紧跟着 send()（拒绝即停），而 send 只是把消息排进
+	// writeCh —— 若这里直接 WriteControl close 帧，会抢在 runOutbound 把队列里
+	// 的 query_error 落盘之前，客户端先收到关闭帧、丢掉错误详情。所以先等
+	// runOutbound 退出（close(shutdown) 已让它从 select 退出；正在写的帧落完），
+	// 再排干队列里剩余的帧，然后发 CloseMessage 握手，最后 conn.Close 兜底半开
+	// 场景。对已停会话全部幂等（返回 error 忽略即可）。
+	<-s.outDone
+	for {
+		select {
+		case data := <-s.writeCh:
+			_ = s.conn.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
+			_ = s.conn.WriteMessage(websocket.BinaryMessage, data)
+		default:
+			goto drained
+		}
+	}
+drained:
+	_ = s.conn.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, "rejected"),
+		time.Now().Add(2*time.Second))
+	_ = s.conn.Close()
 }
 
 // wsSendTimeout bounds how long send waits for a writeCh slot. handleQuery

@@ -144,14 +144,14 @@ func TestCommitQueueFallsBackWithoutTx(t *testing.T) {
 // probeSpy 让指定语句返回 0 行，并记录探针（SELECT 1 ...）的执行。
 type probeSpy struct {
 	fakeBackend
-	stmts      []string
-	zeroAt     int // 1-based：第 n 条提交语句返回 0 行；0 = 不归零
-	probeSeen  []string
-	probeRows  int // 探针返回的行数（1 = 行在，0 = 行没了）
-	begins     int
-	commits    int
-	rollbacks  int
-	submits    int // 非探针语句计数
+	stmts     []string
+	zeroAt    int // 1-based：第 n 条提交语句返回 0 行；0 = 不归零
+	probeSeen []string
+	probeRows int // 探针返回的行数（1 = 行在，0 = 行没了）
+	begins    int
+	commits   int
+	rollbacks int
+	submits   int // 非探针语句计数
 }
 
 func (s *probeSpy) PrimaryKeys(namespace, table string) ([]string, error) {
