@@ -82,6 +82,14 @@ export default function App() {
   useEffect(() => {
     if (connId) saveOpenTabs(connId, openState);
   }, [connId, openState]);
+  useEffect(() => {
+    if (!conn) {
+      document.title = "polydb";
+      return;
+    }
+    // 波 94（Navicat 惯例）：标题回答「这个页签连的是哪台服务器」。
+    document.title = conn.name ? `${conn.name} — polydb` : "polydb";
+  }, [conn]);
   const mutateOpenTabs = useCallback((fn: (s: OpenTabsState) => OpenTabsState) => {
     setOpenState((prev) => fn(prev));
   }, []);
