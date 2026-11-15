@@ -1,5 +1,8 @@
 # polydb
 
+<img src="assets/icon.png" width="96" alt="Polydb">
+
+
 **poly**（多）+ **db**（数据库）——多库、多前端、多语言的数据库客户端。
 
 polydb 是一个前端与数据库后端严格解耦的通用数据库客户端：
