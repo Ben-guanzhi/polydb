@@ -14,6 +14,7 @@ use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{body::Bytes, Router};
+use polydb_app_core::driver_broker::DriverBroker;
 use polydb_app_core::AppCore;
 use polydb_core::protocol::error::codes;
 use polydb_core::protocol::error::PolyDBError;
@@ -103,6 +104,11 @@ struct AppState {
     // 已有 httpMaxConcurrentQueries=16 的同款闸门（等待 30s 后 429），Rust
     // 单侧缺席是登记册漏登的漂移。容量 16 与 Go/WS 一致。
     http_gate: Arc<tokio::sync::Semaphore>,
+    // 进程级 driver broker 视图（behavior.md §16.6）。挂在 AppState 上的
+    // Arc 使所有 WS 连接共享同一份依赖图；会话结束只释放该会话的引用。
+    broker: Arc<DriverBroker>,
+    // 阶段 4：进程级 provider 桥接 hub（attached + pending，跨 WS 连接共享）。
+    hub: Arc<provider_hub::ProviderHub>,
     // Some(token) 时启用 Bearer 鉴权（behavior.md §12.1）。
     token: Option<String>,
 }
@@ -118,6 +124,11 @@ impl std::ops::Deref for AppState {
     }
 }
 
+mod provider_callback;
+mod provider_config;
+mod provider_hub;
+mod provider_process;
+mod provider_sandbox;
 mod ws;
 
 #[cfg(test)]
@@ -129,10 +140,32 @@ pub fn router(app: Arc<AppCore>) -> Router {
 
 /// router_with_token 以可选 Bearer token 构建路由（POLYDB_SERVER_TOKEN）。
 pub fn router_with_token(app: Arc<AppCore>, token: Option<String>) -> Router {
+    let broker = Arc::new(DriverBroker::new());
+    // 阶段 9：受限回调面（仅回环 + 随机端口 + 进程级令牌，§16.14.2）。
+    // 失败不阻断启动：provider 进程仍可用（只是不能代执行真实 SQL）。
+    let callback = match provider_callback::CallbackRegistry::start(Arc::clone(&app)) {
+        Ok(reg) => {
+            tracing::info!(url = %reg.callback_url(), "provider callback registry listening");
+            Some(reg)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "provider callback registry unavailable");
+            None
+        }
+    };
+    let hub = provider_hub::ProviderHub::from_env(Arc::clone(&broker), callback);
+    // §16.13.2：按配置拉起 provider 进程（未配置 POLYDB_PROVIDER_PROCS 时无进程）。
+    for key in provider_process::start_process_endpoints(Arc::clone(&hub)) {
+        tracing::warn!(key = %key, "provider process failed to start");
+    }
+    // §16.19：配置对账循环（未设置 POLYDB_PROVIDER_CONFIG_FILE 时为 no-op）。
+    provider_config::start_provider_config_reconcile(Arc::clone(&hub));
     let state = AppState {
         app,
         registry: Arc::new(Mutex::new(HashMap::new())),
         http_gate: Arc::new(tokio::sync::Semaphore::new(HTTP_MAX_CONCURRENT_QUERIES)),
+        broker,
+        hub,
         token,
     };
     let typed = Router::<AppState>::new()

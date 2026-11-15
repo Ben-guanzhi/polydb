@@ -22,7 +22,11 @@
         "schema": { "type": "string", "description": "Schema context for the query" },
         "pagination": { "$ref": "common.json#/definitions/PaginationParams" },
         "timeout_ms": { "type": "integer", "minimum": 0, "description": "Query timeout in milliseconds (0 = no timeout)" },
-        "max_rows": { "type": "integer", "minimum": 0, "description": "Maximum rows to return (0 = use server default)" }
+        "max_rows": { "type": "integer", "minimum": 0, "description": "Maximum rows to return (0 = use server default)" },
+        "provider_key": {
+          "type": "string",
+          "description": "Optional out-of-process driver broker key (behavior.md §16.8). When present, the query is bound to that provider for its whole in-flight lifetime: the broker checks the provider's granted_capabilities contain 'query', then acquires/reliance around execution so a concurrent revoke is refused by the ¬ relied_n(γ) guard. Absent = built-in driver path, unchanged."
+        }
       }
     },
     "QueryResult": {

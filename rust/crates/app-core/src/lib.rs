@@ -23,6 +23,8 @@ use polydb_rt::block_on;
 use polydb_schema_diff as schema_diff;
 use polydb_storage::{keyring_ref, BlobStore, FileKeyring, Keyring, Storage};
 
+pub mod driver_broker;
+
 type Snapshot = schema_diff::Snapshot;
 type TableSnapshot = schema_diff::TableSnapshot;
 

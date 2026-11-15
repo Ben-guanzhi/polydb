@@ -592,6 +592,7 @@ fn batch_query_request_json_roundtrip() {
             pagination: None,
             timeout_ms: Some(5000),
             max_rows: Some(1000),
+            provider_key: None,
         }],
         connection_id: None,
         stop_on_error: true,

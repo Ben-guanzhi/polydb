@@ -22,6 +22,11 @@ pub struct QueryRequest {
     pub timeout_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_rows: Option<u64>,
+    /// 可选的进程外 driver broker key（behavior.md §16.8）。携带时查询在整个
+    /// 在途期绑定到该 provider：能力校验 + acquire/release 维护 reliance。
+    /// 缺席时走内置驱动，语义不变。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

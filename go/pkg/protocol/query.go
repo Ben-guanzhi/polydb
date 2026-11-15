@@ -26,6 +26,10 @@ type QueryRequest struct {
 	Pagination   *PaginationParams `json:"pagination,omitempty" msgpack:"pagination,omitempty"`
 	TimeoutMs    *int64            `json:"timeout_ms,omitempty" msgpack:"timeout_ms,omitempty"`
 	MaxRows      *int64            `json:"max_rows,omitempty" msgpack:"max_rows,omitempty"`
+	// ProviderKey 是可选的进程外 driver broker key（behavior.md §16.8）。
+	// 携带时查询在整个在途期绑定到该 provider：能力校验 + Acquire/Release
+	// 维护 reliance；缺席时走内置驱动，语义不变。
+	ProviderKey string `json:"provider_key,omitempty" msgpack:"provider_key,omitempty"`
 }
 
 type QueryResult struct {

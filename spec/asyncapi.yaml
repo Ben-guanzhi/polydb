@@ -19,6 +19,12 @@ info:
     6. 客户端可随时发送 `query_cancel`
 
     ## 变更记录
+    - 0.3.0 (M18)：**non-breaking**。新增进程外 driver broker 的四条消息
+      （`broker_register` / `broker_revoke` / `broker_state` / `broker_event`）。
+      第三方驱动以 namespaced key 经**异步契约**接入（§6.2 cross-process invocation）：
+      注册是可撤销 effect，撤销受 `¬ relied_n(γ)` 守卫，能力在 interception 处衰减，
+      消费者只依赖常驻 broker 而不感知 backing provider 的装卸。内置
+      `DatabaseKind` 集合与既有查询消息不变。语义见 behavior.md §16。
     - 0.2.0 (M10)：**non-breaking**。`hello` 增加可选 `auth.token`：服务端以 `POLYDB_SERVER_TOKEN`
       启用鉴权时必须携带；失败时服务端发送 `query_error`（`POLYDB_ERR_UNAUTHORIZED`）并关闭连接。
     - 0.1.0 (M9)：**non-breaking**。本文件描述的传输层此前从未实现，M9 在 Rust / Go 双后端落地。
@@ -41,8 +47,30 @@ channels:
         $ref: "#/components/messages/Query"
       queryCancel:
         $ref: "#/components/messages/QueryCancel"
+      brokerRegister:
+        $ref: "#/components/messages/BrokerRegister"
+      brokerRevoke:
+        $ref: "#/components/messages/BrokerRevoke"
+      brokerSetGranted:
+        $ref: "#/components/messages/BrokerSetGranted"
+      providerAttach:
+        $ref: "#/components/messages/ProviderAttach"
+      providerDetach:
+        $ref: "#/components/messages/ProviderDetach"
+      providerResult:
+        $ref: "#/components/messages/ProviderResult"
 
       # ─── 服务端 → 客户端 ───────────────────────────────
+      brokerState:
+        $ref: "#/components/messages/BrokerState"
+      brokerEvent:
+        $ref: "#/components/messages/BrokerEvent"
+      providerAck:
+        $ref: "#/components/messages/ProviderAck"
+      providerExec:
+        $ref: "#/components/messages/ProviderExec"
+      providerCancel:
+        $ref: "#/components/messages/ProviderCancel"
       helloAck:
         $ref: "#/components/messages/HelloAck"
       queryStarted:
@@ -77,6 +105,83 @@ operations:
       $ref: "#/channels/query"
     messages:
       - $ref: "#/channels/query/messages/queryCancel"
+
+  sendBrokerRegister:
+    action: send
+    channel:
+      $ref: "#/channels/query"
+    messages:
+      - $ref: "#/channels/query/messages/brokerRegister"
+
+  sendBrokerRevoke:
+    action: send
+    channel:
+      $ref: "#/channels/query"
+    messages:
+      - $ref: "#/channels/query/messages/brokerRevoke"
+
+  sendBrokerSetGranted:
+    action: send
+    channel:
+      $ref: "#/channels/query"
+    messages:
+      - $ref: "#/channels/query/messages/brokerSetGranted"
+
+  sendProviderAttach:
+    action: send
+    channel:
+      $ref: "#/channels/query"
+    messages:
+      - $ref: "#/channels/query/messages/providerAttach"
+
+  sendProviderDetach:
+    action: send
+    channel:
+      $ref: "#/channels/query"
+    messages:
+      - $ref: "#/channels/query/messages/providerDetach"
+
+  sendProviderResult:
+    action: send
+    channel:
+      $ref: "#/channels/query"
+    messages:
+      - $ref: "#/channels/query/messages/providerResult"
+
+  onProviderAck:
+    action: receive
+    channel:
+      $ref: "#/channels/query"
+    messages:
+      - $ref: "#/channels/query/messages/providerAck"
+
+  onProviderExec:
+    action: receive
+    channel:
+      $ref: "#/channels/query"
+    messages:
+      - $ref: "#/channels/query/messages/providerExec"
+
+  onProviderCancel:
+    action: receive
+    channel:
+      $ref: "#/channels/query"
+    messages:
+      - $ref: "#/channels/query/messages/providerCancel"
+
+  onBrokerState:
+    action: receive
+    channel:
+      $ref: "#/channels/query"
+    messages:
+      - $ref: "#/channels/query/messages/brokerState"
+
+  onBrokerEvent:
+    action: receive
+    channel:
+      $ref: "#/channels/query"
+    messages:
+      - $ref: "#/channels/query/messages/brokerEvent"
 
   onHelloAck:
     action: receive
@@ -177,6 +282,13 @@ components:
             type: integer
             minimum: 0
             description: 最大返回行数（0 = 用服务端默认值）
+          provider_key:
+            type: string
+            description: |
+              可选的进程外 driver broker key（behavior.md §16.8，M18 阶段 3，non-breaking）。
+              携带时查询在整个在途期绑定到该 provider：broker 校验 granted_capabilities
+              含 query，再经 acquire/release 维护 reliance，使并发 revoke 被 ¬ relied_n(γ)
+              守卫拒绝。缺席时走内置驱动，语义不变。与 QueryRequest.provider_key 同一字段。
 
     QueryCancel:
       name: QueryCancel
@@ -191,6 +303,63 @@ components:
           query_id:
             type: string
             format: uuid
+
+    # ─── 进程外 driver broker（M18，behavior.md §16）────────
+    BrokerRegister:
+      name: BrokerRegister
+      summary: 注册一个进程外驱动 provider
+      description: |
+        注册是 tracked effect：broker 持有其逆（撤销登记）。同一 key 重复注册
+        被拒绝（cannot provide twice, Def 19）。protocol_version 先探后解引用。
+      payload:
+        type: object
+        required: [type, provider]
+        properties:
+          type:
+            type: string
+            const: broker_register
+          provider:
+            $ref: "schemas/driver-broker.json#/definitions/DriverProvider"
+
+    BrokerRevoke:
+      name: BrokerRevoke
+      summary: 撤回一个进程外驱动 provider
+      description: |
+        决定与动作分离：reliance > 0 时 `¬ relied_n(γ)` 守卫拒绝撤回；
+        reliance 归零后才 LIFO 应用 accumulator 精确撤回该 fiber 的贡献
+        （Thm 68）。无论成败，服务端按 behavior.md §16.5 的统一 2 帧响应
+        回 broker_state + broker_event(deactivating)，失败时 reason 说明原因。
+      payload:
+        type: object
+        required: [type, key]
+        properties:
+          type:
+            type: string
+            const: broker_revoke
+          key:
+            $ref: "schemas/driver-broker.json#/definitions/DriverProviderKey"
+
+    BrokerSetGranted:
+      name: BrokerSetGranted
+      summary: 原地改写某 key 的生效能力集合（capability attenuation）
+      description: |
+        behavior.md §16.10.2：只能收紧不能放宽——granted_capabilities 必须是
+        已声明 capabilities 的子集，否则拒绝（POLYDB_ERR_INVALID_PARAM）。
+        成功属 notify_d 的 neutral 分类：声明仍被满足，消费者不 reload、
+        依赖图不动（§6.3 的 in-place intercept 更新）。
+      payload:
+        type: object
+        required: [type, key, granted_capabilities]
+        properties:
+          type:
+            type: string
+            const: broker_set_granted
+          key:
+            $ref: "schemas/driver-broker.json#/definitions/DriverProviderKey"
+          granted_capabilities:
+            type: array
+            items:
+              $ref: "schemas/driver-broker.json#/definitions/DriverCapability"
 
     # ─── 服务端消息 ───────────────────────────────────────
     HelloAck:
@@ -208,6 +377,175 @@ components:
           db_version:
             type: string
             description: 已连接数据库的版本号
+
+    BrokerState:
+      name: BrokerState
+      summary: broker 当前视图（全部已注册 provider）
+      description: |
+        对 broker_register / broker_revoke / 能力衰减的响应。broker 常驻，
+        消费者只依赖它；backing provider 装卸不触发消费者 reload（§6.2）。
+      payload:
+        type: object
+        required: [type, providers]
+        properties:
+          type:
+            type: string
+            const: broker_state
+          providers:
+            type: array
+            items:
+              $ref: "schemas/driver-broker.json#/definitions/DriverProviderState"
+          error:
+            $ref: "schemas/error.json#/definitions/PolyDBError"
+
+    BrokerEvent:
+      name: BrokerEvent
+      summary: 依赖图变化分类（notify_d，Def 22）
+      description: |
+        neutral = 仅 granted_capabilities 改变，声明仍被满足，不触发 reload；
+        activating / deactivating 对应注册与撤回。
+      payload:
+        type: object
+        required: [type, event, key]
+        properties:
+          type:
+            type: string
+            const: broker_event
+          event:
+            $ref: "schemas/driver-broker.json#/definitions/DriverBrokerEvent"
+          key:
+            $ref: "schemas/driver-broker.json#/definitions/DriverProviderKey"
+          reason:
+            type: string
+            description: 人类可读原因（如守卫拒绝撤回时的 reliance 计数）
+
+    # ─── 进程外 provider 异步 SQL 契约（M18 阶段 4，behavior.md §16.9）──
+    ProviderAttach:
+      name: ProviderAttach
+      summary: provider → 宿主，登记本会话为某 key 的执行端（acquisition）
+      payload:
+        type: object
+        required: [type, key]
+        properties:
+          type:
+            type: string
+            const: provider_attach
+          key:
+            $ref: "schemas/driver-broker.json#/definitions/DriverProviderKey"
+          commutative:
+            type: boolean
+            description: |
+              witnessed coeffect（Thm 47，§16.18）：声明本 key 的服务**实例可互换**——
+              多个 provider 可并存服务同一 key（负载分担，任一退出不影响其余）。
+              缺省 false：同 key 的第二次 attach 是 rolling update（替换），不是并存。
+
+    ProviderDetach:
+      name: ProviderDetach
+      summary: provider → 宿主，撤销执行端登记（acquisition 的逆）
+      payload:
+        type: object
+        required: [type, key]
+        properties:
+          type:
+            type: string
+            const: provider_detach
+          key:
+            $ref: "schemas/driver-broker.json#/definitions/DriverProviderKey"
+
+    ProviderResult:
+      name: ProviderResult
+      summary: provider → 宿主，回传一次 SQL 执行结果
+      payload:
+        type: object
+        required: [type, query_id]
+        properties:
+          type:
+            type: string
+            const: provider_result
+          query_id:
+            type: string
+            format: uuid
+          result:
+            $ref: "schemas/query.json#/definitions/QueryResult"
+          error:
+            $ref: "schemas/error.json#/definitions/PolyDBError"
+
+    ProviderAck:
+      name: ProviderAck
+      summary: 宿主 → provider，attach/detach 的确认（§16.5 同构 2 帧中的状态帧）
+      description: |
+        进程端点（kind 2）会额外收到 callback_url 与 callback_token：
+        前者是宿主进程内的**仅回环**回调端点（§16.14.2），后者是本次 attach
+        的随机令牌；provider 用它们把 SQL 交回宿主执行，因此**永远接触不到
+        connection_id 与凭据**。会话端点（kind 1）不带这两个字段。
+      payload:
+        type: object
+        required: [type, event, key, attached]
+        properties:
+          type:
+            type: string
+            const: provider_ack
+          event:
+            $ref: "schemas/driver-broker.json#/definitions/DriverBrokerEvent"
+          key:
+            $ref: "schemas/driver-broker.json#/definitions/DriverProviderKey"
+          attached:
+            type: array
+            items:
+              $ref: "schemas/driver-broker.json#/definitions/DriverProviderKey"
+            description: 宿主当前所有已登记的 attached keys
+          callback_url:
+            type: string
+            description: 宿主进程内的仅回环回调端点地址（仅进程端点收到）
+          callback_token:
+            type: string
+            description: 本次 attach 的回调令牌（仅进程端点收到；不落盘、不进日志）
+          error:
+            $ref: "schemas/error.json#/definitions/PolyDBError"
+
+    ProviderExec:
+      name: ProviderExec
+      summary: 宿主 → provider，把一次查询推过桥接边界（emission）
+      description: |
+        一旦写入 socket 即不可逆（§6.1）。provider 应执行 SQL 并回
+        provider_result；收到 provider_cancel 时 best-effort 中断。
+
+        进程端点（kind 2）的 exec 带 **handle**（不透明，§16.14.1）而不是
+        connection_id：provider 用 handle 回调宿主执行 SQL，全程看不到连接
+        元数据与凭据。会话端点（kind 1）不带 handle（它本就在同一会话里）。
+      payload:
+        type: object
+        required: [type, query_id, sql]
+        properties:
+          type:
+            type: string
+            const: provider_exec
+          query_id:
+            type: string
+            format: uuid
+          sql:
+            type: string
+          handle:
+            type: string
+            description: 不透明连接句柄（仅进程端点收到；§16.14.1）
+          params:
+            type: array
+            items:
+              $ref: "schemas/common.json#/definitions/Value"
+
+    ProviderCancel:
+      name: ProviderCancel
+      summary: 宿主 → provider，best-effort compensation（§16.9.3）
+      payload:
+        type: object
+        required: [type, query_id]
+        properties:
+          type:
+            type: string
+            const: provider_cancel
+          query_id:
+            type: string
+            format: uuid
 
     QueryStarted:
       name: QueryStarted

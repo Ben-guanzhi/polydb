@@ -4,12 +4,15 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use super::provider_hub::{EndpointKind, ProviderHub, ProviderOutcome, SessionEndpoint};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
+use polydb_app_core::driver_broker::{BrokerTransition, DriverBroker};
 use polydb_app_core::AppCore;
+use polydb_core::protocol::driver_broker::{DriverBrokerEvent, DriverProviderKey};
 use polydb_core::protocol::error::codes;
 use polydb_core::protocol::error::PolyDBError;
 use polydb_core::protocol::ws::{ClientMessage, ServerMessage};
@@ -52,9 +55,11 @@ pub async fn ws_upgrade(
     }
     let app = state.app.clone();
     let token = state.token.clone();
+    let broker = state.broker.clone();
+    let hub = state.hub.clone();
     ws.max_message_size(MAX_WS_MESSAGE)
         .max_frame_size(MAX_WS_MESSAGE)
-        .on_upgrade(move |socket| session(app, token, socket))
+        .on_upgrade(move |socket| session(app, token, broker, hub, socket))
 }
 
 /// Origin 是否可信（behavior.md §12.2）：无 Origin 头放行（TUI/CLI 等非浏览器
@@ -101,7 +106,13 @@ fn origin_host(origin: &str) -> Option<&str> {
     }
 }
 
-async fn session(app: AppRef, token: Option<String>, socket: WebSocket) {
+async fn session(
+    app: AppRef,
+    token: Option<String>,
+    broker: Arc<DriverBroker>,
+    hub: Arc<ProviderHub>,
+    socket: WebSocket,
+) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
     // 半开探活的 ping 走独立通道直达 socket：ServerMessage 是协议消息，Ping
@@ -111,12 +122,19 @@ async fn session(app: AppRef, token: Option<String>, socket: WebSocket) {
     let mut session = Session {
         app,
         token,
+        broker,
+        hub: Arc::clone(&hub),
+        endpoint_id: 0,
         tx: tx.clone(),
         raw_tx,
         connection_id: None,
         authed: false,
+        registered_keys: Vec::new(),
+        broker_in_flight: Arc::new(BrokerInFlight::default()),
         in_flight: Arc::new(Mutex::new(HashMap::new())),
     };
+    // 端点 id：归属判定用（§16.12.1）。会话级唯一。
+    session.endpoint_id = hub.next_endpoint_id();
 
     let mut send = tokio::spawn(async move {
         // 两个发送通道：`rx` 承载协议消息（msgpack），`raw_rx` 承载原始 ws 帧
@@ -184,6 +202,21 @@ async fn session(app: AppRef, token: Option<String>, socket: WebSocket) {
     }
 
     session.cancel_all();
+    // behavior.md §16.8：会话卸载 = 应用本会话贡献的 accumulator。
+    // cancel_all 只是发取消通知；必须等在途查询全部走完出口并完成 release
+    // （wait_idle），再逐个 revoke 本会话成功注册的 keys——否则 reliance 仍
+    // >0，守卫拒绝，key 反而永久泄漏。只撤自己的 key，故 recovery
+    // exactness（Thm 68）不受其它会话影响。
+    session
+        .broker_in_flight
+        .wait_idle(Duration::from_secs(5))
+        .await;
+    for key in session.registered_keys.clone() {
+        let _ = session.broker.revoke(&key);
+    }
+    // 阶段 4：断连自动 detach（§16.9.6）。只移除本会话登记的 keys，
+    // 用 same_channel 保护 rolling update 后新会话的登记不被误删。
+    session.hub.drop_session(session.endpoint_id);
     // 先丢掉 session（内含 tx/raw_tx 的克隆）再 drop 原始两支发送端：否则
     // rx.recv()/raw_rx.recv() 永不返回 None，outbound 任务收不了尾，连接在
     // 协议要求"关闭"时（如鉴权失败）保持悬挂。raw_tx 只活在 session 里，
@@ -198,11 +231,25 @@ async fn session(app: AppRef, token: Option<String>, socket: WebSocket) {
 struct Session {
     app: AppRef,
     token: Option<String>,
+    // 进程级共享视图（AppState.broker），非 per-session；与 Go wsSession.broker
+    // 严格镜像（behavior.md §16.6）。
+    broker: Arc<DriverBroker>,
+    // 阶段 4：进程级 provider 桥接 hub（attached + pending）。
+    hub: Arc<ProviderHub>,
+    // 本会话的 provider 端点 id（§16.12.1 的归属判定：detach / 断连 / 降级
+    // 只移除自己的登记）。会话端点用它作 ProviderEndpoint::id。
+    endpoint_id: u64,
     tx: mpsc::UnboundedSender<ServerMessage>,
     // 半开探活 ping 的直发通道（ws 帧，绕过 msgpack 编码）。
     raw_tx: mpsc::UnboundedSender<Message>,
     connection_id: Option<ConnectionId>,
     authed: bool,
+    // 本会话**成功注册**的 broker keys（behavior.md §16.8）。连接关闭时逐个
+    // revoke，应用该会话贡献的 accumulator；被 ¬ relied_n(γ) 守卫拒绝的保留。
+    // 只记自己的 key，不记其它会话的，保证 recovery exactness（Thm 68）。
+    registered_keys: Vec<String>,
+    // 会话级在途 broker 绑定计数；收尾等它归零再 revoke（见 BrokerInFlight）。
+    broker_in_flight: Arc<BrokerInFlight>,
     // 共享给每个查询的后台任务：完成路径必须注销自己，否则条目无界增长、
     // 对已完成查询的取消永远石沉大海。std Mutex 够用——临界区里没有 await。
     in_flight: Arc<Mutex<HashMap<Uuid, Arc<Notify>>>>,
@@ -210,6 +257,70 @@ struct Session {
 
 // 单会话并发在途查询闸门，与 Go 侧 wsMaxConcurrentQueries 对齐。
 const WS_MAX_IN_FLIGHT: usize = 16;
+
+/// 会话级在途 broker 绑定计数（behavior.md §16.8）。
+///
+/// `session()` 的收尾必须等所有 `tokio::spawn` 的查询任务走完出口并完成
+/// `release`，再 `revoke` 本会话的 keys；否则 reliance 仍 >0，守卫拒绝撤回，
+/// 本会话的登记反而永久泄漏。与 Go 侧 `wsSession.queryWG` 严格镜像。
+#[derive(Default)]
+struct BrokerInFlight {
+    count: std::sync::atomic::AtomicUsize,
+    notify: tokio::sync::Notify,
+}
+
+impl BrokerInFlight {
+    fn enter(&self) {
+        self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn leave(&self) {
+        self.count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    /// 等待计数归零（带上限，避免异常路径悬挂整个连接收尾）。
+    async fn wait_idle(&self, limit: Duration) {
+        let deadline = tokio::time::Instant::now() + limit;
+        loop {
+            if self.count.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return;
+            }
+            let notified = self.notify.notified();
+            // 第三分支是对 `notify_waiters` 丢唤醒的兜底：1ms 后无条件重新
+            // 检查计数，避免「leave 恰好发生在 notified 创建之前」导致死等
+            // 到 5s 上限。
+            tokio::select! {
+                _ = notified => {},
+                _ = tokio::time::sleep_until(deadline) => return,
+                _ = tokio::time::sleep(Duration::from_millis(1)) => {},
+            }
+        }
+    }
+}
+
+/// 在途查询对 broker provider 的 reliance 绑定（behavior.md §16.8）。
+///
+/// `acquire` 已在创建前由 `check_and_acquire` 原子完成；本 guard 的唯一职责是
+/// 在**所有**出口（正常完成 / 执行错误 / cancel / timeout / 二次 cancel 竞态 /
+/// panic unwind）执行 `release`。用 `Drop` 而非逐个出口手写，避免遗漏造成
+/// reliance 永久泄漏、守卫再也不放开。同时递减会话级计数并唤醒收尾等待。
+/// 与 Go 侧 `runQuery` 的合成 `defer{Release; Done()}` 严格镜像。
+struct BrokerRelianceGuard {
+    broker: Arc<DriverBroker>,
+    key: String,
+    in_flight: Arc<BrokerInFlight>,
+}
+
+impl Drop for BrokerRelianceGuard {
+    fn drop(&mut self) {
+        self.broker.release(&self.key);
+        self.in_flight.leave();
+    }
+}
 
 fn register_in_flight(
     registry: &Mutex<HashMap<Uuid, Arc<Notify>>>,
@@ -336,6 +447,99 @@ async fn receive_loop(
             ClientMessage::QueryCancel { query_id } => {
                 session.handle_cancel(query_id);
             }
+            // behavior.md §16.5：不受 §12.2 的 query 认证门禁约束（只登记
+            // key/capabilities，不接触用户数据、不执行 SQL）。
+            ClientMessage::BrokerRegister { provider } => {
+                let key = provider.key.clone();
+                let tr = session.broker.register(provider);
+                // 只有成功登记才记入本会话的 keys（失败不产生转移，Def 19）。
+                if tr.error.is_none() {
+                    session.registered_keys.push(key.clone());
+                }
+                session.send_broker_transition(key, tr);
+            }
+            ClientMessage::BrokerRevoke { key } => {
+                let k: DriverProviderKey = key.clone();
+                let tr = session.broker.revoke(&key);
+                // 撤回成功则从本会话清单移除，避免连接关闭时重复 revoke。
+                if tr.error.is_none() {
+                    session.registered_keys.retain(|x| x != &key);
+                }
+                session.send_broker_transition(k, tr);
+            }
+            // 阶段 5：能力衰减的 wire 入口（§16.10.2）。只能收紧不能放宽；
+            // 成功属 notify_d 的 neutral 分类（不 reload、依赖图不动）。
+            ClientMessage::BrokerSetGranted {
+                key,
+                granted_capabilities,
+            } => {
+                let tr = session.broker.set_granted(&key, granted_capabilities);
+                session.send_broker_transition(key, tr);
+            }
+            // ─── 阶段 4：provider 异步 SQL 契约（§16.9）──────────
+            ClientMessage::ProviderAttach { key, commutative } => {
+                // §16.12.1：会话端点是执行端抽象的一个实现。
+                // §16.18：commutative 由 attach 方自证（witnessed，Thm 47）。
+                let endpoint = Arc::new(SessionEndpoint::new(
+                    session.endpoint_id,
+                    session.tx.clone(),
+                ));
+                let tr = session
+                    .hub
+                    .attach(key.clone(), endpoint, commutative.unwrap_or(false));
+                let (attached, error, event) = match tr {
+                    Ok(list) => (list, None, DriverBrokerEvent::Activating),
+                    Err(e) => (
+                        session.hub.attached_keys(),
+                        Some(e),
+                        DriverBrokerEvent::Neutral,
+                    ),
+                };
+                let _ = session.send(ServerMessage::ProviderAck {
+                    event,
+                    key,
+                    attached,
+                    callback_url: None,
+                    callback_token: None,
+                    error,
+                });
+            }
+            ClientMessage::ProviderDetach { key } => {
+                let tr = session.hub.detach(&key, session.endpoint_id);
+                let (attached, error, event) = match tr {
+                    Ok(list) => (list, None, DriverBrokerEvent::Deactivating),
+                    Err(e) => (
+                        session.hub.attached_keys(),
+                        Some(e),
+                        DriverBrokerEvent::Neutral,
+                    ),
+                };
+                let _ = session.send(ServerMessage::ProviderAck {
+                    event,
+                    key,
+                    attached,
+                    callback_url: None,
+                    callback_token: None,
+                    error,
+                });
+            }
+            ClientMessage::ProviderResult {
+                query_id,
+                result,
+                error,
+            } => {
+                // 迟到的结果（pending 已被 cancel/timeout 清除）→ complete
+                // 返回 false，被静默扣住（withhold，§16.9.2 step 5）。
+                let outcome: ProviderOutcome = match (result, error) {
+                    (Some(r), _) => Ok(r),
+                    (None, Some(e)) => Err(e),
+                    (None, None) => Err(PolyDBError::new(
+                        codes::INVALID_PARAM,
+                        "provider_result has neither result nor error",
+                    )),
+                };
+                let _ = session.hub.complete(query_id, outcome);
+            }
         }
     }
 }
@@ -343,6 +547,23 @@ async fn receive_loop(
 impl Session {
     fn send(&self, msg: ServerMessage) -> bool {
         self.tx.send(msg).is_ok()
+    }
+
+    /// 按 behavior.md §16.5 的「统一 2 帧响应」发消息：先 `broker_state`
+    /// （操作后终态视图；失败时为操作前视图），再 `broker_event`
+    /// （`notify_d` 分类 + 请求 key；失败时带 reason）。与 Go 侧
+    /// `wsSession.sendBrokerTransition` 严格镜像。
+    fn send_broker_transition(&self, key: DriverProviderKey, tr: BrokerTransition) {
+        let reason = tr.error.as_ref().map(|e| e.message.clone());
+        let _ = self.send(ServerMessage::BrokerState {
+            providers: tr.state,
+            error: tr.error,
+        });
+        let _ = self.send(ServerMessage::BrokerEvent {
+            event: tr.event,
+            key,
+            reason,
+        });
     }
 
     /// 半开探活的 ping 需要直达 socket（不是协议消息）：经 outbound 任务的
@@ -406,6 +627,41 @@ impl Session {
             return;
         }
 
+        // behavior.md §16.8：可选的 broker 绑定。原子完成「能力校验 + acquire」
+        // （同一临界区，避免 revoke 插进校验与绑定之间，Thm 71）。guard 从这里
+        // 一直活到后台任务结束，Drop 覆盖所有出口的 release。
+        let provider_key = request.provider_key.clone();
+        let reliance_guard = match provider_key.as_deref() {
+            Some(key) => {
+                if let Err(e) = self.broker.check_and_acquire(key) {
+                    let _ = self.send(ServerMessage::QueryError { query_id, error: e });
+                    return;
+                }
+                // §16.9.2 step 2：必须在 register_in_flight / QueryStarted
+                // **之前**查 attached 表。未 attach 时立刻归还 reliance，
+                // 不进 in_flight、不发 QueryStarted。
+                if self.hub.provider_endpoint(key).is_none() {
+                    self.broker.release(key);
+                    let _ = self.send(ServerMessage::QueryError {
+                        query_id,
+                        error: PolyDBError::new(
+                            codes::DRIVER_NOT_AVAILABLE,
+                            format!("no attached provider for key: {key}"),
+                        ),
+                    });
+                    return;
+                }
+                let in_flight = Arc::clone(&self.broker_in_flight);
+                in_flight.enter();
+                Some(BrokerRelianceGuard {
+                    broker: Arc::clone(&self.broker),
+                    key: key.to_string(),
+                    in_flight,
+                })
+            }
+            None => None,
+        };
+
         // behavior.md §6/§12：同一连接可并发多个查询。注册表满或 query_id
         // 重复时如实拒绝——重复 id 若覆盖会孤儿化先前查询的取消通道（Go 侧
         // registerQuery 同款拒绝）。客户端可由是否收到过 QueryStarted 帧区分。
@@ -426,6 +682,7 @@ impl Session {
 
         let app = Arc::clone(&self.app);
         let tx = self.tx.clone();
+        let hub = Arc::clone(&self.hub);
         let sql = request.sql.clone();
         let params = request.params.clone();
         let in_flight = Arc::clone(&self.in_flight);
@@ -438,15 +695,82 @@ impl Session {
         let max_rows = crate::query_row_limit(&request);
 
         tokio::spawn(async move {
+            // guard **必须移进 async move 块**：`async move` 只捕获闭包体实际
+            // 引用的变量。若把它留在 handle_query 栈上，函数返回时立刻 Drop
+            // → release，reliance 在查询还没开始时就归零，¬ relied_n(γ)
+            // 守卫形同虚设（契约测试会抓到 reliance=0）。放在块内让它活到
+            // 任务结束（含所有出口与 panic unwind）才 Drop→release。
+            let _reliance_guard = reliance_guard;
             let outcome = tokio::select! {
-                r = app.execute(conn_id, &sql, &params) => Some(r),
-                _ = cancel.notified() => None,
+                // §16.9：带 provider_key 时把 app.execute 换成「发 provider_exec
+                // + 等 provider_result」。不带时逐字保留内置驱动路径。
+                r = async {
+                    match provider_key.as_deref() {
+                        None => app.execute(conn_id, &sql, &params).await,
+                        Some(key) => {
+                            let Some(endpoint) = hub.provider_endpoint(key) else {
+                                return Err(polydb_core::CoreError::from(PolyDBError::new(
+                                    codes::DRIVER_NOT_AVAILABLE,
+                                    format!("provider detached before exec: {key}"),
+                                )));
+                            };
+                            // 端点的补偿通道：cancel/timeout 时向它发
+                            // provider_cancel（best-effort，§16.9.3）。
+                            let rx = hub.register_pending(query_id, endpoint.clone());
+                            // 进程端点走回调面：把 connection_id 换成**不透明
+                            // handle**，provider 因此永远看不到连接元数据与凭据
+                            //（§16.14.1）。会话端点不需要。
+                            let handle = if endpoint.kind() == EndpointKind::Process {
+                                let h = hub.handle_for(&conn_id.to_string());
+                                if h.is_empty() {
+                                    hub.cancel(query_id);
+                                    return Err(polydb_core::CoreError::from(PolyDBError::new(
+                                        codes::DRIVER_NOT_AVAILABLE,
+                                        "provider callback handle unavailable",
+                                    )));
+                                }
+                                Some(h)
+                            } else {
+                                None
+                            };
+                            // emission：写入即不可逆（§6.1）。投递经端点抽象，
+                            // 传输由端点自己决定（会话端点 / 未来的进程端点）。
+                            if !endpoint.emit(&ServerMessage::ProviderExec {
+                                query_id,
+                                sql: sql.clone(),
+                                handle,
+                                params: params.clone(),
+                            }) {
+                                hub.cancel(query_id);
+                                return Err(polydb_core::CoreError::from(PolyDBError::new(
+                                    codes::DRIVER_NOT_AVAILABLE,
+                                    format!("provider endpoint unreachable: {key}"),
+                                )));
+                            }
+                            match rx.await {
+                                Ok(Ok(result)) => Ok(result),
+                                Ok(Err(e)) => Err(polydb_core::CoreError::from(e)),
+                                Err(_) => Err(polydb_core::CoreError::from(PolyDBError::new(
+                                    codes::DRIVER_NOT_AVAILABLE,
+                                    "provider result channel closed",
+                                ))),
+                            }
+                        }
+                    }
+                } => Some(r),
+                _ = cancel.notified() => {
+                    // withhold + compensation（§16.9.2/16.9.3）：清除 pending
+                    // 使迟到的 provider_result 被扣住，并发 best-effort cancel。
+                    hub.cancel(query_id);
+                    None
+                },
                 _ = async {
                     match timeout {
                         Some(d) => tokio::time::sleep(d).await,
                         None => std::future::pending().await,
                     }
                 } => {
+                    hub.cancel(query_id);
                     retire_in_flight(&in_flight, query_id);
                     let _ = tx.send(ServerMessage::QueryError {
                         query_id,

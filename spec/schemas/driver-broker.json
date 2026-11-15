@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://polydb.dev/schemas/driver-broker.json",
+  "title": "PolyDB Out-of-Process Driver Broker",
+  "description": "Contract for third-party database drivers that join polydb as out-of-process providers over the WebSocket async contract. Internal/built-in drivers (the closed DatabaseKind set) are untouched; a provider is identified by a namespaced key (§6.6 key namespacing K x P), declares its coeffects, and is registered/unregistered through tracked effects with a LIFO accumulator (§3.1).",
+  "definitions": {
+    "DriverProviderKey": {
+      "type": "string",
+      "description": "Namespaced provider key 'P:K' — P identifies the interface-defining package, K the driver kind. Eliminates key collision by construction (§6.6). Never equals a built-in DatabaseKind wire value."
+    },
+    "DriverCapability": {
+      "type": "string",
+      "enum": ["query", "execute", "metadata", "transaction", "kv"],
+      "description": "Capability bit a provider may request. The broker attenuates this set at interception time (§6.3): an untrusted provider is granted a subset, e.g. read-only query/metadata."
+    },
+    "DriverProvider": {
+      "type": "object",
+      "required": ["key", "kind", "protocol_version", "capabilities"],
+      "properties": {
+        "key": {
+          "$ref": "#/definitions/DriverProviderKey",
+          "description": "Unique namespaced key. A second provider claiming the same key is rejected (cannot provide twice, Def 19) — unless the provider declares commutative (Thm 47 witnessed coeffect): the key's service is instance-interchangeable, so multiple providers may serve it concurrently (§16.18)."
+        },
+        "kind": {
+          "type": "string",
+          "description": "Wire name of the database dialect this provider speaks (e.g. 'duckdb'); informational, NOT a DatabaseKind enum value."
+        },
+        "protocol_version": {
+          "type": "integer",
+          "description": "Version of the broker async contract the provider was built against; version probe precedes dereference (plugin-abi.md §2.3)."
+        },
+        "capabilities": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/DriverCapability" },
+          "description": "Declared capability requests; the inject declaration is a capability request known before the component runs (§6.3)."
+        },
+        "commutative": {
+          "type": "boolean",
+          "description": "Witnessed coeffect (Thm 47): the provider asserts its key is a commutative table — instances are interchangeable, requests may be served by any of them, and withdrawing one never disturbs the others. Enables multi-instance attachment and load balancing (§16.18); without it a second attach on the same key is a rolling update (replacement), not coexistence."
+        },
+        "endpoint": {
+          "type": "string",
+          "description": "Optional transport hint for the out-of-process channel (WS URL / stdio pipe name). Empty means the current WS connection is the bridge."
+        }
+      }
+    },
+    "DriverProviderState": {
+      "type": "object",
+      "required": ["key", "kind", "protocol_version", "capabilities", "granted_capabilities", "reliance"],
+      "properties": {
+        "key": { "$ref": "#/definitions/DriverProviderKey" },
+        "kind": { "type": "string" },
+        "protocol_version": { "type": "integer" },
+        "capabilities": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/DriverCapability" },
+          "description": "Declared (requested) capabilities."
+        },
+        "granted_capabilities": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/DriverCapability" },
+          "description": "Effective capabilities after interception; a subset of capabilities. Changed at runtime without a reload (§6.3 in-place intercept update)."
+        },
+        "reliance": {
+          "type": "integer",
+          "description": "Number of in-flight operations bound to this provider. Non-zero reliance forbids withdrawal: the ¬ relied_n(γ) guard (Def 55)."
+        }
+      }
+    },
+    "DriverBrokerEvent": {
+      "type": "string",
+      "enum": ["activating", "deactivating", "neutral"],
+      "description": "Classification of a context change by notify_d (Def 22). 'neutral' is a granted-capability change that satisfies the same declarations and therefore triggers no reload."
+    }
+  }
+}

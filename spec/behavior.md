@@ -53,6 +53,12 @@
 - `query_id` 必须在**同一连接内已提交过的 `query`** 中；未提交的 id 返回 `query_error`（`POLYDB_ERR_INVALID_PARAM`）
 - 同一连接内可并发多个 `query`，取消只影响对应 `query_id`
 - `timeout_ms` 生效：超时返回 `query_error`（`POLYDB_ERR_TIMEOUT`）
+- **取消信号与完成信号分离**（M18 阶段 10）：**未被取消**的正常完成查询**不得**
+  被误报为 `query_cancelled`。判定取消的依据是**显式的取消事件**（客户端
+  `query_cancel` 或会话收尾），而非「取消通道被关闭」——因为查询正常完成时
+  也要关闭取消通道以回收 watcher，两者若共用同一信号，完成与取消就会竞态
+  （完成 → 注销 → 关通道 → watcher 误触发取消 → 结果被吞、客户端收到
+  `query_cancelled`）。实现口径见 §16.15。
 
 ### 2.3 超时
 - `timeout_ms = 0` 表示无超时
@@ -763,3 +769,797 @@ Redis、跨种类、过期 id、未整组勾选）。
 只替换文件里 `"expected"` 这一个 JSON 值，其余逐字节不动），SQL **必须人工复核**后才提交；
 Rust 侧加载器只做只读验证，构成第二实现。语料里 `selected: null` 表示「全部条目」，
 `[]` 表示「一条都不勾」，两者语义不同，写死在加载器里。
+
+---
+
+## 16. 进程外 driver broker（M18，non-breaking）
+
+本节定义第三方数据库驱动如何**不进入封闭 `DatabaseKind` 集合**、以独立进程经
+WebSocket 异步契约接入。契约类型见 `spec/schemas/driver-broker.json`，消息见
+`spec/asyncapi.yaml` 的 `broker_register` / `broker_revoke` / `broker_state` /
+`broker_event`。内置驱动与既有查询消息**不变**；本节的 broker 是叠加在
+`app-core` 之外的一层，不替换 `open_driver` / `OpenDriver` 分派。
+
+### 16.1 为什么是进程外 broker，而不是进程内 dlopen
+
+- **系统边界**（§6.1）：SQL 执行、事务提交、结果推送都是 **emission**——数据一旦
+  通过通道离开系统，`id_Γ` 既不可追踪也不可撤销（「a message already sent stays
+  sent」）。只有 acquisition（安装登记记录）在系统边界内、可配逆。把 provider 放进
+  独立进程，宿主的边界止于 bridge；已发出的 SQL 用 withhold / compensation 处理，
+  且 compensation 的 commutation 必须在更粗的等价关系上重新建立，元理论不自动继承。
+- **异步契约**（§6.2）：跨进程暴露的接口「must be designed against an asynchronous
+  contract」。本项目现成的 `spec/asyncapi.yaml` WS 查询流（含 `query_cancel`）即该契约，
+  不新增同步 RPC。
+- **隔离与能力**（§6.3）：language-level access control 不足以约束本机代码；独立进程
+  提供执行边界，宿主侧 bridge 是普通 fiber，其能力可被 interception 衰减。明文密码
+  不下发给 provider。
+- **双实现一致性**：进程内 cdylib 天然只有 Rust 一侧，无法与 Go 端对拍，违反 §7 红线。
+  经 spec 契约接入的进程外 provider 两端各有一个 broker 实现，契约测试仍可覆盖。
+
+### 16.2 模型：broker 常驻，provider 作 backing fiber
+
+- **broker 是唯一常驻 provider**，消费者只依赖它。backing provider 的装卸被 broker
+  吸收（「the broker absorbs this perturbation」），消费者看不到依赖变化，**不触发
+  reload**（§6.2）。这是选 broker 而非 exclusive binding 的全部理由。
+- provider 的标识是 **namespaced key** `P:K`（`P` = 定义接口的包，`K` = 驱动种类），
+  按 §6.6 的 key namespacing `K → K × P` 消除 key collision。**不得**等于任何内置
+  `DatabaseKind` wire 值；`kind` 字段只是方言信息，不参与分派。
+- `protocol_version` 先探、再解引用：版本不符时 broker 拒绝注册，不去解释函数表
+  （`docs/plugin-abi.md` §2.3 的同口径）。
+
+### 16.3 时间维度：注册是可撤销 effect
+
+- 每次 `broker_register` 是一个 **tracked effect**：broker 把「撤销该 key 的登记」
+  作为显式逆 `φ` 持有。加载 = 跑一步并累积逆；卸载 = **LIFO** 应用 `φ`（§3.1
+  twisted composition、Thm 16）。`ctx.set(key, value)` 本身就是 `ctx.effect` 调用，
+  coeffect 操作是 effect、effect 可逆（§3.2 的 synergy）。
+- **recovery exactness**（Thm 68）：一个 provider 的 accumulator 只撤回它自己的贡献，
+  即便其它 provider 的装卸与之任意交错。因此 `broker_state` 的终态与「按最终配置
+  一次性静态装配」一致（Thm 80 汇流），与注册顺序无关。
+- 每个 provider 的 `reliance` 记录绑定到它的在途操作数。**决定与动作分离**：
+  `broker_revoke` 只做决定；真正应用 accumulator 的动作受 `¬ relied_n(γ)` 守卫，
+  `reliance > 0` 时拒绝撤回并回 `broker_event(deactivating)` + `reason`。
+  provider 的生命周期严格包住其消费者（Thm 70）。
+
+### 16.4 空间维度：声明、满足与通知
+
+- `DriverProvider.capabilities` 是 **coeffect specification / inject 声明**，即
+  capability request；它静态可知，broker 在 provider 运行前即可审查（§6.3）。
+- `DriverProviderState.granted_capabilities` 是 **interception** 之后的生效集合，
+  必为 `capabilities` 的子集。因为 interception 只改变「依赖**如何**被调用」、
+  不改变「是否被满足」，它可在运行时原地改写，**不触发 reload、不扰动依赖图**
+  （§6.3；实现上对应 Cordis §5.2.1 的 `intercept` 原地更新）。典型用法：不可信
+  provider 只获 `query` / `metadata`，核心 provider 保留 `execute` / `transaction`。
+- `notify_d` 把每次上下文变化分类为 `DriverBrokerEvent`（Def 22）：
+  - `activating`：`broker_register` 使某声明从「不满足」变「满足」；
+  - `deactivating`：`broker_revoke` 使某声明从「满足」变「不满足」；
+  - `neutral`：**仅** `granted_capabilities` 改变，声明仍被满足 → 不发
+    `broker_state` 之外的事件、不触发消费者重载。
+- **cannot provide twice / revoke absent**（Def 19）：同一 key 二次注册、或撤回
+  未登记的 key，都是错误且**不产生转移**；回 `broker_state` 的 `error` 字段，
+  错误码 `POLYDB_ERR_INVALID_PARAM`。
+
+### 16.5 消息与错误
+
+| 消息 | 方向 | 语义 |
+|---|---|---|
+| `broker_register` | 客户端 → 服务端 | 提交 `DriverProvider`；回 2 帧（见下） |
+| `broker_revoke` | 客户端 → 服务端 | 提交 key；回 2 帧（见下） |
+| `broker_state` | 服务端 → 客户端 | 全部 `DriverProviderState` 视图；失败时 `error` 带 `PolyDBError` |
+| `broker_event` | 服务端 → 客户端 | `notify_d` 的分类结果，带 key 与可选 `reason` |
+
+**统一 2 帧响应（M18 阶段 2 起，双端严格一致）**：每个 `broker_register` /
+`broker_revoke` 请求**恰好**回两帧，先 `broker_state` 再 `broker_event`：
+
+- `broker_state.providers` = 操作后的终态视图（失败时为操作前的视图，因为失败
+  **不产生转移**）；`broker_state.error` = 失败时的 `PolyDBError`，成功为缺席。
+- `broker_event.event` = `notify_d` 分类：注册成功 `activating`、撤回
+  （成功或守卫拒绝）`deactivating`、其余失败 `neutral`；
+  `broker_event.key` = 请求的 key；`broker_event.reason` = 失败时的错误文案
+  （取 `error.message`），成功为缺席。
+
+由此消除「成功回几帧、守卫拒绝回几帧」的歧义，契约测试可按固定 2 帧归集，
+不依赖帧序假设之外的实现细节。
+
+- 错误一律复用既有 `PolyDBError` 与既有错误码（下表），**不新增 `POLYDB_ERR_*`**：
+  `POLYDB_ERR_INVALID_PARAM`（重复注册 / 撤回未登记 / 版本不符 / 能力集合非法）、
+  `POLYDB_ERR_DRIVER_NOT_AVAILABLE`（`reliance > 0` 时守卫拒绝撤回）。
+- 消息一律 **MessagePack**（§5 编码约定），JSON 仅调试。broker 消息**不携带
+  `query_id`**：它不是查询，不进 `in_flight` 在途表。
+- **鉴权**：broker 消息**不受 §12.2 的 query 认证门禁**约束，无需先 `hello`。
+  理由（§6.3）：访问控制由 capability attenuation 承担（不可信 provider 只获
+  只读能力），而非连接鉴权；`broker_register` 只登记一条 key/capabilities 记录，
+  不接触用户数据、不执行 SQL。第 3 阶段接真实转发时在 bridge 处另行收紧。
+- **已知双实现不对称（登记册）**：`broker_register` 缺 `provider` 字段时，
+  - Go 的拍平 struct 解码成功（`Provider == nil`），由 arm 显式回
+    `broker_state` + `broker_event(neutral)`，`error.code = POLYDB_ERR_INVALID_PARAM`；
+  - Rust 的 tagged enum 要求该字段，解码即失败，回 `query_error` +
+    `POLYDB_ERR_INVALID_PARAM`（`decode: …`）。
+  两端错误码一致、失败均不产生转移，但**承载帧不同**。成因是 §6.1 已登记的
+  「Rust tagged enum vs Go 拍平 struct」形态差异，不是 broker 逻辑漂移；
+  彻底统一需扩 `DriverProvider` 的 wire 形态（breaking），留待后续。
+  契约测试 `TestContractBroker` 只覆盖**合法**输入，不锁定此畸形分支的帧型。
+
+### 16.6 双实现与门禁
+
+- Rust 落点：`rust/crates/app-core/src/driver_broker.rs`（组合语义）+
+  `rust/crates/server/src/lib.rs::AppState`（进程级 `Arc<DriverBroker>`）+
+  `rust/crates/server/src/ws.rs::receive_loop`（收发接线）；Go 落点：
+  `go/pkg/appcore/driver_broker.go` + `go/pkg/server/server.go::Server` +
+  `go/pkg/server/ws.go::runInbound`。两端暴露同一组操作（register / revoke /
+  set_granted / snapshot / reliance），由各自单测与 `test/contract/` 双端对拍锁定；
+  线格式由 `tools/genprotocol` 的四门禁钉死。
+- **进程级注册表**：broker 挂在 server 状态上（Rust `AppState` / Go `Server`），
+  一个进程一个实例，**跨 WS 连接可见**——否则不同连接看到不同依赖图，broker
+  就不成立。会话结束只释放该会话对 `Arc` 的引用，不销毁进程级视图。
+- 新增 provider **不需要**改 `spec/schemas/common.json` 的 `DatabaseKind` 枚举，
+  因此 `genprotocol dispatch` 门禁不受影响（它只钉内置 kind ↔ 驱动 crate）。
+- 接线只新增 `receive_loop` / `runInbound` 的 broker arm；阶段 3 起 `query`
+  携带可选 `provider_key` 时进入 §16.8 的绑定路径，**不带该字段的查询路径逐字
+  不变**。`test/contract/` 的现有 WS 场景保持原样，新增 `TestContractBroker`
+  与 `TestContractBrokerQueryGuard` 场景。
+
+### 16.7 明确不在本切片范围（避免假装覆盖）
+
+- 不实现 cdylib / C ABI / SHA-256 信任门禁（`docs/plugin-abi.md` 仍是未实现的
+  知识保全）；
+- **不实现跨 OS 进程的真实 provider**：阶段 4 的参考 provider 仍是同一进程内
+  的 WS 会话（契约测试用双连接模拟），验证的是**异步契约与组合语义**，不是
+  真实跨进程 RPC（§16.9 决策）。真正的跨进程 transport（stdio / socket /
+  WebSocket 外连）与序列化边界属后续；
+- 不实现连接池、SSH 隧道、keyring 下发；
+- **不重新证明 compensation 的 commutation**：阶段 4 实现 withhold 与
+  best-effort compensation，但按 §6.1 的警告，commutation 是针对 `≃` 证明的，
+  补偿动作在更粗的等价关系上必须重新建立；本阶段只把边界写进契约、由单测
+  锁定可观测行为，**不宣称元理论成立**（§16.9.5）；
+- 不实现 broker 消息的连接级鉴权（见 §16.5 决策）；
+- 不解决 §6.6 的 peer dependency 单版本解析 / interface drift 的完整模型
+  （namespacing 只消 key collision）。
+
+### 16.8 查询绑定：能力校验与 `¬ relied_n(γ)`（M18 阶段 3，non-breaking）
+
+`QueryRequest` 与 asyncapi `Query` payload 新增**可选** `provider_key`。
+**缺席时零行为变化**：仍走内置驱动，不查 broker、不占 reliance。携带时：
+
+1. **能力校验（interception 生效点，§6.3）**：broker 查该 key 的
+   `DriverProviderState`；若未注册 → `POLYDB_ERR_DRIVER_NOT_AVAILABLE`；若
+   `granted_capabilities` 不含 `query` → `POLYDB_ERR_PERMISSION_DENIED`。
+   校验发生在 `QueryStarted` **之前**，失败不发 `QueryStarted`、不进
+   `in_flight`、不 `acquire`。这是 interception「在依赖被调用时决定请求是否
+   被允许」的落点：策略可运行时改写（阶段 2 的 `set_granted`），无需 reload。
+2. **reliance 绑定**：校验通过后 `acquire`，查询**整个在途期**持有一次
+   reliance；`¬ relied_n(γ)` 守卫因此会拒绝这期间的 `broker_revoke`
+   （`POLYDB_ERR_DRIVER_NOT_AVAILABLE`，`broker_event(deactivating)` + reason）。
+   这正是 Thm 70：provider 的 episode 严格包住其消费者的 episode。
+3. **不漏的 release（RAII）**：`acquire` 与 `release` 必须由同一个
+   scope guard 包住，覆盖**所有**出口——正常完成、执行错误、cancel、
+   timeout、二次 cancel 竞态、panic。Rust 用 `Drop` guard，Go 用 `defer`；
+   禁止逐个出口手写 `release`（遗漏即 reliance 永久泄漏，守卫再也不放开）。
+4. **会话卸载 = 应用 accumulator（Thm 68 的运行时落地）**：每个会话记录
+   自己**成功注册**的 keys（失败注册不记）。WS 连接关闭时，先 `cancel_all()`
+   通知在途查询，再对本会话每个 key 尽力 `revoke`：
+   - 若无在途绑定 → 逆被应用，该会话的登记被精确撤回，其它会话的登记不动；
+   - 若仍有在途绑定 → 守卫**拒绝**（不绕过），登记及其逆保留在 accumulator，
+     由后台查询完成 `release` 后后续请求可再撤回。这是正确语义，不是缺陷：
+     provider 不能先于消费者消失。
+   - 会话只撤自己注册的 key，不撤其它会话的（recovery exactness）。
+5. **执行仍走内置驱动**：本阶段 `provider_key` 是**绑定与策略**的载体，
+   不是 SQL 路由。理由（§6.1）：真实转发是 emission，跨进程必须按异步契约
+   设计并重新建立 compensation 的 commutation；在桥接层就绪前不假装覆盖。
+   该决策与 §16.7 的排除项互相锁定。
+
+**契约测试覆盖**（`test/contract/broker_test.go`）：能力衰减后查询被拒
+（`PERMISSION_DENIED`）、未注册 key 被拒、在途慢查询期间 `broker_revoke`
+被守卫拒绝、查询完成后可撤回、断连后本会话登记被自动回收而其它会话的
+登记保留——全部双端 parity。
+
+### 16.9 异步 SQL 转发（M18 阶段 4，non-breaking）
+
+阶段 4 把 `provider_key` 从「绑定与策略」升级为**真实的 SQL 路由**：
+携带该字段的 `query` 不再调内置驱动，而是经 §6.2 要求的**异步契约**转发给
+attached provider。**不带 `provider_key` 的查询路径逐字不变**。
+
+#### 16.9.1 四条消息（asyncapi `channels.query.messages`）
+
+| 消息 | 方向 | 语义 |
+|---|---|---|
+| `provider_attach` | provider → 宿主 | **acquisition**：把本 WS 会话登记为某 key 的执行端。宿主保存 `(key → session sender)`；重复 attach 同一 key 被拒（`POLYDB_ERR_INVALID_PARAM`）。attach 不校验 `broker` 注册（provider 可先 attach 再 register，也可只 register 不 attach）。 |
+| `provider_detach` | provider → 宿主 | acquisition 的逆：移除登记。`¬ relied_n(γ)` 语义由在途表承担：有在途 exec 时拒绝 detach，避免半途请求丢失。 |
+| `provider_exec` | 宿主 → provider | **emission**：把 `query_id` / `sql` / `params` 推过桥接边界。一旦写入 socket 即不可逆（§6.1）。 |
+| `provider_result` | provider → 宿主 | 执行结果：`query_id` + `result` 或 `error`（与 `query_result` / `query_error` 同构）。宿主据此发 `query_result` / `query_error`。 |
+
+- 一律 **MessagePack**，复用既有 `PolyDBError` 与既有错误码，**不新增
+  `POLYDB_ERR_*`**。
+- 四条消息都**不携带 `connection_id`**：provider 不接触用户连接元数据，
+  只拿 SQL 与参数（§6.3 capability attenuation 在 broker 侧已完成）。
+- `provider_ack`（宿主 → provider）是 attach/detach 的**单帧**确认：
+  `attached`（当前已登记列表）+ `event`（`activating`/`deactivating`/
+  `neutral`）+ 可选 `error`。失败时 `event=neutral` 且登记不变。
+
+#### 16.9.2 转发流程（异步契约，§6.2 decision rule）
+
+1. 客户端 `query{provider_key}` → 宿主做 §16.8 的能力校验 + `acquire`
+   （reliance 仍覆盖整个在途期，含等待 provider 结果）。
+2. 宿主查 attached 表：无该 key → `query_error(DRIVER_NOT_AVAILABLE)` 并
+   `release`（不进 in_flight、不发 `QueryStarted`）。
+3. 有 attached → 发 `QueryStarted`，把 `provider_exec` 写入该 provider 会话的
+   发送通道，然后**异步等待** `provider_result`。等待期间 `query_cancel` 与
+   `timeout_ms` 必须仍然生效。
+4. 收到 `provider_result` → 转发成 `query_result` / `query_error`，`release`。
+5. **output commit / withhold（§6.1）**：`query_cancel` 或 timeout 到达而结果
+   尚未落地时，宿主**扣住**结果不向客户端发射（`withhold`），发
+   `query_cancelled` / `query_error(TIMEOUT)`。若 `provider_result` 已经写入
+   客户端 socket，则 **a message already sent stays sent**——不撤回、不补偿，
+   这与 Thm 80 的 delimitation（"speaks of the state, not of the emissions"）
+   一致。判定点是"结果帧是否已进入发送通道"，与 §6.1 的 PD-11 发射边界同款。
+
+#### 16.9.3 compensation 与其边界
+
+- cancel / timeout 时宿主向 attached provider 发 `provider_cancel{query_id}`
+  （best-effort）：provider 可据此中断自己的执行。这是 **compaction 动作**，
+  不是 revertible effect 的逆。
+- **明确不宣称**：§6.1 指出 compensation 组成的 LIFO 顺序可沿用，但
+  **Thm 43/68 的 commutation 是相对 `≃` 证明的，必须在更粗的等价关系上
+  重新建立**。本阶段只由单测/契约测试锁定可观测行为（cancel 后不发结果、
+  reliance 归零、守卫放开），**不把元理论担保扩展到 compensation**。
+  该声明与 §16.7 的排除项互相锁定。
+
+#### 16.9.4 rolling update（§6.2，阶段 6 落地）
+
+同一 key 的**新 attach** 到来时（更新版本的 provider 上线）：
+
+- **替换**：新会话成为该 key 的当前执行端；**新 exec 全部路由到新会话**。
+  消费者无感——它只依赖 broker 的 key，不感知具体会话，因此**不触发 reload**
+  （broker 常驻，§6.6；§6.2 的「the broker absorbs this perturbation」）。
+- **旧会话退役（retiring）**：旧会话**继续服务它已经收到的 exec**（那些 exec
+  已投递过桥接边界，属 emission，不可撤回），但不再接新 exec。
+- **自动降级**：旧会话的在途 exec 归零后，宿主把它从该 key 的执行端集合中移除
+  （等效 detach），并向旧会话回 `provider_ack(deactivating)`。
+- **归属保护**：降级只移除**自己的**登记（same-session / same-channel 判定），
+  不会误删新会话的登记（recovery exactness，Thm 68）。
+- 与 §16.9.1 的「cannot provide twice」不冲突：那条约束针对 **broker 注册**
+  （一个 key 只能有一个 provider 声明）；这里是**执行端**的替换——同一 provider
+  的新会话接管同一 key，正是 rolling update 的形态。
+- **实现口径**：attached 表的每个条目带一个**在途计数**（该执行端已收到但未
+  完成的 exec 数）；投递 exec 时 +1，`provider_result` 到达或被 cancel/timeout
+  扣留时 -1；计数归零且该条目已不是当前执行端 → 自动降级。
+
+#### 16.9.5 阶段边界（避免假装覆盖）
+
+- 参考 provider 是**同一进程内的 WS 会话**（契约测试用两条连接模拟），验证
+  异步契约与组合语义；真实跨 OS 进程 RPC、stdio/socket transport、宿主与
+  provider 用不同工具链/语言构建，都**不在本阶段**。
+- 不实现 `set_granted` 的 wire 消息（能力衰减仍只在 broker 骨架 API 与单测
+  中，阶段 5 由 §16.10.2 补齐）；不实现 SQL 参数/结果的跨语言类型映射验证
+  （复用既有 `Value`）。
+- 不实现 provider 侧沙箱、信任门禁、鉴权（§16.5/§16.7 已登记；阶段 5 由
+  §16.10.1 的 attach 白名单提供最小执行边界）。
+
+#### 16.9.6 契约测试
+
+`test/contract/provider_bridge_test.go`：启动一个**进程内参考 provider**
+（第二条 WS 连接 attach 后，收到 `provider_exec` 经 REST
+`POST /api/connections/{id}/query` 用真 SQLite 执行，再发 `provider_result`），
+双端 parity 覆盖：正常转发得到真实结果、未 attach 时拒绝、cancel 的 withhold、
+timeout、detach 后拒绝、rolling update 新旧会话切换、断连自动 detach 与
+reliance 回收。
+
+### 16.10 bridge 处的访问控制（M18 阶段 5，non-breaking）
+
+阶段 4 让 provider 真的执行 SQL，随之出现两个**必须补齐**的访问控制缺口：
+§16.9.1 让 `provider_attach` 不校验 broker 注册，于是任何 WS 客户端都能 attach
+任意 key、替他人执行 SQL 或伪造结果；§16.4 承诺 `granted_capabilities` 可在
+运行时原地改写，但阶段 4 之前没有 wire 消息，该能力线上不可用。
+
+#### 16.10.1 attach 准入门禁（deny-by-default）
+
+- 服务端以环境变量 **`POLYDB_PROVIDER_ALLOW`** 声明允许 attach 的 provider
+  key 白名单（逗号分隔，与 `POLYDB_ALLOWED_ORIGINS` 同风格）。
+- **未设置或为空 = 不允许任何 attach**（deny-by-default）。这是默认值安全的
+  选择：没有显式配置时，进程外 provider 完全不能接管 SQL。
+- `provider_attach` 时校验 key ∈ 白名单；不在其中 → 拒绝，回 `provider_ack`
+  且 `event=neutral`、`error.code=POLYDB_ERR_PERMISSION_DENIED`，**不登记**。
+- 白名单是**策略**而非连接鉴权：它与 §16.5 的「broker 消息不受 §12.2 query
+  认证门禁约束」不冲突——前者决定「谁可以成为执行端」，后者只决定「谁能发消息」。
+- 门禁只作用于 **attach**（获得执行权的那一步）；已登记的 provider 在
+  `POLYDB_PROVIDER_ALLOW` 变化后**不被追溯撤销**（§6.3 的 interception 是
+  运行时改写、重载即生效；本阶段不实现策略热重载）。
+- 这是 §6.3「sandboxing 需要执行边界之外的机制」在本阶段的最小落地：
+  **进程外 provider 默认进不来**；进来的 provider 仍受 `granted_capabilities`
+  约束其可见的操作面。
+
+#### 16.10.2 `broker_set_granted`：能力衰减的 wire 入口
+
+- 新增客户端消息 `broker_set_granted{key, granted_capabilities}`：把某 key 的
+  **生效能力**原地改写为 `granted_capabilities` 的子集，语义与 broker API 的
+  `set_granted` 完全一致（§16.4）。
+- **只能收紧，不能放宽**：`granted_capabilities` 必须是已声明 `capabilities`
+  的子集，否则拒绝（`POLYDB_ERR_INVALID_PARAM`）。因此该消息只能降低能力面，
+  **任何会话发起都不会扩大暴露面**。
+- 成功时 `notify_d` 分类为 `neutral`（声明仍被满足）→ 消费者**不 reload**、
+  依赖图不动（§6.3 的 in-place intercept 更新）。回 `broker_state`（含新的
+  `granted_capabilities`）+ `broker_event(neutral)`。
+- 该消息使 §16.4 的能力衰减**在线上可用**：例如把不可信 provider 的生效能力
+  从 `query/execute/metadata` 收到 `query/metadata`，使其无法执行写语句，
+  且**无需重启或 reload**。
+
+#### 16.10.3 阶段边界
+
+- 不实现 provider 侧的进程沙箱 / SFI / 容器（§6.3 要求执行边界之外的机制；
+  本阶段用「进程外 + 默认拒绝 attach」提供最小边界）；
+- 不实现 attach 白名单的**热重载**（改环境变量需重启进程）；
+- 不实现按来源 IP / 证书的更强身份认证（白名单按 key，不按身份）。
+
+#### 16.10.4 契约测试
+
+`test/contract/provider_policy_test.go`：双端 parity 覆盖——未在白名单的 key
+attach 被拒（`PERMISSION_DENIED`）且**不产生执行端**、白名单内的 key 可 attach、
+`broker_set_granted` 收紧后带该 key 的查询被拒（`PERMISSION_DENIED`）、
+放宽尝试（granted ⊄ declared）被拒（`INVALID_PARAM`）、能力衰减属 `neutral`
+（不 reload、依赖图不动）。
+
+### 16.12 provider 执行端抽象（M18 阶段 7，non-breaking）
+
+阶段 4-6 的 provider 执行端是「**一条 WS 会话**」——它同时承担了「传输」与
+「执行」两件事。阶段 7 把这两件事拆开：**执行端**是一个抽象（端点），**传输**
+是端点的一种实现。这样新增「独立进程执行端」时不必改动 broker / 转发 / 守卫
+的任何逻辑。
+
+#### 16.12.1 执行端（endpoint）的语义
+
+一个 **执行端**（endpoint）= 「能接收一次 exec 并最终产出一个结果」的东西。
+端点对自己的传输无感：broker 只知道「向某个端点投递 exec」与「端点报告结果」。
+
+| 能力 | 语义 |
+|---|---|
+| 投递（emit） | 宿主把 `query_id` + SQL + 参数交给端点。投递成功 = 已越过边界（emission，不可逆）。投递失败 = 端点不可达 → `POLYDB_ERR_DRIVER_NOT_AVAILABLE`。 |
+| 回收（settle） | 端点的一次在途结束（成功 / 错误 / 被 cancel 或 timeout 扣留）。回收使该端点的在途计数 -1；退役端点在途归零 → 自动降级（§16.9.4）。 |
+| 归属（ownership） | 端点知道自己属于哪个 key；降级/断连只移除自己的登记（Thm 68）。 |
+| 降级通知（notify） | 端点被自动降级时收到 `provider_ack(deactivating)`。 |
+
+端点实现（provider endpoint kinds）：
+
+1. **会话端点（session endpoint）**：一条 WS 会话承载一个 provider。exec 经该
+   会话的 socket 发出，结果经该会话回到宿主。**阶段 4-6 的既有实现**。
+2. **进程端点（process endpoint）**：一个独立进程承载一个 provider。宿主与它
+   之间是 §16.12.2 的 stdio 传输；SQL 由该进程**回调宿主**执行（§16.12.3）。
+   **阶段 7 契约已定稿，宿主接线属下一阶段**。
+
+两端各有一个对称的端点抽象（Rust `trait` / Go `interface`），broker 只依赖该
+抽象；新增端点类型 = 新增一个实现，**不改 broker 的分派逻辑**。
+
+#### 16.12.2 provider 进程协议（stdio JSON-RPC 2.0）
+
+provider 进程与宿主之间用 **stdio + newline-delimited JSON-RPC 2.0**，与项目既有
+的 MCP stdio 帧格式一致（`go/pkg/mcp`：每行一条 JSON-RPC，`jsonrpc: "2.0"`）。
+复用该格式的理由：项目已有实现与经验（`cmd/polydb-mcp`），不引入第三种帧格式。
+
+| 方法 | 方向 | 参数 | 结果 |
+|---|---|---|---|
+| `provider/hello` | 宿主 → 进程 | `{key, capabilities, protocol_version}` | `{ok: true}`；版本/能力不符 → error |
+| `provider/exec` | 宿主 → 进程 | `{query_id, sql, params}` | `{result}` 或 `{error}` |
+| `provider/cancel` | 宿主 → 进程 | `{query_id}` | `{ok: true}`（best-effort，§16.9.3） |
+| `provider/shutdown` | 宿主 → 进程 | `{}` | `{ok: true}` |
+
+- 宿主是 **client**，provider 进程是 **server**（进程读 stdin 收请求、写 stdout
+  回响应）；请求带 `id`，响应回同一个 `id`。
+- **stdout 只承载协议帧**：provider 的日志必须写 stderr（与 MCP 同样纪律）。
+- 单帧上限 4 MiB（与 MCP 的 scanner buffer 同量级）。
+- provider 进程崩溃（EOF / 非零退出）→ 宿主把它视为**端点不可达**：在途 exec 全部
+  以 `POLYDB_ERR_DRIVER_NOT_AVAILABLE` 失败，该端点被移除（等效 detach）。
+
+#### 16.12.3 回调宿主执行（provider 不接触凭据）
+
+进程端点的 provider **不管理数据库连接、不接收任何凭据**（§6.3 的能力最小化）：
+它收到 `provider/exec` 后，通过**受限回调**让宿主代为执行 SQL。
+
+- 回调面：宿主暴露一个**仅对 provider 进程可达**的端点（loopback + 每次 attach
+  生成的一次性令牌），接收 `{query_id, sql, params}`，返回 `QueryResult` 或错误。
+- 凭据、连接池、只读判定、限行全部留在宿主侧（沿用既有 `app-core` 路径），provider
+  只看到 SQL 与结果。
+- 该回调**不是**对公网开放的管理面：仅 loopback、仅 attach 已授权的 key、每次
+  attach 一次性令牌、请求体有上限。
+- 代价与边界：provider 仍能**读到结果数据**（它本来就是执行 SQL 的组件），但
+  无法看到连接元数据与凭据；provider 进程崩溃不会影响宿主的连接池。
+
+#### 16.12.4 阶段边界
+
+- **宿主对进程端点的接线属下一阶段**：本阶段定稿契约与抽象，但宿主仍只用会话
+  端点。契约测试因此**不覆盖进程端点**（不假装覆盖）。
+- 不实现 provider 侧的 SFI / 容器沙箱；进程边界本身提供了「崩溃隔离」与
+  「凭据不可见」，但**不是**安全沙箱（§6.3：sandboxing 需要执行边界之外的机制）。
+- 不实现 provider 进程的热升级（进程重启 = 新端点 attach = rolling update，语义
+  天然由 §16.9.4 覆盖，但跨进程的自动重启策略未定）。
+- 回调端点的令牌管理与轮转属下一阶段接线时一并落地。
+
+### 16.13 进程端点接线（M18 阶段 8，non-breaking）
+
+阶段 8 把 §16.12.1 的**进程端点**（kind 2）接入宿主：宿主拉起独立进程，经
+stdio JSON-RPC 与它通信，行为与会话端点完全一致（同一 `ProviderEndpoint`
+抽象）。**会话端点路径逐字不变**。
+
+#### 16.13.1 进程来源：不可由客户端指定
+
+- 进程端点只能由**服务端管理员**配置拉起：环境变量
+  **`POLYDB_PROVIDER_PROCS`**，格式 `key=path[:arg],key2=path2[:arg2]`（逗号分隔
+  键值对，冒号后为单个可选参数）。
+- **客户端不能指定任何可执行文件**：`provider_attach` 只携带 key，宿主从配置表
+  查该 key 对应的进程；查不到 → 拒绝（`POLYDB_ERR_PERMISSION_DENIED`）。
+  这条是安全红线：否则 attach 退化成任意命令执行。
+- 未配置 `POLYDB_PROVIDER_PROCS` → 没有进程端点（与 §16.10.1 的 deny-by-default
+  一致）。
+- 进程端点的 key 仍受 §16.10.1 的 `POLYDB_PROVIDER_ALLOW` 白名单约束：两道门禁
+  都要过。
+
+#### 16.13.2 握手与登记
+
+- 宿主拉起进程后，进程先发 `provider/hello{key, capabilities, protocol_version}`；
+  宿主校验：key 与配置表一致、协议版本匹配、能力集合合法 → 建立 attached 登记
+  并回 `provider/hello` 的确认（`{ok: true}`）。
+- 校验失败 → 宿主终止该进程（不登记），记日志。
+- 登记后，进程端点与**会话端点完全等价**：`provider_exec` 经 stdio 送出、
+  `provider_result` 经 stdio 收回、`provider_cancel` 经 stdio 送出；`reliance`、
+  `¬ relied_n(γ)` 守卫、rolling update、withhold 的语义一字不改（它们都作用在
+  `ProviderEndpoint` 抽象上）。
+
+#### 16.13.3 结果转发与帧映射
+
+- 进程端点的 `provider_result` 帧是 `{query_id, result?, error?}`（与 §16.12.2）。
+  宿主把它转成**会话侧**的 `ServerMessage::QueryResult` / `QueryError` 发给查询
+  发起方——**wire 上不新增消息类型**（§16.9 的既有消息已够用）。
+- 帧映射：`result` → `QueryResult`（含 columns/rows/affected_rows/execution_time_ms）；
+  `error` → `PolyDBError`（code/message）；两者皆无 → `POLYDB_ERR_INVALID_PARAM`。
+- 因此进程端点的存在**对前端完全透明**：前端看到的仍是普通查询。
+
+#### 16.13.4 崩溃与不可达
+
+- 进程退出（EOF / 非零退出 / 被信号杀死）→ 该端点**不可达**：
+  - 在途 exec 全部以 `POLYDB_ERR_DRIVER_NOT_AVAILABLE` 失败（不挂起）；
+  - 该端点的 attached 登记被移除（等效 detach）；
+  - **不自动重启**（重启策略未定，见 §16.12.4）。
+- 投递失败（stdin 写失败 / 管道已关闭）→ 同上：本次 exec 立即失败，
+  `POLYDB_ERR_DRIVER_NOT_AVAILABLE`。
+- 宿主在进程退出时**必须回收子进程**（join / wait），不留僵尸进程。
+
+#### 16.13.5 阶段边界
+
+- **回调宿主执行的完整鉴权面属下一阶段**：阶段 8 打通「进程端点的传输与转发」，
+  参考 provider 进程在本阶段**不执行真实 SQL**（回固定结果或错误），用于验证
+  传输、转发、崩溃处理；把 SQL 真正交给宿主执行需要 §16.12.3 的受限回调面
+  （一次性令牌 + loopback + 限流），属下一阶段。
+- 不实现 provider 进程的热重启与看门狗。
+- 不实现进程端点的能力衰减联动（`broker_set_granted` 对进程端点同样生效——因为
+  它作用在 broker 层，与端点类型无关；这一点由 §16.10.2 覆盖）。
+- 进程端点与 `POLYDB_PROVIDER_ALLOW` 的**双重门禁**：配置表给出「有哪些进程」，
+  白名单给出「允许谁 attach」。
+
+#### 16.13.6 契约测试
+
+`test/contract/provider_process_test.go`：双端 parity 覆盖——配置了进程端点后
+`provider_attach` 成功、转发拿到进程回的结果、进程被杀后查询立即失败
+（`DRIVER_NOT_AVAILABLE`）、未在配置表中的 key attach 被拒。
+
+### 16.14 受限回调面：provider 代执行 SQL（M18 阶段 9，non-breaking）
+
+阶段 8 的参考 provider **不执行真实 SQL**（回固定结果）。阶段 9 补上 §16.12.3
+承诺的回调面，让 provider 进程**真正执行 SQL**却**永不接触凭据**。
+
+#### 16.14.1 不透明 handle（provider 看不到连接）
+
+- provider 收到 `provider/exec` 时，**不带** `connection_id`——它本来就不该知道
+  用户连接的存在。宿主在转发时把 `connection_id` 换成**不透明 handle**。
+- handle 是宿主生成的随机串（如 32 位十六进制），宿主侧映射到真实
+  `connection_id`。**handle 不可推导**：它与 connection_id 无算术关系，
+  provider 无法通过猜测拿到别的连接的 handle。
+- handle 的作用域 = **一次 provider attach**：attach 时为该 provider 分配它能
+  使用的 handle 集合；provider 断开或 detach 后，handle 立即失效
+  （§16.10 的 acquisition 逆）。
+
+#### 16.14.2 回调端点（loopback + 令牌 + 限流）
+
+宿主在**进程内**起一个 loopback HTTP 端点，专供 provider 回调：
+
+| 属性 | 约束 |
+|---|---|
+| 监听地址 | `127.0.0.1`（**仅回环**，不可从外部到达） |
+| 端口 | 随机（绑定 `:0` 后取实际端口），不写在配置里 |
+| 认证 | 每个 provider 进程一个**随机令牌**（attach 时下发，请求带 `Authorization: Bearer <token>`）；令牌不落盘、不进日志 |
+| 路由 | 只有一条：`POST /provider/exec` |
+| 请求体 | 上限 1 MiB（§5 的 blob 阈值同量级）；超限 → `POLYDB_ERR_PAYLOAD_TOO_LARGE` |
+| 并发 | 每个 provider 最多 N 条在途（默认 4）；超限 → `POLYDB_ERR_DRIVER_NOT_AVAILABLE` |
+| 超时 | 单次执行沿用查询自身的 `timeout_ms`；无超时则 30s 兜底 |
+| 响应 | `QueryResult` 或 `PolyDBError`（原样映射，provider 看得到错误码但看不到连接信息） |
+
+- 令牌与 handle 都由宿主**每次 attach 重新生成**（不跨 provider 复用）。
+- 回调端点**不是**对公网开放的管理面：它只接受带正确令牌的请求，且令牌只交给
+  宿主自己拉起的 provider 进程（§16.13.1 的命令由管理员配置，客户端无从得知）。
+- 宿主的执行路径**完整复用**既有 app-core 逻辑（§12.3 只读判定、§5 限行、
+  事务、连接解析）——provider 的 SQL 与用户直连 SQL 走**同一条**判定链，
+  不开任何后门。
+
+#### 16.14.3 转发链路的变更
+
+`provider/exec` 的参数从 `{query_id, sql, params}` 变为
+`{query_id, handle, sql, params}`：
+
+- **会话端点**（kind 1）不受影响：会话 provider 本来就能看到 connection_id
+  （它就在同一个会话里），继续用原参数形状。
+- **进程端点**（kind 2）用 handle：宿主在转发前把 `connection_id` 换成 handle；
+  provider 回调时把 handle 原样带回，宿主解析出真实 connection_id 再执行。
+
+#### 16.14.4 安全属性（明确承诺与不承诺）
+
+**承诺**：
+- provider 进程**永远看不到** connection_id、连接名、主机、端口、用户名、密码；
+  它只看到 SQL、参数、结果，以及一个不透明 handle。
+- 凭据（keyring）、连接池、只读判定、限行全部留在宿主进程内。
+- provider 进程崩溃/被杀不影响宿主的连接池与其它 provider。
+
+**不承诺**：
+- 进程边界**不是**安全沙箱：provider 进程仍能读写宿主机器上的文件（以它自己的
+  OS 权限），也能读到它自己收到的结果数据（它本来就是执行 SQL 的组件）。
+  真正的隔离需要 SFI / 容器 / 独立用户（§6.3：sandboxing 需要执行边界之外的
+  机制），**不在本阶段**。
+- 令牌与 handle 防的是**误用与越权串扰**，不是恶意进程。
+
+#### 16.14.5 阶段边界
+
+- 回调面**仅 loopback**：不实现跨主机回调（provider 必须与宿主同机）。
+- 不实现令牌的持久化与跨重启轮转（进程级随机，重启即失效）。
+- 不实现回调的 TLS/mTLS（loopback 不需要）。
+- 不实现 provider 侧的连接池缓存（每次回调都走宿主 app-core）。
+
+#### 16.14.6 契约测试
+
+- `provider_result` 的迟到投递（pending 已被取消清除）仍被 **withhold**
+  （§16.9.2 step 5），语义不变。
+
+### 16.15 完成与取消信号分离（M18 阶段 10，non-breaking）
+
+§2.2 的「取消信号与完成信号分离」在实现层的口径。这是对**既有取消机制竞态**
+的修正（PD-11 的发射边界设计有一个固有窗口：查询正常完成 → 注销在途表项并
+关闭取消通道 → watcher goroutine 恰好被调度 → 触发 `cancelFn` → 查询上下文
+被取消 → 发射前的「已取消」二次判定误判 → **正常完成的查询被吞掉**、客户端
+收到 `query_cancelled`。负载越高窗口越易命中，表现为偶发）。
+
+- 在途表项从「单个取消通道」变为「**成对信号**」：`cancel`（真取消才关闭）与
+  `done`（正常完成关闭）。
+- **正常完成**：只关 `done` → watcher 看到 `done` 直接退出，**不触发取消**、
+  不污染查询上下文 → 结果正常发射。
+- **真取消**（客户端 `query_cancel`、timeout、panic、会话收尾）：关 `cancel`
+  → watcher 触发上下文取消 → 在途执行中断（内置路径）或进入 withhold +
+  compensation（provider 路径，§16.9.2 step 5）。
+- 两类信号**都**把表项从在途表移除（防重复触发）；watcher 对两个通道的
+  竞争用「先到先得」判定——done 先关即视为完成，cancel 先关即视为取消，
+  与关闭发生的时间序严格一致。
+- `provider_result` 的迟到投递（pending 已被取消清除）仍被 **withhold**
+  （§16.9.2 step 5），语义不变。
+
+### 16.16 provider 侧沙箱：OS 级执行边界（M18 阶段 11，non-breaking）
+
+进程边界（§16.13）提供了崩溃隔离，但 provider 进程仍以宿主相同的 OS 权限运行。
+本阶段给它加上**OS 级执行边界**：生命周期绑定、资源上限、进程隔离。这是
+§6.3「sandboxing 需要执行边界之外的机制」的最小落地——**不是** SFI，也不是
+恶意进程防御。
+
+#### 16.16.1 生命周期绑定（宿主死 → provider 必死）
+
+| 平台 | 机制 |
+|---|---|
+| Windows | provider 进程加入 **Job Object**（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`）：宿主进程退出（含被杀）→ Job 句柄关闭 → **全部 provider 进程被 OS 强制终止**。孤儿进程从机制上根除（此前靠契约测试的 `taskkill` 兜底）。 |
+| Unix | provider 加入独立**进程组**（`Setpgid`），并**自检父进程**：启动时记录宿主 PID，运行中 `getppid()` 变化（宿主已死、被 init 收养）→ 自行退出。 |
+
+- 生命周期绑定使 `provider_attach` 的资源（attached 登记、在途查询）与进程
+  生命周期严格对齐——宿主意外终止时，provider 不会残留占着回调令牌与
+  attached key。
+- Job Object / 进程组由**宿主侧**设置（provider 进程无从退出或对抗）。
+
+#### 16.16.2 资源上限
+
+| 平台 | 机制 | 上限 |
+|---|---|---|
+| Windows | Job Object `JOB_OBJECT_LIMIT_PROCESS_MEMORY` | 内存 512 MiB（默认；`POLYDB_PROVIDER_MEM_MB` 可覆盖） |
+| Unix | provider 启动时自限 `RLIMIT_AS` | 同上 |
+
+- CPU 时间不做硬限（SQL 执行本身可能合法地长）；超时由查询自身的
+  `timeout_ms` 与回调面的 30s 兜底约束（§16.14.2）。
+- 上限触发即进程被 OS 终止——宿主按 §16.13.4 的「端点不可达」处理。
+
+#### 16.16.3 阶段边界
+
+- **不承诺**文件系统与网络访问隔离：provider 仍能以自己的 OS 权限读写宿主
+  机器上的文件。真正的隔离需要容器 / 独立用户 / SFI（§6.3），**不在本阶段**。
+- 不承诺恶意进程防御：令牌与 handle（§16.14）防的是**误用与越权串扰**。
+- 不实现 CPU 硬限（见 §16.16.2）。
+
+### 16.17 compensation 的 commutation：观测等价与穷举验证（M18 阶段 11）
+
+§16.9.5 明确「不宣称 commutation 元理论成立」——因为补偿的等价关系比 ≃ 粗，
+Definition 65 的交换律必须在**更粗的等价**上重新建立。本节把它做掉：
+先**定义**那个更粗的等价，再**穷举验证**补偿组合在该等价下的性质。
+
+#### 16.17.1 观测等价（≈ₒ，比 ≃ 粗）
+
+两次执行 **≈ₒ 等价**，当且仅当客户端能观测到的**帧序列**（按 query_id 归集）
+满足：对每个 query_id，收到的**最终结果帧**属于同一类别（`query_result` /
+`query_cancelled` / `query_error`），且 `query_result` 的**载荷相同**。
+
+它比 ≃ 粗：内存布局、pending 表内容、发出过的 `provider_cancel`、watcher 的
+调度时序——全都不可观测，也不需要等。
+
+#### 16.17.2 重证明的性质（穷举验证）
+
+对 pending 状态机的操作序列（`complete(q)` / `cancel(q)`，q 遍历全部在途
+查询，序列长度 ≤ 4 **全枚举**），断言：
+
+| 性质 | 内容 | 对应论文概念 |
+|---|---|---|
+| **P1 withhold** | `cancel(q)` 先于 `complete(q)` → `complete` 返回 false（结果被扣住），客户端**不会**收到该 q 的结果帧 | output commit / withhold（§6.1） |
+| **P2 至多一次** | 每个 q 的结果**至多投递一次**（第二次 complete 必 false）——客户端不会收到重复帧 | emission 不可逆的边界 |
+| **P3 线性化** | 交错下每条操作在某个瞬时点原子生效：**先完成者胜**（complete 赢得 q 的唯一结果槽），取消只能作用于「尚未完成」的 q | Definition 65 的交换律在 ≈ₒ 上重建 |
+| **P4 顺序无关** | 多 provider 的回收组合与注销顺序无关（recovery exactness，Thm 68 的运行时对应） | Thm 68 |
+
+- **「重证明」的口径**：这不是数学证明——是用**全枚举**（确定性、可复现、
+  进 CI）在实现层验证补偿组合在 ≈ₒ 下的性质。它把 §16.9.5 的「不宣称」升级为
+  「穷举已验证」；若实现偏离性质，穷举**必然**命中反例。
+- 该验证锁定的是 **pending 状态机**（宿主侧补偿的核心）；provider 进程内部
+  的行为（§16.9.3 best-effort）不在其内——那部分的可观测效果经 P1/P2 间接
+  锁定（迟到结果被扣住，无论 provider 内部做了什么）。
+
+#### 16.17.3 验证载体
+
+`go/pkg/server/provider_commutation_test.go` 与
+`rust/crates/server/src/provider_commutation_tests.rs`：两端各自对自家 hub 的
+pending 实现跑同一组性质（穷举序列相同、性质相同），双端 parity。
+
+### 16.18 多实例服务与负载分担（M18 阶段 12，non-breaking）
+
+§6.2 给出服务代理的三个动机：负载分担、rolling update、跨进程 RPC。阶段 4–6
+落地了后两个；本阶段落地**负载分担**——同一 key 的多个 provider **并存**服务，
+任一退出不影响其余（continuous availability）。并存的前提是 **Thm 47 的
+witnessed coeffect**：provider **自证**其 key 是可交换表（实例可互换），独立性
+检查由此退化为声明本身——同 key 的多实例互不依赖（它们服务同一抽象服务的
+等价副本），无需运行时交叉计数。
+
+#### 16.18.1 witnessed 声明
+
+- `provider/hello`（进程端点，§16.13.2 内协议）与 `provider_attach`
+  （会话端点，§16.12.1 kind 1）携带可选 `commutative: true`。
+- **缺省 false**：非 commutative key 的第二次 attach 保持阶段 6 语义
+  （rolling update：替换 + 退役）——**行为不变**。
+- `commutative: true` 时同 key 的第二次 attach **并存**而非替换：旧端点不标记
+  退役、不降级；两个端点都在 attached 列表里。
+
+#### 16.18.2 分派与回收
+
+- **分派**：同 key 多端点时按 **per-key 轮询**（round-robin）选择执行端——
+  请求在实例间分担（负载分担的最低要求：均匀与无状态）。
+- **回收**：端点 detach/断开/崩溃时，只把它自己从列表移除；**列表非空则 key
+  仍然可用**（不触发 §16.9.4 的 key 级降级——那是 rolling update 的语义），
+  不向其余实例发任何补偿。列表清空后 key 不可用（查询报
+  `DRIVER_NOT_AVAILABLE`，§16.8 的既有行为）。
+- 在途请求仍绑定**原端点**（register_pending 时选定）：实例退出时其在途请求
+  按 §16.13.4 失败（`DRIVER_NOT_AVAILABLE`），**其余实例的在途不受影响**——
+  Thm 43（成对独立的效果可按任意排列回收）的运行时对应：多实例的回收互不
+  干扰。
+
+#### 16.18.3 与既有语义的关系
+
+| 场景 | 非 commutative（缺省） | commutative |
+|---|---|---|
+| 同 key 第二次 attach | rolling update：替换 + 旧端点退役（§16.9.4） | 并存：两个都在 |
+| 分派 | 唯一端点 | per-key 轮询 |
+| 一端退出 | —— | 其余继续服务；key 不降级 |
+| capability 衰减 | 作用在 broker 层（§16.10.2），与端点数无关——同 key 全部实例同时被收紧 | 同左 |
+
+- broker 层**不变**：能力声明仍 per-key 一条（多实例声明相同能力；先到者
+  登记，后到者的 register 为幂等中性——其能力集必须一致，不一致报
+  `INVALID_PARAM`）。
+- reliance 守卫不变：per-key 计数（§16.8），与端点数无关。
+
+#### 16.18.4 broker 收敛性（Thm 80 的运行时对应）
+
+Thm 80：动态历史不留痕迹——quiescent 终态 = 静态组装终态。对 broker 的
+穷举验证（`register` / `revoke` / `set_granted` 全操作序列，长度 ≤ 4，
+key ∈ 两个）断言两个性质：
+
+1. **net-intent 收敛**（全部序列）：终态 = **成功转移**的 net-intent 重放——
+   per-key 取最后一次成功的 register（起点）与其后全部成功的 `set_granted`。
+   按论文 Bounds「excludes failed fibers」，**失败转移不参与**：被守卫拒绝的
+   操作（Def 19 的重复注册、未注册 key 的撤回/衰减）不改变状态，也不进入
+   净意图。**注意**：净意图必须连同其前置 register 一起重放（收紧操作依赖
+   「已注册」这一前置；穷举曾命中反例：把收紧单独重放会因未注册而失败，
+   得到比实际更宽的状态）。
+2. **幂等重放**（仅全成功序列）：同一序列执行两遍，第二遍零状态变化——
+   重放的 register 重复被拒、revoke 的对象已不存在、`set_granted` 幂等收紧。
+   含失败操作的序列**不能**做幂等重放：第一遍失败的衰减（当时未注册）在
+   第二遍会成功（注册已存在）——那是守卫语义的正确行为，不是收敛性破坏
+   （穷举曾命中反例）。
+
+与 §16.17 互补：那里验证的是补偿（pending，emission 侧），这里验证的是
+注册表（acquisition 侧）。两个穷举的验证口径都经历了「反例 → 修正判据」
+的过程——这正是穷举的价值：实现是对的，**错的是验证者第一版的判据**。
+
+#### 16.18.5 契约测试
+
+`test/contract/provider_multiinstance_test.go`：同 key 两个 commutative 进程
+provider 并存（attached 长度 2）、连续查询轮询命中两个实例、杀掉其一后
+**服务仍可用**（无需重新 attach，其余实例接手）。
+
+### 16.19 配置对账：provider 配置的增量生效（M18 阶段 13，non-breaking）
+
+Def 81 的配置对账落到 broker 配置上：provider 配置（§16.10.1 白名单 +
+§16.13.1 进程表）的变更**经 `notify_d` 分类增量生效**——改动只在受影响
+的 key 上动作，其余 key 一概不动，且**无需重启宿主**。这是论文 §5
+「intercept 就地更新、其余触发 reload」的 broker 版：进程表条目的变更
+就是 reload，白名单变更就是 interception 的授权面更新。
+
+#### 16.19.1 变更源
+
+- `POLYDB_PROVIDER_CONFIG_FILE` 指定 JSON 配置文件：
+  `{ "allow": ["key", ...], "procs": [{"key": "k", "cmd": "..."}] }`。
+- 宿主**轮询**该文件（`POLYDB_PROVIDER_CONFIG_POLL_MS`，缺省 5000；测试可
+  调小）并在内容变化时对账；Unix 额外响应 **SIGHUP** 立即重读。
+- 未设置该变量时行为与此前完全一致（env 静态配置，无 watcher）。
+- 文件缺失或解析失败：**保持上次已知配置**（记日志、不动作）——配置错误
+  不能清空运行中的 provider。
+- 文件是唯一对账源：设置后，文件内容**覆盖** env 初值（首次读取即对账）。
+
+#### 16.19.2 notify 分类与动作（diff → 分类 → 动作）
+
+| 变更 | 分类 | 动作 |
+|---|---|---|
+| 白名单 +key | **activating** | 白名单加入；不影响已 attach（attach 是 provider 的动作） |
+| 白名单 −key | **deactivating** | 宿主主动撤下：`broker.Revoke`（守卫 `¬ relied`，§16.8）+ 撤下该 key 全部端点（commutative 多实例一并撤下） |
+| 白名单不变 | neutral | 无动作 |
+| 进程表 +条目 | **activating** | spawn 新进程（hello 后自动登记，§16.13.2） |
+| 进程表 −条目 | **deactivating** | 终止对应进程（onDead → DropEndpoint，§16.13.4 既有路径）+ `broker.Revoke`（若白名单也未含该 key） |
+| 进程表命令变更 | **deactivating + activating** | kill 旧进程 + spawn 新进程；非 commutative key 由新实例的 hello 按rolling update 接管（§16.9.4） |
+| 进程表不变 | neutral | 无动作 |
+
+- **deactivating 的守卫**（决定与动作分离，L-Leave/L-Divert）：撤下时若有
+  在途请求（`¬ relied_n(γ)`），**推迟到下个对账周期重试**——不是失败、不是
+  强杀。在途请求完成后自然撤下（Thm 70：provider 的 episode 严格包住消费者）。
+- **对账幂等**：同一配置重放不产生任何动作（diff 为空）——"动态历史不留
+  痕迹"（Thm 80）在配置面的对应。
+- 进程的匹配键 = `(key, cmd)`：同 key 多实例（§16.18）由条目列表区分，命令
+  相同的条目互为多实例。
+
+#### 16.19.3 阶段边界
+
+- 不实现配置的**写回**与校验回执（对账结果经日志观测；客户端不可见）。
+- 不实现配置文件的热迁移语义（进程命令变更按 kill+spawn 处理，非 commutative
+  key 的在途请求按 rolling update 收尾）。
+- 客户端对配置变更**不可观测**（broker_state 帧只对 provider 会话发送）；
+  配置对账是宿主运维面，不在 wire 契约内。
+
+#### 16.19.4 验证载体
+
+- 单元测试（`provider_config_test.go` / Rust 镜像）：diff 分类纯逻辑、
+  deactivating 的守卫推迟、对账幂等。
+- 契约测试（`provider_config_test.go`）：写配置文件 → 等对账周期 → 新实例
+  生效（连续查询成功）；清空进程表 → 等对账周期 → 查询失败
+  （`DRIVER_NOT_AVAILABLE`）。
+
+#### 16.19.5 已修缺陷（PD-39，2026-11-15）
+
+**Rust 侧配置对账的撤下路径曾触发 HTTP 层挂死**：provider 进程 spawn 后，
+对账 task 卡死，后端 HTTP 层对后续请求无响应（`/api/health` 独立 handler 仍
+200，其余 handler——含 REST 与 WS 升级——卡死；goroutine dump 显示请求卡在
+传输层等待，后端 stderr 无 panic）。
+
+**根因**：`ProcessEndpoint::wait_loop` **持有 child 锁阻塞在
+`Child::wait()`**——进程存活期间该锁永不释放；配置对账的撤下第一次真正调用
+`close()`（其 `child.lock()` 因此永久阻塞），把对账 task 卡死。此前从未暴露：
+测试都是直接杀宿主进程（OS 级 Job 句柄关闭兜底回收），`close()` 从未被执行。
+
+**修复**：`wait_loop` 改为 **try_wait 轮询**（100ms 周期，短临界区）——
+kill（close）与回收（wait）互不阻塞，与 Go 侧 waitLoop goroutine 的语义
+严格对齐。修复后撤下链路（kill → broker.Revoke → 端点撤下）全部畅通，
+Rust 契约子测试与 go 子测试同构（独立 key + 独立配置文件，端到端覆盖
+spawn → scale-out → 撤下）。
+
+**教训**：**持锁阻塞是 async 运行时的禁手**——`std::sync::Mutex` 的临界区
+里调用任何可能阻塞的系统调用（`wait`/IO），都会把持锁时间放大到不可预期；
+测试直接杀进程的清理路径**不会执行** `close()`，这类缺陷要靠「真正调用
+每个清理路径」的测试形态才能暴露。

@@ -6,6 +6,7 @@
 
 pub mod common;
 pub mod connection;
+pub mod driver_broker;
 pub mod error;
 pub mod metadata;
 pub mod query;
@@ -17,6 +18,7 @@ pub mod ws;
 
 pub use common::*;
 pub use connection::*;
+pub use driver_broker::*;
 pub use error::*;
 pub use metadata::*;
 pub use query::*;

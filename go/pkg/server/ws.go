@@ -50,13 +50,16 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	conn.SetReadLimit(maxWSMessageBytes)
 
 	sess := &wsSession{
-		conn:     conn,
-		app:      s.app,
-		token:    s.token,
-		inFlight: make(map[string]chan struct{}),
-		writeCh:  make(chan []byte, 32),
-		outDone:  make(chan struct{}),
-		shutdown: make(chan struct{}),
+		conn:       conn,
+		app:        s.app,
+		token:      s.token,
+		broker:     s.broker,
+		hub:        s.hub,
+		endpointID: s.hub.NextEndpointID(),
+		inFlight:   make(map[string]*querySignals),
+		writeCh:    make(chan []byte, 32),
+		outDone:    make(chan struct{}),
+		shutdown:   make(chan struct{}),
 	}
 
 	var wg sync.WaitGroup
@@ -66,20 +69,49 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	wg.Wait()
 
 	sess.cancelAll()
+	// behavior.md §16.8：会话卸载 = 应用本会话贡献的 accumulator。
+	// cancelAll 只是发取消通知；必须等在途 runQuery 全部走完出口并 Release
+	// 完成（queryWG），再逐个 Revoke 本会话成功注册的 keys——否则 reliance
+	// 仍 >0，守卫拒绝，key 反而永久泄漏。只撤自己的 key，故 recovery
+	// exactness（Thm 68）不受其它会话影响。
+	sess.queryWG.Wait()
+	for _, key := range sess.registeredKeys {
+		_ = sess.broker.Revoke(key)
+	}
+	// 阶段 4：断连自动 detach（§16.9.6）。只移除本会话登记的 keys。
+	_ = sess.hub.DropEndpoint(NewSessionEndpoint(sess.endpointID, sess))
 }
 
 type wsSession struct {
-	conn   *websocket.Conn
-	app    *appcore.AppCore
-	token  string
-	connID string
-	authed bool
+	conn  *websocket.Conn
+	app   *appcore.AppCore
+	token string
+	// broker 是进程级共享视图（Server.broker），非 per-session；会话结束只释放
+	// 对它的引用，进程级依赖图不随连接销毁（behavior.md §16.6）。
+	broker *appcore.DriverBroker
+	// hub 是阶段 4 的进程级桥接（attached + pending），跨会话共享。
+	hub *ProviderHub
+	// endpointID 是本会话的 provider 端点 id（§16.12.1 的归属判定：detach /
+	// 断连 / 降级只移除自己的登记）。会话端点用它作 ProviderEndpoint.ID()。
+	endpointID uint64
+	connID     string
+	authed     bool
 	// inFlightMu 只护 inFlight：查询在独立 goroutine 执行后（§6 并发契约），
 	// 注册表被入站循环、各查询的完成路径与取消消息并发访问。
 	inFlightMu sync.Mutex
-	inFlight   map[string]chan struct{}
-	writeCh    chan []byte
-	shutdown   chan struct{}
+	inFlight   map[string]*querySignals
+	// registeredKeys 是本会话**成功注册**的 broker keys（behavior.md §16.8）。
+	// 连接关闭时逐个 Revoke，应用该会话贡献的 accumulator。只记自己的 key，
+	// 保证 recovery exactness（Thm 68）。只由 runInbound goroutine 写、
+	// wg.Wait() 之后读（happens-before），无需额外锁。
+	registeredKeys []protocol.DriverProviderKey
+	// queryWG 等在途 runQuery 全部走完出口并 Release 完成。wg.Wait() 只等
+	// runInbound/runOutbound 两个 goroutine，不等 runQuery；若此处不等待就
+	// 立刻 Revoke，reliance 仍 >0 → 守卫拒绝 → 本会话的 key 反而永久泄漏，
+	// 与「断连自动回收」目标相反。
+	queryWG  sync.WaitGroup
+	writeCh  chan []byte
+	shutdown chan struct{}
 	// outDone 在 runOutbound 退出后关闭：stop() 排干 writeCh 前必须等它，
 	// 否则 close 帧会抢在队列里的 query_error 之前落盘（乱序）。
 	outDone chan struct{}
@@ -147,19 +179,52 @@ drained:
 // including query_cancel — would be processed.
 const wsSendTimeout = 30 * time.Second
 
-func (s *wsSession) send(msg *protocol.ServerMessage) {
+// enqueue 把一帧排进发送队列，返回是否成功入队（§16.9 的 emission 判定点：
+// false = 目标会话已关闭或背压超时，帧未进入发送通道）。跨 session 发送
+// （provider_exec / provider_cancel）必须用它拿 bool；本会话的既有 send
+// 调用点保持 void 语义零改动。
+func (s *wsSession) enqueue(msg *protocol.ServerMessage) bool {
 	data, err := msgpack.Marshal(msg)
 	if err != nil {
-		return
+		return false
 	}
 	select {
 	case s.writeCh <- data:
+		return true
 	case <-time.After(wsSendTimeout):
 		// The outbound writer is wedged (or gone); the session's read idle
 		// reaper will tear it down. Dropping the frame beats blocking the
 		// inbound loop forever.
+		return false
 	case <-s.shutdown:
+		return false
 	}
+}
+
+func (s *wsSession) send(msg *protocol.ServerMessage) {
+	_ = s.enqueue(msg)
+}
+
+// sendBrokerTransition 按 behavior.md §16.5 的「统一 2 帧响应」发消息：
+// 先 broker_state（操作后终态视图；失败时为操作前视图），再 broker_event
+// （notify_d 分类 + 请求 key；失败时带 reason）。与 Rust 侧
+// receive_loop 的 broker arm 严格镜像。
+func (s *wsSession) sendBrokerTransition(key string, tr appcore.BrokerTransition) {
+	reason := ""
+	if tr.Error != nil {
+		reason = tr.Error.Message
+	}
+	s.send(&protocol.ServerMessage{
+		Type:      protocol.ServerMsgBrokerState,
+		Providers: tr.State,
+		Error:     tr.Error,
+	})
+	s.send(&protocol.ServerMessage{
+		Type:   protocol.ServerMsgBrokerEvent,
+		Event:  tr.Event,
+		Key:    protocol.DriverProviderKey(key),
+		Reason: reason,
+	})
 }
 
 func (s *wsSession) runInbound() {
@@ -220,6 +285,87 @@ func (s *wsSession) runInbound() {
 			s.handleQuery(msg)
 		case protocol.ClientMsgQueryCancel:
 			s.handleCancel(msg)
+		case protocol.ClientMsgBrokerRegister:
+			// behavior.md §16.5：不受 §12.2 的 query 认证门禁约束（只登记
+			// key/capabilities，不接触用户数据、不执行 SQL）。
+			if msg.Provider == nil {
+				s.sendBrokerTransition("", appcore.BrokerTransition{
+					State: s.broker.Snapshot(),
+					Event: protocol.DriverBrokerEventNeutral,
+					Error: &protocol.PolyDBError{
+						Code:    protocol.ErrInvalidParam,
+						Message: "broker_register requires provider",
+					},
+				})
+				break
+			}
+			key := string(msg.Provider.Key)
+			tr := s.broker.Register(*msg.Provider)
+			// 只有成功登记才记入本会话的 keys（失败不产生转移，Def 19）。
+			if tr.Error == nil {
+				s.registeredKeys = append(s.registeredKeys, msg.Provider.Key)
+			}
+			s.sendBrokerTransition(key, tr)
+		case protocol.ClientMsgBrokerRevoke:
+			key := string(msg.Key)
+			tr := s.broker.Revoke(msg.Key)
+			// 撤回成功则从本会话清单移除，避免连接关闭时重复 Revoke。
+			if tr.Error == nil {
+				filtered := s.registeredKeys[:0]
+				for _, k := range s.registeredKeys {
+					if k != msg.Key {
+						filtered = append(filtered, k)
+					}
+				}
+				s.registeredKeys = filtered
+			}
+			s.sendBrokerTransition(key, tr)
+		case protocol.ClientMsgBrokerSetGrant:
+			// 阶段 5：能力衰减的 wire 入口（§16.10.2）。只能收紧不能放宽；
+			// 成功属 notify_d 的 neutral 分类（不 reload、依赖图不动）。
+			tr := s.broker.SetGranted(msg.Key, msg.GrantedCapabilities)
+			s.sendBrokerTransition(msg.Key, tr)
+		case protocol.ClientMsgProviderAttach:
+			// §16.12.1：会话端点是执行端抽象的一个实现。
+			// §16.18：commutative 由 attach 方自证（witnessed，Thm 47）。
+			ep := NewSessionEndpoint(s.endpointID, s)
+			err, attached := s.hub.Attach(msg.Key, ep, msg.Commutative)
+			event := protocol.DriverBrokerEventActivating
+			if err != nil {
+				event = protocol.DriverBrokerEventNeutral
+			}
+			s.send(&protocol.ServerMessage{
+				Type:     protocol.ServerMsgProviderAck,
+				Event:    event,
+				Key:      msg.Key,
+				Attached: attached,
+				Error:    err,
+			})
+		case protocol.ClientMsgProviderDetach:
+			ep := NewSessionEndpoint(s.endpointID, s)
+			err, attached := s.hub.Detach(msg.Key, ep)
+			event := protocol.DriverBrokerEventDeactivating
+			if err != nil {
+				event = protocol.DriverBrokerEventNeutral
+			}
+			s.send(&protocol.ServerMessage{
+				Type:     protocol.ServerMsgProviderAck,
+				Event:    event,
+				Key:      msg.Key,
+				Attached: attached,
+				Error:    err,
+			})
+		case protocol.ClientMsgProviderResult:
+			// 迟到结果（pending 已被 cancel/timeout 清除）→ Complete 返回 false，
+			// 静默扣住（withhold，§16.9.2 step 5）。已发射的帧不撤回。
+			out := providerOutcome{result: msg.Result, err: msg.Error}
+			if msg.Result == nil && msg.Error == nil {
+				out.err = &protocol.PolyDBError{
+					Code:    protocol.ErrInvalidParam,
+					Message: "provider_result has neither result nor error",
+				}
+			}
+			_ = s.hub.Complete(msg.QueryID, out)
 		default:
 			s.send(&protocol.ServerMessage{
 				Type:  protocol.ServerMsgQueryError,
@@ -270,6 +416,14 @@ const wsMaxConcurrentQueries = 16
 // registerQuery 把一条查询登记为可取消。返回 false 表示会话的在途查询已到闸门，
 // 或该 query_id 已在途——覆盖已存在的 id 会孤儿化先前查询的取消通道，后来的
 // query_cancel 关的是新通道，先前的查询永远无法取消。重复 id 由调用方回错误帧。
+// querySignals 是一次在途查询的**成对信号**（behavior.md §16.15）：正常完成
+// 只关 done（不触发取消），真取消才关 cancel——两者若共用一个通道，完成时的
+// 关闭会被 watcher 误判为取消，正常完成的查询会被吞掉。
+type querySignals struct {
+	cancel chan struct{}
+	done   chan struct{}
+}
+
 func (s *wsSession) registerQuery(id string) bool {
 	s.inFlightMu.Lock()
 	defer s.inFlightMu.Unlock()
@@ -279,22 +433,44 @@ func (s *wsSession) registerQuery(id string) bool {
 	if len(s.inFlight) >= wsMaxConcurrentQueries {
 		return false
 	}
-	s.inFlight[id] = make(chan struct{})
+	// 成对信号（§16.15）：正常完成只关 done，真取消才关 cancel。
+	s.inFlight[id] = &querySignals{
+		cancel: make(chan struct{}),
+		done:   make(chan struct{}),
+	}
 	return true
 }
 
-// retireQuery 注销一条在途查询并 close 它的取消通道。close 恰好发生一次：
-// 完成路径、query_cancel 与会话收尾都可能想关，先删后关（同一把锁内）让
-// 三者互斥，第二次 close 不会发生。
+// finishQuery 正常完成：从在途表注销并关闭 done 通道（**不**触发取消）。
+// watcher 看到 done 直接退出，查询上下文不被污染——正常完成的结果得以发射
+// （§16.15 完成与取消信号分离）。
+func (s *wsSession) finishQuery(id string) bool {
+	return s.retireQuerySignal(id, false)
+}
+
+// retireQuery 真取消：从在途表注销并关闭 cancel 通道（watcher 据此中断执行）。
+// 调用者：handleCancel（客户端 query_cancel）、cancelAll（会话收尾）、
+// timeout/panic 分支（放弃执行）。
 func (s *wsSession) retireQuery(id string) bool {
+	return s.retireQuerySignal(id, true)
+}
+
+// retireQuerySignal 是 finishQuery / retireQuery 的公共实现：先删后关
+// （同一把锁内删，锁外关）让重复调用互斥，close 恰好发生一次。
+func (s *wsSession) retireQuerySignal(id string, cancel bool) bool {
 	s.inFlightMu.Lock()
-	cancel, ok := s.inFlight[id]
+	sig, ok := s.inFlight[id]
 	if ok {
 		delete(s.inFlight, id)
 	}
 	s.inFlightMu.Unlock()
-	if ok {
-		close(cancel)
+	if !ok {
+		return false
+	}
+	if cancel {
+		close(sig.cancel)
+	} else {
+		close(sig.done)
 	}
 	return ok
 }
@@ -338,7 +514,40 @@ func (s *wsSession) handleQuery(msg protocol.ClientMessage) {
 		})
 		return
 	}
+	// behavior.md §16.8：可选的 broker 绑定。CheckAndAcquire 在同一临界区原子
+	// 完成「能力校验 + acquire」，避免 revoke 插进校验与绑定之间（Thm 71）。
+	// 失败时不发 QueryStarted、不进 inFlight、不 acquire。
+	if msg.ProviderKey != "" {
+		if pe := s.broker.CheckAndAcquire(protocol.DriverProviderKey(msg.ProviderKey)); pe != nil {
+			s.send(&protocol.ServerMessage{
+				Type:    protocol.ServerMsgQueryError,
+				QueryID: msg.QueryID,
+				Error:   pe,
+			})
+			return
+		}
+		// §16.9.2 step 2：必须在 registerQuery / QueryStarted **之前**查
+		// attached 表。未 attach 时立刻归还 reliance（CheckAndAcquire 已
+		// 成功），不进 inFlight、不发 QueryStarted。
+		if s.hub.ProviderEndpoint(protocol.DriverProviderKey(msg.ProviderKey)) == nil {
+			s.broker.Release(protocol.DriverProviderKey(msg.ProviderKey))
+			s.send(&protocol.ServerMessage{
+				Type:    protocol.ServerMsgQueryError,
+				QueryID: msg.QueryID,
+				Error: &protocol.PolyDBError{
+					Code:    protocol.ErrDriverNotAvailable,
+					Message: "no attached provider for key: " + msg.ProviderKey,
+				},
+			})
+			return
+		}
+	}
 	if !s.registerQuery(msg.QueryID) {
+		// CheckAndAcquire 已成功但查询没进 inFlight：必须立刻归还，避免
+		// reliance 泄漏（Rust 侧由 BrokerRelianceGuard 的 Drop 兜同一情形）。
+		if msg.ProviderKey != "" {
+			s.broker.Release(protocol.DriverProviderKey(msg.ProviderKey))
+		}
 		// Either the session's in-flight gate is full, or this query_id is
 		// already running — the old overwrite silently orphaned the first
 		// query's cancel channel. The caller can tell the cases apart by
@@ -355,6 +564,8 @@ func (s *wsSession) handleQuery(msg protocol.ClientMessage) {
 		Type:    protocol.ServerMsgQueryStarted,
 		QueryID: msg.QueryID,
 	})
+	// queryWG.Add 必须在 go 之前：断连收尾靠它等在途查询 Release 完成。
+	s.queryWG.Add(1)
 	go s.runQuery(msg, connID)
 }
 
@@ -364,6 +575,18 @@ func (s *wsSession) handleQuery(msg protocol.ClientMessage) {
 // covers HTTP handler goroutines, so a panicking driver on this path would
 // otherwise take the process down.
 func (s *wsSession) runQuery(msg protocol.ClientMessage, connID string) {
+	// behavior.md §16.8：reliance 绑定覆盖**所有**出口（正常完成 / 执行错误 /
+	// cancel / timeout / 二次 cancel 竞态 / panic）。用最外层合成 defer 而非
+	// 逐个出口手写 Release，避免遗漏造成守卫永久不放开。顺序钉死为
+	// Release→queryWG.Done：若反过来，断连收尾的 queryWG.Wait() 会在
+	// reliance 归零前返回，Revoke 被守卫拒绝、key 永久泄漏。
+	// 与 Rust 侧 BrokerRelianceGuard 的 Drop 严格镜像。
+	defer func() {
+		if msg.ProviderKey != "" {
+			s.broker.Release(protocol.DriverProviderKey(msg.ProviderKey))
+		}
+		s.queryWG.Done()
+	}()
 	// S-01：任务起点——WS 与 HTTP 的 recordQuery 共用，四态收口见 select。
 	started := time.Now()
 	defer func() {
@@ -380,14 +603,18 @@ func (s *wsSession) runQuery(msg protocol.ClientMessage, connID string) {
 	ctx, cancelFn := context.WithCancel(context.Background())
 	defer cancelFn()
 	go func() {
-		cancel, ok := s.cancelChanFor(msg.QueryID)
+		sig, ok := s.cancelSignalsFor(msg.QueryID)
 		if !ok {
 			// 快查询在 watcher 被调度前已完成并注销（nil 通道永不触发，
 			// 否则该 goroutine 要挂到会话关闭——高频短查询下持续累积）。
 			return
 		}
 		select {
-		case <-cancel:
+		// §16.15：done = 正常完成（**不**取消——否则完成会被误判为取消，
+		// 正常查询被吞掉）；cancel = 真取消；shutdown = 会话收尾（等同取消）。
+		case <-sig.done:
+			return
+		case <-sig.cancel:
 			cancelFn()
 		case <-s.shutdown:
 			cancelFn()
@@ -407,16 +634,87 @@ func (s *wsSession) runQuery(msg protocol.ClientMessage, connID string) {
 	}
 	ch := make(chan execOutcome, 1)
 	go func() {
+		// panicMiddleware 只覆盖 HTTP handler goroutine；执行 goroutine 若 panic
+		// 会绕过 runQuery 的 defer 链、崩进程并永久泄漏 reliance。转成错误送进
+		// ch，走 runQuery 的正常错误出口（B），使合成 defer 仍能 Release。
+		defer func() {
+			if r := recover(); r != nil {
+				ch <- execOutcome{err: fmt.Errorf("internal error: %v", r)}
+			}
+		}()
+		// §16.9：带 provider_key 时把内置执行换成「发 provider_exec + 等
+		// provider_result」；不带时逐字保留内置驱动路径（§16.9 硬要求）。
+		if msg.ProviderKey != "" {
+			// §16.18.2：分派（轮询）+ 在途计数 + 登记**一次**完成——分开做
+			// 会让轮询推进两次，exec 与计数落在不同实例上。
+			wait, ep := s.hub.RegisterPending(msg.QueryID, protocol.DriverProviderKey(msg.ProviderKey))
+			if ep == nil {
+				ch <- execOutcome{err: &protocol.PolyDBError{
+					Code:    protocol.ErrDriverNotAvailable,
+					Message: "provider detached before exec: " + msg.ProviderKey,
+				}}
+				return
+			}
+			// 进程端点走回调面：把 connection_id 换成**不透明 handle**，provider
+			// 因此永远看不到连接元数据与凭据（§16.14.1）。会话端点不需要。
+			handle := ""
+			if ep.Kind() == EndpointProcess {
+				handle = s.hub.HandleFor(connID)
+				if handle == "" {
+					s.hub.Cancel(msg.QueryID, protocol.DriverProviderKey(msg.ProviderKey))
+					ch <- execOutcome{err: &protocol.PolyDBError{
+						Code:    protocol.ErrDriverNotAvailable,
+						Message: "provider callback handle unavailable",
+					}}
+					return
+				}
+			}
+			// emission：投递成功即已推过桥接边界，不可逆（§6.1）。投递经端点
+			// 抽象，传输由端点自己决定（会话端点 / 未来的进程端点）。
+			if !ep.Emit(&protocol.ServerMessage{
+				Type:    protocol.ServerMsgProviderExec,
+				QueryID: msg.QueryID,
+				SQL:     msg.SQL,
+				Params:  msg.Params,
+				Handle:  handle,
+			}) {
+				s.hub.Cancel(msg.QueryID, protocol.DriverProviderKey(msg.ProviderKey))
+				ch <- execOutcome{err: &protocol.PolyDBError{
+					Code:    protocol.ErrDriverNotAvailable,
+					Message: "provider endpoint unreachable: " + msg.ProviderKey,
+				}}
+				return
+			}
+			out := <-wait
+			var err error
+			if out.err != nil {
+				err = out.err
+			}
+			ch <- execOutcome{res: out.result, err: err}
+			return
+		}
 		res, err := s.app.Execute(ctx, connID, msg.SQL, msg.Params...)
 		ch <- execOutcome{res, err}
 	}()
 
+	// §16.9：provider 路径独有的第三个 select arm。provider_exec 是 emission，
+	// 远端可能永不回 provider_result；没有它，cancel/shutdown 后 runQuery 永久
+	// 阻塞 → queryWG.Wait() 挂死 → Release 不执行 → reliance 泄漏。仅 provider
+	// 路径启用（nil 通道永不触发），内置路径逐字不变——旧路径靠
+	// s.app.Execute 响应 ctx 取消从 ch 返回，语义由 cancelled 判定继承。
+	cancelDoneCh := (<-chan struct{})(nil)
+	if msg.ProviderKey != "" {
+		cancelDoneCh = ctx.Done()
+	}
 	select {
 	case result := <-ch:
 		// 先取取消判定再注销：注销会 close 取消通道，watcher 随之触发
 		// cancelFn，晚一步读 ctx.Err() 会把正常完成误判成已取消。
 		cancelled := ctx.Err() != nil
-		s.retireQuery(msg.QueryID)
+		// §16.15：正常完成只关 done（不触发取消）——若用 retireQuery（关
+		// cancel），watcher 会在此后触发 cancelFn，污染 ctx，发射前的二次
+		// 判定就会把正常完成误判成已取消（偶发吞掉结果）。
+		s.finishQuery(msg.QueryID)
 		rows := 0
 		if result.res != nil {
 			rows = len(result.res.Rows)
@@ -467,9 +765,26 @@ func (s *wsSession) runQuery(msg protocol.ClientMessage, connID string) {
 			QueryID: msg.QueryID,
 			Result:  applyMaxRows(result.res, rowLimitFrom(msg.MaxRows)),
 		})
+	case <-cancelDoneCh:
+		// §16.9.2 step 5 + §16.9.3：cancel/shutdown 的 withhold + compensation。
+		// 先清 pending（迟到的 provider_result 被扣住），再向 provider 发
+		// best-effort provider_cancel；已发射的帧不撤回（PD-11 边界）。
+		s.hub.Cancel(msg.QueryID, protocol.DriverProviderKey(msg.ProviderKey))
+		// cancel 通道已由触发源关闭（handleCancel/cancelAll/timeout），此处
+		// 只清理表项——二次 close 会 panic（§16.15）。
+		s.finishQuery(msg.QueryID)
+		recordQuery(started, nil, true, 0, stmtKeyword(msg.SQL))
+		s.send(&protocol.ServerMessage{
+			Type:    protocol.ServerMsgQueryCancelled,
+			QueryID: msg.QueryID,
+		})
 	case <-timeoutCh:
 		// 到点先回 TIMEOUT，被放弃的执行在后台自然结束（best-effort）。
-		// S-01：超时是"用户视角的取消"。
+		// S-01：超时是"用户视角的取消"。provider 路径同样要 withhold 迟到的
+		// provider_result 并发 compensation。
+		if msg.ProviderKey != "" {
+			s.hub.Cancel(msg.QueryID, protocol.DriverProviderKey(msg.ProviderKey))
+		}
 		s.retireQuery(msg.QueryID)
 		recordQuery(started, nil, true, 0, stmtKeyword(msg.SQL))
 		s.send(&protocol.ServerMessage{
@@ -480,18 +795,17 @@ func (s *wsSession) runQuery(msg protocol.ClientMessage, connID string) {
 	}
 }
 
-// cancelChanFor snapshots the cancel channel of an in-flight query. The query
-// may complete between registration and the watcher's read; a missing entry
-// yields nil, whose receive never fires — the watcher then just waits for
-// shutdown.
-func (s *wsSession) cancelChanFor(id string) (<-chan struct{}, bool) {
+// cancelSignalsFor 返回在途查询的成对信号。查询可能完成于注册与 watcher 读取
+// 之间；缺项返回 nil——done/cancel 通道都是 nil 时永不触发，watcher 直接退出
+// （快查询不累积 goroutine）。
+func (s *wsSession) cancelSignalsFor(id string) (*querySignals, bool) {
 	s.inFlightMu.Lock()
 	defer s.inFlightMu.Unlock()
-	cancel, ok := s.inFlight[id]
+	sig, ok := s.inFlight[id]
 	if !ok {
 		return nil, false
 	}
-	return cancel, true
+	return sig, true
 }
 
 func (s *wsSession) handleCancel(msg protocol.ClientMessage) {

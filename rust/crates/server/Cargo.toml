@@ -20,6 +20,17 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 dirs = { workspace = true }
 
+# §16.16：provider 侧沙箱——Windows Job Object（生命周期绑定 + 内存上限）。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+# §16.16.1 Unix 行：进程组（CommandExt）由 std 提供；provider 自限 RLIMIT_AS
+# 走 Go 参考实现，宿主侧无需 libc。
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 tokio-tungstenite = "0.29"

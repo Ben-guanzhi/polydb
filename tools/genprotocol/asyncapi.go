@@ -49,7 +49,13 @@ func loadAsyncAPI(spec *Spec, path string) error {
 		if name == "" {
 			continue
 		}
-		if name == "Hello" || name == "Query" || name == "QueryCancel" {
+		// 客户端消息白名单：asyncapi 3.0 的 operation 方向不足以让本工具
+		// 判别归属（loadAsyncAPI 只读 channels.query.messages），故按消息名分类。
+		// 新增客户端消息必须同步加到这里，否则会被误归到 ServerMessage，
+		// 触发 `variant discriminators drift`。
+		if name == "Hello" || name == "Query" || name == "QueryCancel" ||
+			name == "BrokerRegister" || name == "BrokerRevoke" || name == "BrokerSetGranted" ||
+			name == "ProviderAttach" || name == "ProviderDetach" || name == "ProviderResult" {
 			clientOrder = append(clientOrder, name)
 		} else {
 			serverOrder = append(serverOrder, name)

@@ -109,7 +109,8 @@ polydb/
 │ │ ├── polydb-server/ # HTTP+WS
 │ │ ├── polydb-tui/ # bubbletea
 │ │ ├── polydb-cli/ # 本地 SQLite 最小查询器（非交互）
-│ │ └── polydb-mcp/ # MCP server（stdio JSON-RPC，只读工具，M17）
+│ │ ├── polydb-mcp/ # MCP server（stdio JSON-RPC，只读工具，M17）
+│ │ └── polydb-provider/ # 参考 provider 进程（stdio JSON-RPC，M18，docs/provider.md）
 │ ├── pkg/
 │ │ ├── protocol/ # 由 spec 生成
 │ │ ├── appcore/ dbcore/ server/ storage/ sshtunnel/ keyring/ mcp/
@@ -125,10 +126,17 @@ polydb/
 │ └── src/api/ # 由 spec 生成 TS 类型（@polydb/api）
 ├── test/contract/ # 双后端对拍
 └── docs/
+    └── provider.md # 进程外 provider 机制总览（M18，spec/behavior.md §16 的地图）
 
 text
 
 > **命名约定**：Rust 目录用短名（`core`、`db-core`），`Cargo.toml` 里 package name 用前缀 `polydb-*`。Go 目录用短名，import path 用 `github.com/<org>/polydb/pkg/*`。
+
+> **进程外 provider（M18）**：第三方驱动以独立进程接入，契约与语义的唯一真相源是
+> `spec/behavior.md` §16 + `spec/asyncapi.yaml` + `spec/schemas/driver-broker.json`；
+> 实现在 `rust/crates/server/src/provider_*.rs` 与 `go/pkg/server/provider_*.go`
+> （严格镜像）；运维开关与总览见 `docs/provider.md`。改 provider 相关行为**必须**
+> 先改 spec/behavior.md §16 再动代码（铁律 6），契约测试在 `test/contract/` 双端对拍。
 
 ---
 
@@ -495,7 +503,7 @@ Rust workspace	polydb
 Rust crate 前缀	polydb-
 Rust 二进制	polydb-gui（仅 GUI；TUI/Server 另一套走 Go）
 Go module	github.com/<org>/polydb
-Go 二进制	polydb-server / polydb-tui / polydb-cli（本地 SQLite 查询器）/ polydb-mcp（MCP 只读工具）
+Go 二进制	polydb-server / polydb-tui / polydb-cli（本地 SQLite 查询器）/ polydb-mcp（MCP 只读工具）/ polydb-provider（参考 provider 进程，M18）
 Web 包名	@polydb/api / @polydb/web
 环境变量前缀	POLYDB_
 配置目录	~/.config/polydb/

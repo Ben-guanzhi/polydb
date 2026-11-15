@@ -40,11 +40,24 @@ import (
 // Windows 上可用 wmic/PowerShell 的 CommandLine 匹配）。
 const rustBackendMarker = "polydb-server.exe"
 
-// TestMain 兜底清理：包内测试全部结束（含超时）后杀掉遗留的 Rust 后端。
+// providerMarker 是参考 provider 进程的镜像名（§16.13.4：Rust 后端被强制
+// 终止时，它拉起的 provider 进程不会随之退出，需兜底清理）。
+const providerMarker = "polydb-provider.exe"
+
+// TestMain 兜底清理：包内测试全部结束（含超时）后杀掉遗留的后端与 provider 进程。
 func TestMain(m *testing.M) {
 	code := m.Run()
 	killRustBackends()
+	killProviderProcesses()
 	os.Exit(code)
+}
+
+// killProviderProcesses 杀掉所有仍在运行的参考 provider 进程。
+func killProviderProcesses() {
+	out, err := exec.Command("taskkill", "/F", "/IM", providerMarker).CombinedOutput()
+	if err == nil || strings.Contains(string(out), "not found") {
+		return
+	}
 }
 
 // killRustBackends 杀掉所有仍在运行的 Rust 后端进程。

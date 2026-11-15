@@ -43,6 +43,15 @@ type Server struct {
 	// 的 per-session 门控，HTTP 路径此前无上限——单个 HTTP 客户端可开无限并发
 	// goroutine 和 DB 连接。16 与 WS 一致。
 	httpGate chan struct{}
+	// broker 是进程级 driver broker 视图（behavior.md §16.6）。挂在 Server 上
+	// 而非 handleWS 内：所有 WS 连接共享同一份依赖图，注册在连接 A 的状态对
+	// 连接 B 可见。*appcore.DriverBroker 自带 RWMutex，可跨 session 并发共享。
+	broker *appcore.DriverBroker
+	// hub 是阶段 4 的进程级 provider 桥接（attached + pending，§16.9）。
+	// 与 broker 同理挂在 Server 上，跨 WS 连接共享。
+	hub *ProviderHub
+	// configStop 停止配置对账循环（§16.19；未设置配置文件时为 no-op）。
+	configStop func()
 }
 
 // httpMaxConcurrentQueries 是 HTTP 路径允许的全局并发查询数。与 WS 的
@@ -52,11 +61,29 @@ const httpMaxConcurrentQueries = 16
 func New(app *appcore.AppCore) *Server {
 	// S-01：进程级记录器；POLYDB_USABILITY 未开时是 no-op（Record 不写文件）。
 	InitUsability(userDataDir())
-	return &Server{
+	broker := appcore.NewDriverBroker()
+	// 阶段 9：受限回调面（仅回环 + 随机端口 + 进程级令牌，§16.14.2）。
+	// 失败不阻断启动：provider 进程仍可用（只是不能代执行真实 SQL）。
+	callback, cbErr := newCallbackRegistry(app)
+	if cbErr != nil {
+		slog.Warn("provider callback registry unavailable", "error", cbErr)
+	}
+	s := &Server{
 		app:          app,
 		httpInFlight: map[string]context.CancelFunc{},
 		httpGate:     make(chan struct{}, httpMaxConcurrentQueries),
+		broker:       broker,
+		// hub 与 broker 共享同一实例：进程端点的能力声明注册到同一个 broker
+		// （§16.13.2），能力校验才看得到。
+		hub: NewProviderHub(broker, callback),
 	}
+	// §16.13.2：按配置拉起 provider 进程（未配置 POLYDB_PROVIDER_PROCS 时无进程）。
+	for _, key := range s.hub.StartProcessEndpoints() {
+		slog.Warn("provider process failed to start", "key", key)
+	}
+	// §16.19：配置对账循环（未设置 POLYDB_PROVIDER_CONFIG_FILE 时为 no-op）。
+	s.configStop = s.hub.StartProviderConfigReconcile()
+	return s
 }
 
 // userDataDir 返回 server 的本地数据目录（无用户目录时退回当前目录）。
@@ -72,6 +99,26 @@ func NewWithToken(app *appcore.AppCore, token string) *Server {
 	s := New(app)
 	s.token = token
 	return s
+}
+
+// SetProviderHub 注入 provider 桥接 hub（测试用；生产由 New 从
+// POLYDB_PROVIDER_ALLOW 构造，deny-by-default）。
+func (s *Server) SetProviderHub(h *ProviderHub) {
+	s.hub = h
+}
+
+// Close 释放服务端资源：停止配置对账循环（§16.19）、终止并回收 provider
+// 进程（§16.13.4：宿主必须回收子进程，不留僵尸）。幂等。
+func (s *Server) Close() {
+	if s.configStop != nil {
+		s.configStop()
+	}
+	s.hub.CloseProcessEndpoints()
+}
+
+// Hub 返回进程级 provider 桥接（测试/诊断观测用，§16.19 的撤下证据）。
+func (s *Server) Hub() *ProviderHub {
+	return s.hub
 }
 
 // registerHTTPQuery 把 queryID 注册到 in-flight registry，返回可取消 ctx 与注销函数。

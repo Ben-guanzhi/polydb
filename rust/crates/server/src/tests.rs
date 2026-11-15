@@ -850,6 +850,7 @@ fn ws_query(conn_id: uuid::Uuid) -> ClientMessage {
             pagination: None,
             timeout_ms: None,
             max_rows: None,
+            provider_key: None,
         },
     }
 }
@@ -1312,6 +1313,7 @@ fn ws_query_with(
             pagination: None,
             timeout_ms,
             max_rows,
+            provider_key: None,
         },
     }
 }

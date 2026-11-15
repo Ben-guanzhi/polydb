@@ -303,6 +303,8 @@ export interface QueryRequest {
   timeout_ms?: number;
   /** Maximum rows to return (0 = use server default) */
   max_rows?: number;
+  /** Optional out-of-process driver broker key (behavior.md §16.8). When present, the query is bound to that provider for its whole in-flight lifetime: the broker checks the provider's granted_capabilities contain 'query', then acquires/reliance around execution so a concurrent revoke is refused by the ¬ relied_n(γ) guard. Absent = built-in driver path, unchanged. */
+  provider_key?: string;
 }
 
 export type StatementType = 'ddl' | 'delete' | 'insert' | 'other' | 'select' | 'update';
@@ -483,15 +485,59 @@ export interface WsAuth {
   token?: string;
 }
 
+export type DriverProviderKey = string;
+
+export type DriverCapability = 'execute' | 'kv' | 'metadata' | 'query' | 'transaction';
+
+export interface DriverProvider {
+  /** Unique namespaced key. A second provider claiming the same key is rejected (cannot provide twice, Def 19) — unless the provider declares commutative (Thm 47 witnessed coeffect): the key's service is instance-interchangeable, so multiple providers may serve it concurrently (§16.18). */
+  key: DriverProviderKey;
+  /** Wire name of the database dialect this provider speaks (e.g. 'duckdb'); informational, NOT a DatabaseKind enum value. */
+  kind: string;
+  /** Version of the broker async contract the provider was built against; version probe precedes dereference (plugin-abi.md §2.3). */
+  protocol_version: number;
+  /** Declared capability requests; the inject declaration is a capability request known before the component runs (§6.3). */
+  capabilities: DriverCapability[];
+  /** Witnessed coeffect (Thm 47): the provider asserts its key is a commutative table — instances are interchangeable, requests may be served by any of them, and withdrawing one never disturbs the others. Enables multi-instance attachment and load balancing (§16.18); without it a second attach on the same key is a rolling update (replacement), not coexistence. */
+  commutative?: boolean;
+  /** Optional transport hint for the out-of-process channel (WS URL / stdio pipe name). Empty means the current WS connection is the bridge. */
+  endpoint?: string;
+}
+
+export interface DriverProviderState {
+  key: DriverProviderKey;
+  kind: string;
+  protocol_version: number;
+  /** Declared (requested) capabilities. */
+  capabilities: DriverCapability[];
+  /** Effective capabilities after interception; a subset of capabilities. Changed at runtime without a reload (§6.3 in-place intercept update). */
+  granted_capabilities: DriverCapability[];
+  /** Number of in-flight operations bound to this provider. Non-zero reliance forbids withdrawal: the ¬ relied_n(γ) guard (Def 55). */
+  reliance: number;
+}
+
+export type DriverBrokerEvent = 'activating' | 'deactivating' | 'neutral';
+
 // ─── WebSocket ────────────────────────────────────────────
 
 export type ClientMessage =
-  { type: 'hello'; auth?: WsAuth; client_version?: string; connection_id: ConnectionId }
+  { type: 'broker_register'; provider: DriverProvider }
+  | { type: 'broker_revoke'; key: DriverProviderKey }
+  | { type: 'broker_set_granted'; granted_capabilities: DriverCapability[]; key: DriverProviderKey }
+  | { type: 'hello'; auth?: WsAuth; client_version?: string; connection_id: ConnectionId }
+  | { type: 'provider_attach'; commutative?: boolean; key: DriverProviderKey }
+  | { type: 'provider_detach'; key: DriverProviderKey }
+  | { type: 'provider_result'; error?: PolyDBError; query_id: string; result?: QueryResult }
   | { type: 'query'; query_id: string } & QueryRequest
   | { type: 'query_cancel'; query_id: string };
 
 export type ServerMessage =
+  | { type: 'broker_event'; event: DriverBrokerEvent; key: DriverProviderKey; reason?: string }
+  | { type: 'broker_state'; error?: PolyDBError; providers: DriverProviderState[] }
   | { type: 'hello_ack'; db_version?: string; server_version: string }
+  | { type: 'provider_ack'; attached: DriverProviderKey[]; callback_token?: string; callback_url?: string; error?: PolyDBError; event: DriverBrokerEvent; key: DriverProviderKey }
+  | { type: 'provider_cancel'; query_id: string }
+  | { type: 'provider_exec'; handle?: string; params?: Value[]; query_id: string; sql: string }
   | { type: 'query_cancelled'; query_id: string; rows_returned?: number }
   | { type: 'query_error'; error: PolyDBError; query_id: string }
   | { type: 'query_progress'; message?: string; query_id: string; rows_fetched?: number }
