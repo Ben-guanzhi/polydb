@@ -34,7 +34,7 @@ type DriverOpener func(ctx context.Context, info protocol.ConnectionInfo, passwo
 // 在 polydb 协议层的对应角色：ref 计数是 `relies_n(γ)` 的注册表级对应物，
 // UnregisterDriver 在 ref > 0 时拒绝撤回（PD-06）。
 //
-// 与内核注册表的关系：内核 `github.com/dbcore/dbcore` 的 ConnSpec/Driver 面是
+// 与内核注册表的关系：内核 `github.com/Ben-guanzhi/dbcore` 的 ConnSpec/Driver 面是
 // 协议无关的，polydb 的 protocol.* 面无法直接消费（见 bridge 包头注释的 Option B
 // 说明）。因此这里保留一层协议适配注册表，并用 registry_kinds_test 把两端的
 // kind 集合钉在一起——新增引擎若只在一边登记，门禁即红灯（PD-15）。

@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dbcore/dbcore"
-	"github.com/dbcore/dbcore/drivertest"
-	dbsqlite "github.com/dbcore/dbcore/sqlite"
+	"github.com/Ben-guanzhi/dbcore"
+	"github.com/Ben-guanzhi/dbcore/drivertest"
+	dbsqlite "github.com/Ben-guanzhi/dbcore/sqlite"
 	"github.com/polydb/polydb/pkg/protocol"
 )
 

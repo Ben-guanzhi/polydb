@@ -4,7 +4,7 @@ import (
 	"sort"
 	"testing"
 
-	kernel "github.com/dbcore/dbcore"
+	kernel "github.com/Ben-guanzhi/dbcore"
 	pdb "github.com/polydb/polydb/pkg/dbcore"
 	// 六个 polydb 驱动包各自 init() 登记 polydb 注册表（RegisterDriver），
 	// 同时它们 import 对应的内核引擎包（RegisterFactory），因此这里同时把两端

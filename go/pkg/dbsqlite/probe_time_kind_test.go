@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	dbc "github.com/dbcore/dbcore"
+	dbc "github.com/Ben-guanzhi/dbcore"
 )
 
 // §94 probe: does the polydb protocol path preserve the ValTime kind?

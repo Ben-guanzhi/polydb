@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	dbcoreredis "github.com/dbcore/dbcore/redis"
+	dbcoreredis "github.com/Ben-guanzhi/dbcore/redis"
 )
 
 // D5（spec/behavior.md §1.3）验证：用最小 RESP 假服务器模拟真实 Redis 的分批 SCAN

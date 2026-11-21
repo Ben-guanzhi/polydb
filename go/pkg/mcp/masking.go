@@ -15,7 +15,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/dbcore/dbcore/masking"
+	"github.com/Ben-guanzhi/dbcore/masking"
 	"github.com/polydb/polydb/pkg/protocol"
 )
 

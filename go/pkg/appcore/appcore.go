@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	dbc "github.com/dbcore/dbcore"
+	dbc "github.com/Ben-guanzhi/dbcore"
 	"github.com/google/uuid"
 	"github.com/polydb/polydb/pkg/dbcore"
 	"github.com/polydb/polydb/pkg/dbcore/bridge"
@@ -22,7 +22,7 @@ import (
 
 	// PD-01/PD-02：各驱动包的 init() 把 opener 登记进 pkg/dbcore 的驱动分派
 	// 注册表。这里的空导入就是「按 kind 选择引擎」的机制——与内核
-	// `_ "github.com/dbcore/dbcore/<engine>"` 的 opt-in 纪律一致，二进制不含
+	// `_ "github.com/Ben-guanzhi/dbcore/<engine>"` 的 opt-in 纪律一致，二进制不含
 	// 未使用驱动。
 	_ "github.com/polydb/polydb/pkg/dbmssql"
 	_ "github.com/polydb/polydb/pkg/dbmysql"

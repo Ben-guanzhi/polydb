@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	dbc "github.com/dbcore/dbcore"
-	dbcoresqlite "github.com/dbcore/dbcore/sqlite"
+	dbc "github.com/Ben-guanzhi/dbcore"
+	dbcoresqlite "github.com/Ben-guanzhi/dbcore/sqlite"
 	pdb "github.com/polydb/polydb/pkg/dbcore"
 	"github.com/polydb/polydb/pkg/dbcore/bridge"
 	"github.com/polydb/polydb/pkg/protocol"
@@ -65,7 +65,7 @@ func Open(ctx context.Context, path string) (*Conn, error) {
 	return &Conn{db: db, path: path, kern: dbcoresqlite.NewFromDB(db)}, nil
 }
 
-// ─── dbcore-native implementation (shared github.com/dbcore/dbcore contract) ───
+// ─── dbcore-native implementation (shared github.com/Ben-guanzhi/dbcore contract) ───
 // Conn implements dbc.SQLTxDriver directly; the protocol-native surface is served by
 // ProtocolDriver (see dbsqlite_protocol.go) for polydb's legacy consumers.
 

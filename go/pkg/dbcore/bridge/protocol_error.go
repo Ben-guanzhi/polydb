@@ -10,7 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 
-	"github.com/dbcore/dbcore/dberror"
+	"github.com/Ben-guanzhi/dbcore/dberror"
 	"github.com/polydb/polydb/pkg/protocol"
 )
 

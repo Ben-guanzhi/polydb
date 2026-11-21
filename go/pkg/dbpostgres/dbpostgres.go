@@ -1,7 +1,7 @@
 // Package dbpostgres 实现基于 jackc/pgx/v5（stdlib 适配）的 SQL 驱动。
 //
 // Option B（INTEGRATION-PLAN P1-5 收口）：Conn 原生实现共享内核
-// github.com/dbcore/dbcore 的 SQLTxDriver 契约——执行/事务/目录/DDL/表浏览
+// github.com/Ben-guanzhi/dbcore 的 SQLTxDriver 契约——执行/事务/目录/DDL/表浏览
 // 全部委托内核驱动，方言知识只在内核维护一份。polydb 的 protocol 类型面
 // 由同包的 ProtocolDriver（dbpostgres_protocol.go）适配提供，appcore 经
 // NewProtocolDriver 消费。
@@ -13,8 +13,8 @@ import (
 	"fmt"
 	"sync"
 
-	dbc "github.com/dbcore/dbcore"
-	dbcorepostgres "github.com/dbcore/dbcore/postgres"
+	dbc "github.com/Ben-guanzhi/dbcore"
+	dbcorepostgres "github.com/Ben-guanzhi/dbcore/postgres"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 

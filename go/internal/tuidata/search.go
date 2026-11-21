@@ -3,7 +3,7 @@ package tuidata
 import (
 	"strings"
 
-	fuzzy "github.com/dbcore/dbcore/fuzzy"
+	fuzzy "github.com/Ben-guanzhi/dbcore/fuzzy"
 )
 
 // SearchExact returns the indices of rows where at least one cell's display

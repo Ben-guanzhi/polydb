@@ -26,9 +26,9 @@ type OpRowSpec struct {
 
 // OpsSpec is the whole registry document.
 type OpsSpec struct {
-	Title      string      `json:"title"`
-	DDLs       []string    `json:"ddl_dialects"`
-	Ops        []OpRowSpec `json:"ops"`
+	Title string      `json:"title"`
+	DDLs  []string    `json:"ddl_dialects"`
+	Ops   []OpRowSpec `json:"ops"`
 }
 
 // LoadOpsSpec reads and validates the op-registry spec file.

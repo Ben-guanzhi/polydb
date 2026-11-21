@@ -6,7 +6,7 @@ package server
 import (
 	"time"
 
-	"github.com/dbcore/dbcore/usability"
+	"github.com/Ben-guanzhi/dbcore/usability"
 )
 
 // us 是 server 进程共享的记录器；nil 表示未开启。

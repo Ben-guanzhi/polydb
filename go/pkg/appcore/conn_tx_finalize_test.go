@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	dbc "github.com/dbcore/dbcore"
+	dbc "github.com/Ben-guanzhi/dbcore"
 	"github.com/polydb/polydb/pkg/dbcore"
 	"github.com/polydb/polydb/pkg/dbcore/bridge"
 	"github.com/polydb/polydb/pkg/dbsqlite"

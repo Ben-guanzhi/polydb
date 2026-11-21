@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"testing"
 
-	dbc "github.com/dbcore/dbcore"
-	"github.com/dbcore/dbcore/drivertest"
+	dbc "github.com/Ben-guanzhi/dbcore"
+	"github.com/Ben-guanzhi/dbcore/drivertest"
 )
 
 // TestDBCoreContractViaConn proves the cutover: *Conn itself is now a dbcore.SQLTxDriver
-// (Option B), so it runs the shared github.com/dbcore/dbcore contract directly — no
+// (Option B), so it runs the shared github.com/Ben-guanzhi/dbcore contract directly — no
 // adapter shim. This replaces the earlier DBCoreDriver pilot wrapper.
 func TestDBCoreContractViaConn(t *testing.T) {
 	drivertest.Harness{

@@ -14,8 +14,8 @@ import (
 
 	goredis "github.com/redis/go-redis/v9"
 
-	dbc "github.com/dbcore/dbcore"
-	dbcoreredis "github.com/dbcore/dbcore/redis"
+	dbc "github.com/Ben-guanzhi/dbcore"
+	dbcoreredis "github.com/Ben-guanzhi/dbcore/redis"
 
 	"github.com/polydb/polydb/pkg/dbcore"
 	"github.com/polydb/polydb/pkg/protocol"

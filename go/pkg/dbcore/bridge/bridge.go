@@ -1,5 +1,5 @@
 // Package bridge is the thin re-export / interop layer that makes polydb a consumer
-// of the shared github.com/dbcore/dbcore module (DB-CORE-CONTRACT.md, consolidation
+// of the shared github.com/Ben-guanzhi/dbcore module (DB-CORE-CONTRACT.md, consolidation
 // step "polydb adoption — Option A: thin re-export").
 //
 // Design notes / why a separate package (not aliases in pkg/dbcore):
@@ -23,7 +23,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/dbcore/dbcore"
+	"github.com/Ben-guanzhi/dbcore"
 	polydbdb "github.com/polydb/polydb/pkg/dbcore"
 	"github.com/polydb/polydb/pkg/protocol"
 )
