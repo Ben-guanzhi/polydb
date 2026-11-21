@@ -9,6 +9,7 @@ import QueryWorkspace from './components/QueryWorkspace';
 import ObjectTabStrip from './components/ObjectTabStrip';
 import TableTab from './components/TableTab';
 import QueryLogPanel from './components/QueryLogPanel';
+import OpsPanel from './components/OpsPanel';
 import StartScreen from './components/StartScreen';
 import CollapsiblePane from './components/CollapsiblePane';
 import CommandPalette from './components/CommandPalette';
@@ -39,7 +40,7 @@ function loadView(): { activeView: ViewId; sidebarWidth: number } {
     const raw = localStorage.getItem(LAYOUT_KEY);
     if (!raw) return def;
     const o = JSON.parse(raw);
-    const valid: ViewId[] = ['explorer', 'schema', 'log'];
+    const valid: ViewId[] = ['explorer', 'schema', 'log', 'ops'];
     if (o && valid.includes(o.activeView)) def.activeView = o.activeView;
     if (o && typeof o.sidebarWidth === 'number' && o.sidebarWidth >= 200 && o.sidebarWidth <= 600) def.sidebarWidth = o.sidebarWidth;
   } catch { /* ignore */ }
@@ -61,6 +62,7 @@ const ICONS: Record<ViewId, JSX.Element> = {
   explorer: <Svg d="M3 5h18v14H3zM9 5v14" />,
   schema: <Svg d="M3 4h18v16H3zM3 9h18M9 9v11M15 9v11" />,
   log: <Svg d="M4 5h16v14H4zM4 9h16M4 13h10" />,
+  ops: <Svg d="M14.7 6.3a4 4 0 0 0-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 0 0 5.4-5.4l-2.3 2.3-2-2 2.3-2.3z" />,
 };
 
 // 活动栏底部动作区（非视图切换）
@@ -429,6 +431,7 @@ export default function App() {
             { id: 'explorer', label: '资源管理器 · 连接', hotkey: 'Ctrl+1', icon: ICONS.explorer, active: layout.activeView === 'explorer', badge: connections.length || undefined },
             { id: 'schema', label: '数据库 · 库表', hotkey: 'Ctrl+2', icon: ICONS.schema, active: layout.activeView === 'schema' },
             { id: 'log', label: '查询日志', hotkey: 'Ctrl+3', icon: ICONS.log, active: layout.activeView === 'log', badge: stats.length || undefined },
+        { id: 'ops', label: '运维', hotkey: 'Ctrl+4', icon: ICONS.ops, active: layout.activeView === 'ops', badge: stats.length || undefined },
           ]}
           actions={[
             {
@@ -490,6 +493,21 @@ export default function App() {
                   onPick={handleLogPick}
                   onClear={handleClearLog}
                 />
+              </div>
+            </CollapsiblePane>
+          </div>
+          <div style={{ width: layout.sidebarWidth, height: '100%', display: layout.activeView === 'ops' ? 'flex' : 'none', flexDirection: 'column' }}>
+            <CollapsiblePane title="运维 · 会话 / 变量 / 用户 / 造数" variant="main" defaultCollapsed={false}>
+              <div style={{ height: '100%' }}>
+                {conn ? (
+                  conn.kind !== 'redis' ? (
+                    <OpsPanel connId={conn.id} />
+                  ) : (
+                    <div className="pane-body"><div className="empty">Redis 连接无运维面（引擎不支持会话/变量/用户体系）。</div></div>
+                  )
+                ) : (
+                  <div className="pane-body"><div className="empty">选择连接后使用运维面板。</div></div>
+                )}
               </div>
             </CollapsiblePane>
           </div>

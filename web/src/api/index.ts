@@ -183,6 +183,45 @@ export interface IndexColumn {
   prefix_length?: number | null;
 }
 
+// ─── 运维四件套（§376）：会话 / 服务器变量 / 用户 / 造数 ──────
+
+export interface ServerProcess {
+  id: string;
+  user: string;
+  client?: string;
+  db?: string;
+  state?: string;
+  command?: string;
+  query?: string;
+  time?: string;
+}
+
+export interface ServerVariable {
+  name: string;
+  value: string;
+  default?: string;
+}
+
+export interface ServerUser {
+  name: string;
+  host?: string;
+}
+
+export interface UserOpsRequest {
+  action: 'create' | 'drop' | 'grant';
+  user: string;
+  host?: string;
+  password?: string;
+  grant_db?: string;
+}
+
+export interface GenDataRequest {
+  schema?: string;
+  table: string;
+  rows?: number;
+  seed?: number;
+}
+
 export interface ForeignKeyInfo {
   name: string;
   /** Local column names */

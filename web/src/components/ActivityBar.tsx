@@ -1,6 +1,6 @@
 import type { CSSProperties, ReactNode } from 'react';
 
-export type ViewId = 'explorer' | 'schema' | 'log';
+export type ViewId = 'explorer' | 'schema' | 'log' | 'ops';
 
 export interface ActivityItem {
   id: ViewId;

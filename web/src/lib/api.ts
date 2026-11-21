@@ -24,8 +24,13 @@ import type {
   SchemaDiffPlan,
   SchemaDiffRequest,
   SchemaInfo,
+  ServerProcess,
+  ServerUser,
+  ServerVariable,
   TableCountResult,
   TableInfo,
+  UserOpsRequest,
+  GenDataRequest,
   TableRowsRequest,
   TableRowsResult,
   TransactionInfo,
@@ -189,6 +194,32 @@ export function executeBatch(id: string, req: BatchQueryRequest) {
 
 export function cancelQuery(queryId: string) {
   return request<void>('POST', `/api/queries/${encodeURIComponent(queryId)}/cancel`);
+}
+
+// ─── 运维四件套（§376）──────────────────────────────────────
+
+export function listServerProcesses(id: string) {
+  return list<ServerProcess>(enc(id, '/processes'));
+}
+
+export function killServerProcess(id: string, pid: string) {
+  return request<{ killed: string }>('POST', enc(id, `/processes/${encodeURIComponent(pid)}/kill`));
+}
+
+export function listServerVariables(id: string) {
+  return list<ServerVariable>(enc(id, '/variables'));
+}
+
+export function listServerUsers(id: string) {
+  return list<ServerUser>(enc(id, '/users'));
+}
+
+export function generateUserDDL(id: string, req: UserOpsRequest) {
+  return request<{ sql: string }>('POST', enc(id, '/users/ddl'), req);
+}
+
+export function generateTestData(id: string, req: GenDataRequest) {
+  return request<{ rows: number }>('POST', enc(id, '/datagen'), req);
 }
 
 // ─── 事务 ──────────────────────────────────────────────────

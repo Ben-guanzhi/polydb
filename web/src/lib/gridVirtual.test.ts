@@ -1,3 +1,5 @@
+﻿import { describe, it, expect } from 'vitest';
+
 import { computeVisibleRange, ROW_HEIGHT, OVERSCAN } from './gridVirtual';
 
 // 波 100：虚拟窗口的算术契约——与 TableProGo 的 virtual.test.ts、db-dev 的
