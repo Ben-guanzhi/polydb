@@ -132,3 +132,8 @@ func browseResultToDBCore(r *protocol.TableRowsResult, total uint64) *dbc.TableR
 // sqlTxShim adapts a dbcore.SQLTx to polydb's pdb.SQLTx (identical method set), so the
 // wrapped *Conn's ExecuteIn can run on the transaction produced by dbcore.TxManager.
 type sqlTxShim struct{ dbc.SQLTx }
+
+// KernelDriver 转发到内层 *Conn（§376 逃生舱：协议包装器透明递内核面）。
+func (p *ProtocolDriver) KernelDriver() (any, bool) {
+	return p.c.KernelDriver()
+}

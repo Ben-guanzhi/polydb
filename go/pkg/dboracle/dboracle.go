@@ -54,6 +54,12 @@ func (c *Conn) Close() error                   { return c.db.Close() }
 func (c *Conn) AsSQL() (dbc.SQLDriver, bool)   { return c, true }
 func (c *Conn) AsKV() (dbc.KVDriver, bool)     { return nil, false }
 
+// KernelDriver 把自己作为内核驱动递出（Conn 原生满足 dbc.SQLTxDriver，
+// 内核的能力断言——ProcessLister/ServerVariables/UserAdmin——由此可达）。
+func (c *Conn) KernelDriver() (any, bool) {
+	return c, true
+}
+
 func (c *Conn) Execute(ctx context.Context, query string, args ...dbc.Value) (*dbc.QueryResult, error) {
 	return c.kern.Execute(ctx, query, args...)
 }

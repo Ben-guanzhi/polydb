@@ -330,3 +330,8 @@ func (c *Conn) browseRowsCountP(ctx context.Context, schema, table string, req *
 	}
 	return pdb.CountResultToUint64(res)
 }
+
+// KernelDriver 转发到内层 *Conn（§376 逃生舱：协议包装器透明递内核面）。
+func (p *ProtocolDriver) KernelDriver() (any, bool) {
+	return p.c.KernelDriver()
+}

@@ -24,6 +24,21 @@ type Driver interface {
 	AsKV() (KVDriver, bool)
 }
 
+// KernelDriver 是可选的内核逃生舱（§376）：polydb 的引擎 Conn 同时实现
+// github.com/Ben-guanzhi/dbcore 的原生契约（SQLTxDriver 等），实现本接口
+// 即可把内核的能力断言（ProcessLister/ServerVariables/UserAdmin 等）递给
+// 真实驱动，appcore 不必为每个引擎包写转发方法。返回 (nil, false) 表示
+// 该驱动没有内核面（纯 protocol 实现）。
+//
+// 返回 any 而非内核接口类型：本包不 import 内核（协议层的独立性），
+// 断言在 appcore 的内核侧完成。
+//
+// 与 bridge.go 注释的 Option B 分工一致：不做接口全迁移，只暴露这一个
+// 类型断言点——polydb 的协议类型面保持独立，内核能力按需可达。
+type KernelDriver interface {
+	KernelDriver() (any, bool)
+}
+
 // SQLDriver 提供关系型数据库能力。
 type SQLDriver interface {
 	Driver

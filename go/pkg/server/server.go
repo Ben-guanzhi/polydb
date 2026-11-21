@@ -180,6 +180,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/connections/{id}/query", s.executeQuery)
 	mux.HandleFunc("POST /api/connections/{id}/query/batch", s.executeBatchQuery)
 	mux.HandleFunc("POST /api/queries/{query_id}/cancel", s.cancelQuery)
+	mux.HandleFunc("GET /api/connections/{id}/processes", s.handleProcesses)
+	mux.HandleFunc("POST /api/connections/{id}/processes/{pid}/kill", s.handleKillProcess)
+	mux.HandleFunc("GET /api/connections/{id}/variables", s.handleVariables)
+	mux.HandleFunc("GET /api/connections/{id}/users", s.handleUsers)
+	mux.HandleFunc("POST /api/connections/{id}/users/ddl", s.handleUserDDL)
+	mux.HandleFunc("POST /api/connections/{id}/datagen", s.handleGenData)
 
 	mux.HandleFunc("GET /api/connections/{id}/schemas/{schema}/tables/{table}/ddl", s.getDDL)
 	mux.HandleFunc("POST /api/schema/diff", s.diffSchema)
