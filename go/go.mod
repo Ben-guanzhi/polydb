@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	charm.land/bubbletea/v2 v2.0.8
 	charm.land/lipgloss/v2 v2.0.5
-	github.com/Ben-guanzhi/dbcore v0.2.0
+	github.com/Ben-guanzhi/dbcore v0.18.4
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
@@ -16,8 +16,8 @@ require (
 	github.com/sijms/go-ora/v2 v2.9.0
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	github.com/zalando/go-keyring v0.2.8
-	golang.org/x/crypto v0.55.0
-	golang.org/x/sync v0.22.0
+	golang.org/x/crypto v0.59.0
+	golang.org/x/sync v0.25.0
 	golang.org/x/sys v0.50.0
 	modernc.org/sqlite v1.58.0
 )
@@ -52,7 +52,7 @@ require (
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	go.uber.org/atomic v1.11.0 // indirect
-	golang.org/x/text v0.41.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
 	modernc.org/libc v1.75.6 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
