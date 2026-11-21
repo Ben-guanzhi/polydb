@@ -67,6 +67,10 @@ CREATE TABLE IF NOT EXISTS connections (
 	if _, err := db.Exec(ddl); err != nil {
 		return fmt.Errorf("init schema: %w", err)
 	}
+	// 片段收藏表（§387，与 web 的 customTemplates 对等）。
+	if err := initSnippetsSchema(db); err != nil {
+		return err
+	}
 	// M10 迁移：老库没有 read_only 列。列已存在时报错属预期，忽略。
 	if _, err := db.Exec("ALTER TABLE connections ADD COLUMN read_only INTEGER NOT NULL DEFAULT 0"); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 		return fmt.Errorf("migrate read_only: %w", err)
