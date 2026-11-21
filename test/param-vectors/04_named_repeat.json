@@ -1,0 +1,13 @@
+{
+  "name": "04_named_repeat",
+  "note": "同名占位符共享序位（一个值填两处）",
+  "sql": "SELECT * FROM t WHERE a = :x AND b = :x",
+  "labels": [
+    "x",
+    "x"
+  ],
+  "rewrite": {
+    "db_type": "postgres",
+    "sql": "SELECT * FROM t WHERE a = $1 AND b = $1"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "08_backtick_ident",
+  "note": "反引号标识符内的 ? 不是参数",
+  "sql": "SELECT a`?`b FROM t WHERE c = ?",
+  "labels": [
+    "1"
+  ],
+  "rewrite": {
+    "db_type": "mysql",
+    "sql": "SELECT a`?`b FROM t WHERE c = ?"
+  }
+}

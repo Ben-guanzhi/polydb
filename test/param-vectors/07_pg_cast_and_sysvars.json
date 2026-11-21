@@ -1,0 +1,13 @@
+{
+  "name": "07_pg_cast_and_sysvars",
+  "note": "::type 强转不算；@@var 系统变量跳过；@user 是 MSSQL 参数",
+  "sql": "SELECT a::int, @@version, @user FROM t WHERE b = ?",
+  "labels": [
+    "user",
+    "2"
+  ],
+  "rewrite": {
+    "db_type": "mysql",
+    "sql": "SELECT a::int, @@version, ? FROM t WHERE b = ?"
+  }
+}

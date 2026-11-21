@@ -1,0 +1,11 @@
+[package]
+name = "polydb-params"
+version.workspace = true
+edition.workspace = true
+description = "SQL placeholder extraction/rewrite pure functions — dual-impl vectors against dbcore/sqltext"
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

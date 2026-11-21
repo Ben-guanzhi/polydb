@@ -1,0 +1,13 @@
+{
+  "name": "01_positional_question",
+  "note": "MySQL/SQLite 的 ? 位置式：按出现顺序绑定",
+  "sql": "SELECT * FROM t WHERE a = ? AND b = ?",
+  "labels": [
+    "1",
+    "2"
+  ],
+  "rewrite": {
+    "db_type": "postgres",
+    "sql": "SELECT * FROM t WHERE a = $1 AND b = $2"
+  }
+}

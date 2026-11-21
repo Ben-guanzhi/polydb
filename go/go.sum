@@ -16,8 +16,8 @@ github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/internal v1.2.0 h1:nCYfg
 github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/internal v1.2.0/go.mod h1:ucUjca2JtSZboY8IoUqyQyuuXvwbMBVwFOm0vdQPNhA=
 github.com/AzureAD/microsoft-authentication-library-for-go v1.8.0 h1:Nljr4q1GRA/5vCrMONS+g4u4LRHNgOXVSh3O43J2CnI=
 github.com/AzureAD/microsoft-authentication-library-for-go v1.8.0/go.mod h1:Y33QHnf0FfdVewFFISOGe20mkZbxX4H839o955/PoeI=
-github.com/Ben-guanzhi/dbcore v0.18.4 h1:bPL794HqvwX+3OSsOT3C5mzvP5X2Bl8vCx1FWfN7fBg=
-github.com/Ben-guanzhi/dbcore v0.18.4/go.mod h1:maIZ2bRSshI6phLBCfmgnMYkEK+OiVn8YYQIINAUBA0=
+github.com/Ben-guanzhi/dbcore v0.18.5 h1:1TP/nItoJhdESl8GOaZEgSvs59nG6hhz6cSdcgPlEgc=
+github.com/Ben-guanzhi/dbcore v0.18.5/go.mod h1:maIZ2bRSshI6phLBCfmgnMYkEK+OiVn8YYQIINAUBA0=
 github.com/alicebob/miniredis/v2 v2.40.0 h1:6IgTQbvm2JiMYZ8yur/acNJzVjtSOWCelxXbk/LUBXc=
 github.com/alicebob/miniredis/v2 v2.40.0/go.mod h1:TcL7YfarKPGDAthEtl5NBeHZfeUQj6OXMm/+iu5cLMM=
 github.com/aymanbagabas/go-udiff v0.4.1 h1:OEIrQ8maEeDBXQDoGCbbTTXYJMYRCRO1fnodZ12Gv5o=

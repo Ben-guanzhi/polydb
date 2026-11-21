@@ -1,0 +1,13 @@
+{
+  "name": "02_dollar_selfindex",
+  "note": "PG 的 $n 1 基自索引：乱序书写按号取值",
+  "sql": "SELECT * FROM t WHERE a = $2 AND b = $1",
+  "labels": [
+    "2",
+    "1"
+  ],
+  "rewrite": {
+    "db_type": "postgres",
+    "sql": "SELECT * FROM t WHERE a = $2 AND b = $1"
+  }
+}

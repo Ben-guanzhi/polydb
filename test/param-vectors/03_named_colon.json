@@ -1,0 +1,13 @@
+{
+  "name": "03_named_colon",
+  "note": "Oracle/DM 的 :name 具名式：首次出现定序位",
+  "sql": "SELECT * FROM t WHERE a = :name AND b = :lim",
+  "labels": [
+    "name",
+    "lim"
+  ],
+  "rewrite": {
+    "db_type": "postgres",
+    "sql": "SELECT * FROM t WHERE a = $1 AND b = $2"
+  }
+}

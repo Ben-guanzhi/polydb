@@ -1,0 +1,12 @@
+{
+  "name": "06_strings_and_comments",
+  "note": "词法安全：引号串/成双引号/行注释/块注释内的占位符不算",
+  "sql": "SELECT 'a?' , \"b?\" -- ?\n, /* ? */ 1 WHERE d = ?",
+  "labels": [
+    "1"
+  ],
+  "rewrite": {
+    "db_type": "mysql",
+    "sql": "SELECT 'a?' , \"b?\" -- ?\n, /* ? */ 1 WHERE d = ?"
+  }
+}

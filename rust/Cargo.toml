@@ -5,6 +5,7 @@ members = [
     "crates/core",
     "crates/db-core",
     "crates/schema-diff",
+"crates/params",
     "crates/storage",
     "crates/rt",
     "crates/app-core",

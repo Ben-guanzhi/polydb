@@ -1,0 +1,13 @@
+{
+  "name": "05_at_named",
+  "note": "SQL Server 的 @pn 具名式",
+  "sql": "SELECT * FROM t WHERE a = @city AND b = @country",
+  "labels": [
+    "city",
+    "country"
+  ],
+  "rewrite": {
+    "db_type": "sqlserver",
+    "sql": "SELECT * FROM t WHERE a = @p1 AND b = @p2"
+  }
+}

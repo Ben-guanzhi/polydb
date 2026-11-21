@@ -49,3 +49,9 @@ type GenDataRequest struct {
 	Seed   uint64   `json:"seed,omitempty"`
 	Tables []string `json:"tables,omitempty"` // 多表时走 Tables（单表走 Table）
 }
+
+// ParamRef 是一个占位符的展示形态（Label 给表单，Index 是绑定序位）。
+type ParamRef struct {
+	Label string `json:"label" msgpack:"label"`
+	Index int    `json:"index" msgpack:"index"`
+}
