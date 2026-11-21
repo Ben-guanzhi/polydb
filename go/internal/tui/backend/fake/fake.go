@@ -27,6 +27,12 @@ type Client struct {
 	ListIndexesFunc         func(ctx context.Context, id, schema, table string) ([]protocol.IndexInfo, error)
 	ListForeignKeysFunc     func(ctx context.Context, id, schema, table string) ([]protocol.ForeignKeyInfo, error)
 	CreateTableSQLFunc      func(ctx context.Context, id, schema, table string) (string, error)
+	ListServerProcessesFunc func(ctx context.Context, id string) ([]protocol.ServerProcess, error)
+	KillServerProcessFunc   func(ctx context.Context, id, pid string) error
+	ListServerVariablesFunc func(ctx context.Context, id string) ([]protocol.ServerVariable, error)
+	ListServerUsersFunc     func(ctx context.Context, id string) ([]protocol.ServerUser, error)
+	GenerateUserDDLFunc     func(ctx context.Context, id string, req *protocol.UserOpsRequest) (string, error)
+	GenerateTestDataFunc    func(ctx context.Context, id string, req *protocol.GenDataRequest) (int, error)
 	ExecuteFunc             func(ctx context.Context, id, sql string, args ...protocol.Value) (*protocol.QueryResult, error)
 	ExecuteQueryFunc        func(ctx context.Context, queryID, id, sql string, args ...protocol.Value) (*protocol.QueryResult, error)
 	CancelQueryFunc         func(ctx context.Context, queryID string) (bool, error)

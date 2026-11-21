@@ -40,6 +40,22 @@ type Client interface {
 	ListForeignKeys(ctx context.Context, id, schema, table string) ([]protocol.ForeignKeyInfo, error)
 	CreateTableSQL(ctx context.Context, id, schema, table string) (string, error)
 
+	// ─── 运维四件套（§376）：会话 / 服务器变量 / 用户 / 造数 ───
+	// 能力断言在 appcore（引擎不支持时诚实报错），transport 只做路由。
+
+	// ListServerProcesses 列出活动会话（不含当前连接）。
+	ListServerProcesses(ctx context.Context, id string) ([]protocol.ServerProcess, error)
+	// KillServerProcess 终止一个会话。
+	KillServerProcess(ctx context.Context, id, pid string) error
+	// ListServerVariables 列出服务器系统变量（只读）。
+	ListServerVariables(ctx context.Context, id string) ([]protocol.ServerVariable, error)
+	// ListServerUsers 列出可登录用户。
+	ListServerUsers(ctx context.Context, id string) ([]protocol.ServerUser, error)
+	// GenerateUserDDL 生成方言正确的用户 DDL（不执行）。
+	GenerateUserDDL(ctx context.Context, id string, req *protocol.UserOpsRequest) (string, error)
+	// GenerateTestData 造数并执行，返回已执行行数。
+	GenerateTestData(ctx context.Context, id string, req *protocol.GenDataRequest) (int, error)
+
 	// Execute 执行一条 SQL。args 为空时不携带参数。
 	Execute(ctx context.Context, id, sql string, args ...protocol.Value) (*protocol.QueryResult, error)
 
